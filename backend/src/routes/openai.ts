@@ -21,7 +21,15 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
     const node = wsTunnel.getAvailableNode();
     if (!node) return reply.status(503).send({ error: { message: "No compute node online", type: "server_error" } });
 
-    const rawBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body || {});
+    let rawBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body || {});
+    // 安全兜底: max_tokens 未设置或 -1 时设默认值，防止 Qwen 无限思考
+    try {
+      const parsed = JSON.parse(rawBody);
+      if (parsed.max_tokens == null || parsed.max_tokens < 0) {
+        parsed.max_tokens = 4096;
+        rawBody = JSON.stringify(parsed);
+      }
+    } catch (_) {}
     const isStream = rawBody.includes('"stream":true');
 
     try {
