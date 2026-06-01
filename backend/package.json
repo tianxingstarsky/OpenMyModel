@@ -1,5 +1,5 @@
 {
-  "name": "OpenMyModel-backend",
+  "name": "openmymodel-backend",
   "version": "1.0.0",
   "description": "OpenMyModel 云后端 - OpenAI 兼容 API + WebSocket 隧道",
   "main": "dist/index.js",

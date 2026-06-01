@@ -1,4 +1,4 @@
-# OpenMyModel
+﻿# OpenMyModel
 
 ![OpenMyModel](OpenMyModel.png)
 
@@ -68,7 +68,7 @@ flowchart LR
 ## 📂 目录结构
 
 ```
-open_my_model/
+output_my_model/
 ├── frontend/                 # Flutter 桌面应用
 │   ├── lib/
 │   │   ├── main.dart         # 入口
@@ -104,7 +104,7 @@ open_my_model/
 ├── scripts/                  # 工具脚本
 │   └── mock_node.js          # 模拟节点（测试用）
 ├── docs/                     # 文档与截图
-├── OpenMyModel.png                 # README 头图
+├── topic.png                 # README 头图
 ├── logo.png                  # 应用图标
 ├── LICENSE
 └── README.md

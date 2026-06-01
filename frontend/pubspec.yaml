@@ -1,4 +1,4 @@
-name: OpenMyModel
+name: openmymodel
 description: "OpenMyModel - 本地算力云端共享"
 publish_to: 'none'
 version: 1.0.0+1
