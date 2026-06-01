@@ -19,8 +19,22 @@ backend/.env
 # Data (contains passwords/keys)
 backend/data/
 
+# Logs
+*.log
+*.log.*
+
+# Temp scripts
+scripts/*.py
+scripts/node_modules/
+scripts/package-lock.json
+scripts/package.json
+
 # OS
 .DS_Store
 Thumbs.db
 *.swp
 *.swo
+
+# IDE
+.vscode/
+.idea/
