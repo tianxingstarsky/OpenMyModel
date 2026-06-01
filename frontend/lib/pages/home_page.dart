@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:file_picker/file_picker.dart';
 import '../models/server_config.dart';
@@ -43,6 +44,12 @@ class _HomePageState extends State<HomePage> with WindowListener {
     _loadP();
   }
 
+  Future<void> _savePrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString("server_path", tcServer.text);
+    await prefs.setString("model_folder", tcFolder.text);
+  }
+
   Future<void> _startBridge() async {
     try {
       final pythonPath = r"C:\Users\tianx\.conda\envs\myenv\python.exe";
@@ -63,8 +70,8 @@ class _HomePageState extends State<HomePage> with WindowListener {
   }
   Future _loadP() async { try { final p = await _bridge.listProfiles(); if (mounted) setState(() => _profiles = p); } catch (_) {} }
 
-  Future _pickS() async { final r = await FilePicker.platform.pickFiles(dialogTitle:"llama-server.exe",allowedExtensions:["exe"]); if(r!=null&&r.files.single.path!=null) setState(()=>tcServer.text=r.files.single.path!); }
-  Future _pickF() async { final r = await FilePicker.platform.getDirectoryPath(dialogTitle:"模型文件夹"); if(r!=null){setState(()=>tcFolder.text=r);_refresh();} }
+  Future _pickS() async { final r = await FilePicker.platform.pickFiles(dialogTitle:"llama-server.exe",allowedExtensions:["exe"]); if(r!=null&&r.files.single.path!=null) setState(()=>tcServer.text=r.files.single.path!); _savePrefs(); }
+  Future _pickF() async { final r = await FilePicker.platform.getDirectoryPath(dialogTitle:"模型文件夹"); if(r!=null){setState(()=>tcFolder.text=r);_refresh();_savePrefs();} }
 
   Future _start() async {
     if(tcServer.text.isEmpty){_msg("请设置 llama-server.exe 路径");return;}
