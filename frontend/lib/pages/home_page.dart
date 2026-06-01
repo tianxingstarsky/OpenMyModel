@@ -20,7 +20,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
   int _currentIndex = 0;
   final PythonBridge _bridge = PythonBridge();
   final tcServer = TextEditingController();
-  final tcFolder = TextEditingController(text: r"F:\llama_cpp\llama-b9253\models");
+  final tcFolder = TextEditingController();
   final tcModel = TextEditingController();
   final tcMmproj = TextEditingController();
   final tcProfile = TextEditingController();
@@ -39,9 +39,30 @@ class _HomePageState extends State<HomePage> with WindowListener {
   @override
   void initState() {
     super.initState();
+    _loadPrefs();
     _refresh();
     _startBridge();
     _loadP();
+  }
+
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final sp = prefs.getString("server_path");
+    final mf = prefs.getString("model_folder");
+    if (mounted) setState(() {
+      if (sp != null && sp.isNotEmpty) tcServer.text = sp;
+      if (mf != null && mf.isNotEmpty) tcFolder.text = mf;
+    });
+  }
+
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final sp = prefs.getString("server_path");
+    final mf = prefs.getString("model_folder");
+    if (mounted) setState(() {
+      if (sp != null && sp.isNotEmpty) tcServer.text = sp;
+      if (mf != null && mf.isNotEmpty) tcFolder.text = mf;
+    });
   }
 
   Future<void> _savePrefs() async {

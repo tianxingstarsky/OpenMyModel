@@ -17,7 +17,7 @@ class CloudPage extends StatefulWidget {
 
 class _CloudPageState extends State<CloudPage> {
   final WebSocketService _wsService = WebSocketService();
-  final tcUrl = TextEditingController(text: 'aiapi.topofmoon.com:3000');
+  final tcUrl = TextEditingController();
   final tcPwd = TextEditingController();
   final tcKeyName = TextEditingController();
   final tcKeyLimit = TextEditingController();
@@ -97,6 +97,7 @@ class _CloudPageState extends State<CloudPage> {
     });
     tcKeyName.clear(); tcKeyLimit.clear();
     _wsService.syncKeys(List<Map<String, dynamic>>.from(_apiKeys));
+    if (mounted) ft.displayInfoBar(context, builder: (c, cl) => ft.InfoBar(title: Text("Key generated: " + n), severity: ft.InfoBarSeverity.success));
   }
 
   Future _revokeKey(String id) async {
@@ -188,7 +189,7 @@ class _CloudPageState extends State<CloudPage> {
 
       // 连接配置
       _sec('服务器地址'),
-      ft.TextBox(controller: tcUrl, placeholder: 'aiapi.topofmoon.com:3000'),
+      ft.TextBox(controller: tcUrl, placeholder: 'your-server.com:3000'),
       const SizedBox(height: 8),
       _sec('管理员密码'),
       ft.TextBox(controller: tcPwd, placeholder: '密码', obscureText: true),
@@ -251,7 +252,7 @@ class _CloudPageState extends State<CloudPage> {
                 child: const Text('吊销', style: TextStyle(color: Colors.red))),
             ]),
             Text(k['key'] ?? '', style: TextStyle(fontSize: 10, color: Colors.grey[400], fontFamily: 'monospace')),
-            Text('月:  tokens /  累计',
+            Text('月: ${k["monthlyTokens"]} tokens / ${k["totalTokens"]} 累计',
               style: TextStyle(fontSize: 11, color: Colors.grey[500])),
           ]))).toList()),
     ]));
