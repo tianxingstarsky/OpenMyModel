@@ -1,5 +1,7 @@
 ﻿# OpenMyModel
 
+
+> [**English**](README_EN.md) | **中文**
 ![OpenMyModel](OpenMyModel.png)
 
 > **让本地 GPU 算力走出局域网，以标准 OpenAI API 触达世界。**
@@ -63,8 +65,16 @@ flowchart LR
 - **🛠 中文 CLI**：云后端通过向导式命令行完成初始化和管理
 - **⚡ 实时状态**：llama-server 状态、云端连接状态实时跟踪
 
----
 
+## 📸 界面截图
+
+### 首页 — 模型配置与启动
+![首页](首页.png)
+
+### 云端连接 — API Key 管理与节点状态
+![云端连接](云端连接.png)
+
+---
 ## 📂 目录结构
 
 ```

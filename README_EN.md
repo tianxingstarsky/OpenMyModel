@@ -1,5 +1,7 @@
 # OpenMyModel
 
+> [**中文**](README.md) | **English**
+
 ![OpenMyModel](OpenMyModel.png)
 
 > **Bring your local GPU compute to the cloud -- accessible via standard OpenAI API.**
