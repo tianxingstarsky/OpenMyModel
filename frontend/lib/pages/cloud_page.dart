@@ -36,8 +36,15 @@ class _CloudPageState extends State<CloudPage> {
     _wsService.setModelName(widget.modelName);
     _wsService.messages.listen((msg) {
       final type = msg['type'] as String?;
-      if (type == 'auth_ok') setState(() { _connected = true; _connStatus = '已连接'; });
-      if (type == 'disconnected') setState(() { _connected = false; _connStatus = '已断开'; });
+      if (type == 'auth_ok') {
+        setState(() { _connected = true; _connStatus = 'connected'; });
+        _wsService.syncKeys(List<Map<String, dynamic>>.from(_apiKeys));
+      }
+      if (type == 'keys_synced') {
+        final keys = msg['keys'] as List?;
+        if (keys != null) setState(() => _apiKeys = keys);
+      }
+      if (type == 'disconnected') setState(() { _connected = false; _connStatus = 'disconnected'; });
     });
   }
 
@@ -63,34 +70,47 @@ class _CloudPageState extends State<CloudPage> {
   void _disconnect() { _wsService.disconnect(); setState(() { _connected = false; _connStatus = '已断开'; }); }
 
   Future _loadKeys() async {
-    final d = tcUrl.text.trim(); final p = tcPwd.text;
-    try {
-      final r = await http.get(Uri.parse('http:///admin/keys'), headers: {'x-admin-password': p});
-      if (r.statusCode == 200) {
-        final keys = jsonDecode(r.body) as List;
-        setState(() => _apiKeys = keys);
-        // 找出第一个活跃的 key 用于测试
-        if (keys.isNotEmpty) {
-          final active = keys.firstWhere((k) => k['isActive'] == true, orElse: () => keys.first);
-          _testApiKey = active['key'] ?? '';
-        }
-      }
-    } catch (_) {}
+    // Keys managed locally; synced via WebSocket
+  }
+
+  String _genKey() {
+    final r = List.generate(48, (_) => '0123456789abcdef'[DateTime.now().microsecondsSinceEpoch % 16]);
+    return 'sk-oom-${r.join()}';
   }
 
   Future _createKey() async {
-    final d = tcUrl.text.trim(); final n = tcKeyName.text.trim(); final l = int.tryParse(tcKeyLimit.text) ?? 0;
+    final n = tcKeyName.text.trim(); final l = int.tryParse(tcKeyLimit.text) ?? 0;
     if (n.isEmpty) return;
-    try {
-      await http.post(Uri.parse('http:///admin/keys'),
-        headers: {'Content-Type': 'application/json', 'x-admin-password': tcPwd.text},
-        body: jsonEncode({'name': n, 'tokenLimit': l}));
-      tcKeyName.clear(); tcKeyLimit.clear(); _loadKeys();
-    } catch (_) {}
+    final newKey = {
+      'id': DateTime.now().millisecondsSinceEpoch.toRadixString(36),
+      'name': n,
+      'key': _genKey(),
+      'createdAt': DateTime.now().toIso8601String(),
+      'isActive': true,
+      'totalTokens': 0, 'totalRequests': 0,
+      'monthlyTokens': 0, 'monthlyRequests': 0,
+      'tokenLimit': l,
+    };
+    setState(() {
+      _apiKeys = [..._apiKeys, newKey];
+      if (_testApiKey.isEmpty) _testApiKey = newKey['key'] as String;
+    });
+    tcKeyName.clear(); tcKeyLimit.clear();
+    _wsService.syncKeys(List<Map<String, dynamic>>.from(_apiKeys));
   }
 
   Future _revokeKey(String id) async {
-    try { await http.delete(Uri.parse('http:///admin/keys/'), headers: {'x-admin-password': tcPwd.text}); _loadKeys(); } catch (_) {}
+    setState(() {
+      _apiKeys = _apiKeys.map((k) {
+        if (k['id'] == id) {
+          final updated = Map<String, dynamic>.from(k);
+          updated['isActive'] = false;
+          return updated;
+        }
+        return k;
+      }).toList();
+    });
+    _wsService.syncKeys(List<Map<String, dynamic>>.from(_apiKeys));
   }
 
   // ==================== 测试按钮 (多模态) ====================
@@ -119,7 +139,7 @@ class _CloudPageState extends State<CloudPage> {
       };
 
       final client = http.Client();
-      final request = http.Request('POST', Uri.parse('http:///v1/chat/completions'));
+      final request = http.Request('POST', Uri.parse('http://$d/v1/chat/completions'));
       request.headers['Content-Type'] = 'application/json';
       request.headers['Authorization'] = 'Bearer ';
       request.body = jsonEncode(body);

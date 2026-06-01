@@ -77,6 +77,12 @@ class WebSocketService {
 
   void _sendErr(String rid, String e) => _ch?.sink.add(jsonEncode({'type':'chat_error','requestId':rid,'error':e}));
 
+  void syncKeys(List<Map<String, dynamic>> keys) {
+    if (_connected && _ch != null) {
+      _ch!.sink.add(jsonEncode({'type':'sync_keys','keys':keys}));
+    }
+  }
+
   void disconnect() { _sub?.cancel(); _ch?.sink.close(); _connected = false; }
   void sendStatusUpdate(String n) { _modelName = n; if (_connected) _ch?.sink.add(jsonEncode({'type':'status_update','modelName':n})); }
   void dispose() { disconnect(); _msgCtrl.close(); }

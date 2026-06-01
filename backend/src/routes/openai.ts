@@ -26,19 +26,17 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
 
     const body = request.body as any;
     const stream = body?.stream === true;
-    const forwardData: any = { ...body };
-    delete forwardData.type;
 
     try {
       if (stream) {
         reply.hijack();
         reply.raw.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
-        const result: any = await wsTunnel.forwardToNode(node.nodeId, forwardData);
+        const result: any = await wsTunnel.forwardToNode(node.nodeId, body);
         if (result?.chunks) for (const c of result.chunks) reply.raw.write("data: " + JSON.stringify(c) + "\n\n");
         reply.raw.write("data: [DONE]\n\n");
         reply.raw.end();
       } else {
-        return await wsTunnel.forwardToNode(node.nodeId, forwardData);
+        return await wsTunnel.forwardToNode(node.nodeId, body);
       }
     } catch (err: any) {
       if (stream) {

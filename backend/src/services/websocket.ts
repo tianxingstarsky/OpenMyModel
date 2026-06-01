@@ -1,7 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { WebSocket } from "ws";
 import { verifyAdminPassword } from "./auth";
-import { nodes, db } from "../db/schema";
+import { nodes, db, apiKeys as apiKeysTable } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 
@@ -24,6 +24,31 @@ interface TunnelConnection {
     reject: (reason: any) => void;
     timeout: NodeJS.Timeout;
   }>;
+}
+
+function syncApiKeys(keys) {
+  const existingIds = new Set(db.select({id: apiKeysTable.id}).from(apiKeysTable).all().map(r => r.id));
+  for (const k of keys) {
+    if (existingIds.has(k.id)) {
+      db.update(apiKeysTable).set({ name: k.name, key: k.key, isActive: k.isActive !== false, tokenLimit: k.tokenLimit || 0 })
+        .where(eq(apiKeysTable.id, k.id)).run();
+    } else {
+      try {
+        db.insert(apiKeysTable).values({
+          id: k.id, name: k.name, key: k.key, createdAt: k.createdAt || new Date().toISOString(),
+          isActive: k.isActive !== false, totalTokens: 0, totalRequests: 0,
+          monthlyTokens: 0, monthlyRequests: 0, tokenLimit: k.tokenLimit || 0,
+        }).run();
+      } catch (_) {}
+    }
+  }
+  const syncIds = new Set(keys.map(k => k.id));
+  for (const id of existingIds) {
+    if (!syncIds.has(id)) db.update(apiKeysTable).set({ isActive: false }).where(eq(apiKeysTable.id, id)).run();
+  }
+}
+function getSyncedKeys() {
+  return db.select().from(apiKeysTable).all();
 }
 
 class WebSocketTunnel {
@@ -114,7 +139,10 @@ class WebSocketTunnel {
               break;
 
             case "sync_keys":
-              // 前端同步 API Key 数据
+              if (msg.keys && Array.isArray(msg.keys)) {
+                syncApiKeys(msg.keys);
+                socket.send(JSON.stringify({ type: "keys_synced", keys: getSyncedKeys() }));
+              }
               break;
           }
         } catch (e) {

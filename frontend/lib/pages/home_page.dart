@@ -150,19 +150,42 @@ class _HomePageState extends State<HomePage> with WindowListener {
     }).toList());
   }
 
-  Widget _params()=>Padding(padding:EdgeInsets.only(top:12),child:Wrap(spacing:14,runSpacing:10,children:[
-    _ip("ngl",_cfg.nGpuLayers,(v)=>_cfg.nGpuLayers=v),_ip("c",_cfg.contextSize,(v)=>_cfg.contextSize=v),
-    _ip("b",_cfg.batchSize,(v)=>_cfg.batchSize=v),_ip("ub",_cfg.ubatchSize,(v)=>_cfg.ubatchSize=v),
-    _ip("t",_cfg.threads,(v)=>_cfg.threads=v),_ip("np",_cfg.slots,(v)=>_cfg.slots=v),
-    _ip("port",_cfg.port,(v)=>_cfg.port=v),
-    _dp("缓存K",_cfg.cacheTypeK,["f16","q8_0","q4_0"],(v)=>_cfg.cacheTypeK=v),
-    _dp("缓存V",_cfg.cacheTypeV,["f16","q8_0","q4_0"],(v)=>_cfg.cacheTypeV=v),
-    _tp("FA",_cfg.flashAttn,(v)=>_cfg.flashAttn=v),_tp("mlock",_cfg.mlLock,(v)=>_cfg.mlLock=v),
-    _tp("cbatch",_cfg.contBatching,(v)=>_cfg.contBatching=v),_tp("embed",_cfg.embeddings,(v)=>_cfg.embeddings=v),
+  Widget _params()=>Padding(padding:EdgeInsets.only(top:12),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+    _section("核心参数"),SizedBox(height:10),
+    _num("--n-gpu-layers","GPU 层数","加载到 GPU 的模型层数，-1=全部加载到显存",_cfg.nGpuLayers,(v)=>setState(()=>_cfg.nGpuLayers=v)),
+    _num("--ctx-size","上下文长度","模型最大上下文窗口，如 32768/128000",_cfg.contextSize,(v)=>setState(()=>_cfg.contextSize=v)),
+    _num("--batch-size","批处理大小","并行处理的 token 数量，影响吞吐量",_cfg.batchSize,(v)=>setState(()=>_cfg.batchSize=v)),
+    _num("--ubatch-size","微批处理","单次推理的最小批次，一般为 batch/4",_cfg.ubatchSize,(v)=>setState(()=>_cfg.ubatchSize=v)),
+    _num("--threads","CPU 线程数","推理使用的 CPU 线程，0=自动检测",_cfg.threads,(v)=>setState(()=>_cfg.threads=v)),
+    _num("--parallel","并行槽位","同时处理的最大并发请求数",_cfg.slots,(v)=>setState(()=>_cfg.slots=v)),
+    _num("--port","服务端口","llama-server HTTP 监听端口",_cfg.port,(v)=>setState(()=>_cfg.port=v)),
+    SizedBox(height:16), _section("缓存量化"),SizedBox(height:10),
+    _choice("--cache-type-k","K 缓存量化","Key 缓存的量化精度，q8_0 推荐",_cfg.cacheTypeK,["f16","q8_0","q4_0"],(v)=>setState(()=>_cfg.cacheTypeK=v)),
+    _choice("--cache-type-v","V 缓存量化","Value 缓存的量化精度，q8_0 推荐",_cfg.cacheTypeV,["f16","q8_0","q4_0"],(v)=>setState(()=>_cfg.cacheTypeV=v)),
+    SizedBox(height:16), _section("功能开关"),SizedBox(height:10),
+    _bool("--flash-attn","Flash Attention","启用 FA 加速推理，减少显存占用",_cfg.flashAttn,(v)=>setState(()=>_cfg.flashAttn=v)),
+    _bool("--mlock","内存锁定","锁定模型到物理内存，防止 swap 影响性能",_cfg.mlLock,(v)=>setState(()=>_cfg.mlLock=v)),
+    _bool("--cont-batching","连续批处理","动态合并请求，提高吞吐量",_cfg.contBatching,(v)=>setState(()=>_cfg.contBatching=v)),
+    _bool("--embeddings","嵌入模式","启用文本嵌入提取功能",_cfg.embeddings,(v)=>setState(()=>_cfg.embeddings=v)),
+    SizedBox(height:8),
+    ft.Expander(header:Text("高级参数",style:TextStyle(fontSize:12,color:Colors.grey[600])),content:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      SizedBox(height:10),
+      _num("--rope-freq-base","RoPE 基础频率","位置编码基准频率，0=自动",_cfg.ropeFreqBase.toInt(),(v)=>setState(()=>_cfg.ropeFreqBase=v.toDouble())),
+      _num("--rope-freq-scale","RoPE 缩放","位置编码缩放因子，用于扩展上下文",_cfg.ropeFreqScale.toInt(),(v)=>setState(()=>_cfg.ropeFreqScale=v.toDouble())),
+      _num("--yarn-ext-factor","YaRN 扩展因子","NTK 感知外推的扩展系数",_cfg.yarnExtFactor.toInt(),(v)=>setState(()=>_cfg.yarnExtFactor=v.toDouble())),
+      _num("--yarn-attn-factor","YaRN 注意力因子","注意力分配的缩放比例",_cfg.yarnAttnFactor.toInt(),(v)=>setState(()=>_cfg.yarnAttnFactor=v.toDouble())),
+      _bool("--no-kv-offload","禁用 KV 卸载","强制 KV 缓存留在显存",_cfg.noKvOffload,(v)=>setState(()=>_cfg.noKvOffload=v)),
+      _bool("--no-mmap","禁用 mmap","不使用内存映射加载模型",_cfg.noMmap,(v)=>setState(()=>_cfg.noMmap=v)),
+      SizedBox(height:8),
+      _section("额外启动参数"),SizedBox(height:6),
+      SizedBox(width:400,child:ft.TextBox(placeholder:"其他 llama-server 命令行参数",onChanged:(v)=>_cfg.extraArgs=v)),
+    ]),initiallyExpanded:false),
   ]));
-  Widget _ip(String l,int v,Function(int)s)=>SizedBox(width:150,child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(l,style:TextStyle(fontSize:11,color:Colors.grey)),ft.TextBox(controller:TextEditingController(text:v.toString()),onChanged:(x){final n=int.tryParse(x);if(n!=null){s(n);setState((){});}})]));
-  Widget _dp(String l,String v,List<String>o,Function(String)s)=>SizedBox(width:150,child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(l,style:TextStyle(fontSize:11,color:Colors.grey)),ft.ComboBox(value:v,items:o.map((x)=>ft.ComboBoxItem(value:x,child:Text(x))).toList(),onChanged:(x){if(x!=null){s(x);setState((){});}})]));
-  Widget _tp(String l,bool v,Function(bool)s)=>SizedBox(width:150,child:Row(children:[SizedBox(width:40,child:ft.ToggleSwitch(checked:v,onChanged:(x){s(x);setState((){});})),SizedBox(width:4),Text(l,style:TextStyle(fontSize:11,color:Colors.grey))]));
+
+  Widget _num(String flag,String name,String desc,int value,Function(int) onChanged)=>Padding(padding:EdgeInsets.only(bottom:10),child:SizedBox(width:380,child:ft.Card(padding:EdgeInsets.all(10),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[Text(flag,style:TextStyle(fontSize:11,fontFamily:"monospace",color:Color(0xFF0078D4))),SizedBox(width:8),Text(name,style:TextStyle(fontSize:13,fontWeight:FontWeight.w600))]),SizedBox(height:4),Text(desc,style:TextStyle(fontSize:11,color:Colors.grey[600])),SizedBox(height:6),SizedBox(width:200,child:ft.TextBox(controller:TextEditingController(text:value.toString()),onChanged:(x){final n=int.tryParse(x);if(n!=null)onChanged(n);}))]))));
+  Widget _choice(String flag,String name,String desc,String value,List<String> options,Function(String) onChanged)=>Padding(padding:EdgeInsets.only(bottom:10),child:SizedBox(width:380,child:ft.Card(padding:EdgeInsets.all(10),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[Text(flag,style:TextStyle(fontSize:11,fontFamily:"monospace",color:Color(0xFF0078D4))),SizedBox(width:8),Text(name,style:TextStyle(fontSize:13,fontWeight:FontWeight.w600))]),SizedBox(height:4),Text(desc,style:TextStyle(fontSize:11,color:Colors.grey[600])),SizedBox(height:6),SizedBox(width:200,child:ft.ComboBox(value:value,items:options.map((o)=>ft.ComboBoxItem(value:o,child:Text(o))).toList(),onChanged:(x){if(x!=null)onChanged(x);}))]))));
+  Widget _bool(String flag,String name,String desc,bool value,Function(bool) onChanged)=>Padding(padding:EdgeInsets.only(bottom:10),child:SizedBox(width:380,child:ft.Card(padding:EdgeInsets.all(10),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[Text(flag,style:TextStyle(fontSize:11,fontFamily:"monospace",color:Color(0xFF0078D4))),SizedBox(width:8),Text(name,style:TextStyle(fontSize:13,fontWeight:FontWeight.w600)),Spacer(),ft.ToggleSwitch(checked:value,onChanged:(v){onChanged(v);})]),Text(desc,style:TextStyle(fontSize:11,color:Colors.grey[600]))]))));
+  Widget _section(String t)=>Text(t,style:TextStyle(fontSize:14,fontWeight:FontWeight.w600));
 
   Widget _profs()=>Padding(padding:EdgeInsets.only(top:12),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
     if(_profiles.isNotEmpty)Wrap(spacing:6,children:_profiles.map((p)=>ft.Card(padding:EdgeInsets.symmetric(horizontal:10,vertical:4),child:Row(mainAxisSize:MainAxisSize.min,children:[GestureDetector(onTap:()=>_loadPf(p["name"]),child:Text(p["name"],style:TextStyle(fontWeight:FontWeight.w500))),SizedBox(width:6),GestureDetector(onTap:(){_bridge.deleteProfile(p["name"]);_loadP();},child:Icon(Icons.close,size:14,color:Colors.grey))]))).toList()),
