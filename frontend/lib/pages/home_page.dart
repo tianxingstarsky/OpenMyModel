@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,6 +19,7 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> with WindowListener {
   int _currentIndex = 0;
+  Timer? _pollTimer;
   final PythonBridge _bridge = PythonBridge();
   final tcServer = TextEditingController();
   final tcFolder = TextEditingController();
@@ -43,6 +45,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
     _refresh();
     _startBridge();
     _loadP();
+    _startPolling();
   }
 
   Future<void> _loadPrefs() async {
@@ -55,15 +58,6 @@ class _HomePageState extends State<HomePage> with WindowListener {
     });
   }
 
-  Future<void> _loadPrefs() async {
-    final prefs = await SharedPreferences.getInstance();
-    final sp = prefs.getString("server_path");
-    final mf = prefs.getString("model_folder");
-    if (mounted) setState(() {
-      if (sp != null && sp.isNotEmpty) tcServer.text = sp;
-      if (mf != null && mf.isNotEmpty) tcFolder.text = mf;
-    });
-  }
 
   Future<void> _savePrefs() async {
     final prefs = await SharedPreferences.getInstance();
@@ -87,7 +81,21 @@ class _HomePageState extends State<HomePage> with WindowListener {
   void _refresh() => setState(() => _files = LocalFileService.listFiles(tcFolder.text));
 
   Future _check() async {
-    try { final s = await _bridge.getStatus(); if (mounted) setState(() { _running = s["running"]??false; _status = _running ? "运行中 - ${s["model"]}" : "已就绪，选择模型后启动"; }); } catch (_) { if (mounted) setState(() => _status = "桥接未就绪"); }
+    try {
+      final s = await _bridge.getStatus();
+      if (mounted) setState(() {
+        _running = s["running"] ?? false;
+        _status = _running ? "运行中 - ${s["model"] ?? ""}" : "已就绪，选择模型后启动";
+      });
+    } catch (_) {
+      if (mounted) setState(() { _running = false; _status = "桥接未就绪"; });
+    }
+  }
+
+  /// 实时轮询 llama-server 状态（每3秒）
+  void _startPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) => _check());
   }
   Future _loadP() async { try { final p = await _bridge.listProfiles(); if (mounted) setState(() => _profiles = p); } catch (_) {} }
 
@@ -126,7 +134,15 @@ class _HomePageState extends State<HomePage> with WindowListener {
     return ft.NavigationView(pane:ft.NavigationPane(selected:_currentIndex,onChanged:(i)=>setState(()=>_currentIndex=i),displayMode:ft.PaneDisplayMode.compact,items:[
       ft.PaneItem(icon:Icon(ft.FluentIcons.home),title:Text("首页"),body:_page(models,mms)),
       ft.PaneItem(icon:Icon(ft.FluentIcons.chat),title:Text("对话"),body: ChatPage(key:_chatKey,bridge:_bridge)),
-      ft.PaneItem(icon:Icon(ft.FluentIcons.cloud),title:Text("云端连接"),body:CloudPage()),
+      ft.PaneItem(
+        icon: Icon(ft.FluentIcons.cloud),
+        title: Text("云端连接"),
+        body: CloudPage(
+          llamaUrl: "http://127.0.0.1:${_cfg.port}",
+          modelName: _running ? tcModel.text.split("\\").last : "",
+          serverRunning: _running,
+        ),
+      ),
     ]));
   }
 
@@ -216,6 +232,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
 
   @override
   void dispose(){
+    _pollTimer?.cancel();
     tcServer.dispose();tcFolder.dispose();tcModel.dispose();tcMmproj.dispose();tcProfile.dispose();_scrollCtrl.dispose();
     _bridgeProcess?.kill(); _bridgeProcess = null;
     super.dispose();
