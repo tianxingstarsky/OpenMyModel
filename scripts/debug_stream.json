@@ -1,0 +1,45 @@
+{
+  "chunkCount": 814,
+  "first": {
+    "choices": [
+      {
+        "finish_reason": null,
+        "index": 0,
+        "delta": {
+          "role": "assistant",
+          "content": null
+        }
+      }
+    ],
+    "created": 1780317533,
+    "id": "chatcmpl-CynYYG92rQuUDXl0T8FP6LI9bUrw5ySw",
+    "model": "Qwen3.5-9B-UD-Q8_K_XL.gguf",
+    "system_fingerprint": "b9253-29f148222",
+    "object": "chat.completion.chunk"
+  },
+  "last": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "delta": {}
+      }
+    ],
+    "created": 1780317577,
+    "id": "chatcmpl-CynYYG92rQuUDXl0T8FP6LI9bUrw5ySw",
+    "model": "Qwen3.5-9B-UD-Q8_K_XL.gguf",
+    "system_fingerprint": "b9253-29f148222",
+    "object": "chat.completion.chunk",
+    "timings": {
+      "cache_n": 0,
+      "prompt_n": 12,
+      "prompt_ms": 373.327,
+      "prompt_per_token_ms": 31.110583333333334,
+      "prompt_per_second": 32.14340243271984,
+      "predicted_n": 847,
+      "predicted_ms": 43433.029,
+      "predicted_per_token_ms": 51.278664698937426,
+      "predicted_per_second": 19.501287833275455
+    }
+  }
+}
