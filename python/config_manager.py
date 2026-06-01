@@ -28,7 +28,7 @@ class ConfigManager:
         if config_dir:
             self.config_dir = Path(config_dir)
         else:
-            self.config_dir = Path.home() / ".outmymodel" / "profiles"
+            self.config_dir = Path.home() / ".OpenMyModel" / "profiles"
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
     def _profile_path(self, name: str) -> Path:

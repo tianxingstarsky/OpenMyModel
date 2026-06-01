@@ -10,17 +10,17 @@ void main() async {
   await windowManager.setMinimumSize(const Size(960, 640));
   await windowManager.setSize(const Size(1200, 800));
   await windowManager.center();
-  await windowManager.setTitle("OutMyModel");
-  runApp(const OutMyModelApp());
+  await windowManager.setTitle("OpenMyModel");
+  runApp(const OpenMyModelApp());
 }
 
-class OutMyModelApp extends StatelessWidget {
-  const OutMyModelApp({super.key});
+class OpenMyModelApp extends StatelessWidget {
+  const OpenMyModelApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return ft.FluentApp(
-      title: "OutMyModel",
+      title: "OpenMyModel",
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.light,
       theme: ft.FluentThemeData(

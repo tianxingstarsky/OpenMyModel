@@ -63,7 +63,7 @@ class WebSocketTunnel {
                 socket.send(JSON.stringify({
                   type: "auth_ok",
                   nodeId: conn.nodeId,
-                  message: "认证成功，已连接到 OutMyModel 云服务",
+                  message: "认证成功，已连接到 OpenMyModel 云服务",
                 }));
 
                 console.log(`Node connected: ${conn.nodeName} (${conn.nodeId})`);

@@ -13,7 +13,7 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
     const nodes = wsTunnel.getOnlineNodes();
     const data = nodes.length > 0
       ? nodes.map(n => ({ id: n.modelName || "local-model", object: "model", created: Math.floor(Date.now()/1000), owned_by: n.name }))
-      : [{ id: "local-model", object: "model", created: Math.floor(Date.now()/1000), owned_by: "outmymodel" }];
+      : [{ id: "local-model", object: "model", created: Math.floor(Date.now()/1000), owned_by: "OpenMyModel" }];
     return { object: "list", data };
   });
 

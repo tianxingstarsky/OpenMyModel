@@ -8,7 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/websocket_service.dart';
 
-/// OutMyModel to Internet - cloud connection + API Key management
+/// OpenMyModel to Internet - cloud connection + API Key management
 
 class CloudPage extends StatefulWidget {
   final String llamaUrl;
@@ -126,7 +126,7 @@ class _CloudPageState extends State<CloudPage> {
     }
     setState(() => _connStatus = "连接中...");
     _savePrefs();
-    final ok = await _wsService.connect(tcUrl.text.trim(), tcPwd.text, nodeName: "OutMyModel-本地节点");
+    final ok = await _wsService.connect(tcUrl.text.trim(), tcPwd.text, nodeName: "OpenMyModel-本地节点");
     setState(() { _connected = ok; _connStatus = ok ? "已连接" : "连接失败"; });
     if (ok) _loadKeys();
   }
@@ -225,7 +225,7 @@ class _CloudPageState extends State<CloudPage> {
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(padding: const EdgeInsets.all(24), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Text("OutMyModel / Internet", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+      const Text("OpenMyModel / Internet", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
       Text("本地算力共享到云端", style: TextStyle(fontSize: 13, color: Colors.grey[500])),
       const SizedBox(height: 16),
 

@@ -28,7 +28,7 @@ async function showConfig() {
   const cfg = loadConfig();
   console.log("");
   console.log("╔══════════════════════════════════════════════╗");
-  console.log("║          OutMyModel 当前配置                  ║");
+  console.log("║          OpenMyModel 当前配置                  ║");
   console.log("╠══════════════════════════════════════════════╣");
   console.log(`║  域名:    ${(cfg.domain || "未设置").padEnd(35)}║`);
   console.log(`║  端口:    ${String(cfg.port).padEnd(35)}║`);
@@ -69,7 +69,7 @@ async function resetPassword() {
 async function setupWizard() {
   console.log("");
   console.log("╔══════════════════════════════════════════════╗");
-  console.log("║       OutMyModel 云后端 - 初始化向导          ║");
+  console.log("║       OpenMyModel 云后端 - 初始化向导          ║");
   console.log("╚══════════════════════════════════════════════╝");
   console.log("");
   const cfg = loadConfig();
@@ -116,7 +116,7 @@ async function main() {
   // Quick status check
   if (args.includes("--status") || args.includes("status")) {
     const cfg = loadConfig();
-    console.log(`OutMyModel 云后端 | 域名: ${cfg.domain || "未设置"} | 端口: ${cfg.port}`);
+    console.log(`OpenMyModel 云后端 | 域名: ${cfg.domain || "未设置"} | 端口: ${cfg.port}`);
     await checkNodeStatus();
     rl.close();
     return;

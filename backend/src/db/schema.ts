@@ -4,7 +4,7 @@ import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { getConfigDir } from "../config";
 import { join } from "path";
 
-const DB_PATH = join(getConfigDir(), "outmymodel.db");
+const DB_PATH = join(getConfigDir(), "OpenMyModel.db");
 
 // ==================== 数据表定义 ====================
 

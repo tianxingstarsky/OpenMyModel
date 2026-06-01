@@ -1,16 +1,16 @@
-# OutMyModel
+# OpenMyModel
 
-![OutMyModel](topic.png)
+![OpenMyModel](OpenMyModel.png)
 
 > **让本地 GPU 算力走出局域网，以标准 OpenAI API 触达世界。**
 >
-> OutMyModel 帮助你将本地运行的 llama.cpp 大模型无缝推送到自有云服务器，通过业界通用的 OpenAI 兼容接口对外提供服务。无论你是有闲置 GPU 的个人开发者、想折腾自部署模型的技术爱好者，还是需要为小团队搭建私有推理节点的运维者，这里都有你所需的一切——无需公网 IP，无需复杂运维，一条 WebSocket 隧道即可将本机模型变为云端 API。
+> OpenMyModel 帮助你将本地运行的 llama.cpp 大模型无缝推送到自有云服务器，通过业界通用的 OpenAI 兼容接口对外提供服务。无论你是有闲置 GPU 的个人开发者、想折腾自部署模型的技术爱好者，还是需要为小团队搭建私有推理节点的运维者，这里都有你所需的一切——无需公网 IP，无需复杂运维，一条 WebSocket 隧道即可将本机模型变为云端 API。
 >
 > #### 为什么自己部署？
 > 免费在线大模型虽触手可及，却几乎都经过过度量化——提供给你的是智力"降级版"。我实测对比：一台消费级显卡上跑 **Qwen 3.5 9B INT8**，在逻辑推理和数学推导上明显优于所谓"旗舰级"的免费在线服务。免费 API 为了成本极致压缩，你拿到的其实只是同名模型的一张影子。而当你自己掌控精度和参数，每一轮推理都在真实权重上完成，体验的差距会超出你的预期。
 >
 > #### 不止自用，更可共享与变现
-> OutMyModel 的设计初衷不止于"自己用"——它同时为算力共享而生。你可以为团队成员、朋友甚至社区用户分发 API Key，按需管理配额与用量。闲置 GPU 不再是沉没成本：从零开始的算力变现，从一枚 `sk-` 密钥开始。
+> OpenMyModel 的设计初衷不止于"自己用"——它同时为算力共享而生。你可以为团队成员、朋友甚至社区用户分发 API Key，按需管理配额与用量。闲置 GPU 不再是沉没成本：从零开始的算力变现，从一枚 `sk-` 密钥开始。
 
 **将本地 llama.cpp 算力通过 WebSocket 隧道暴露到云端，以 OpenAI 兼容 API 供外部调用。**
 
@@ -68,7 +68,7 @@ flowchart LR
 ## 📂 目录结构
 
 ```
-output_my_model/
+open_my_model/
 ├── frontend/                 # Flutter 桌面应用
 │   ├── lib/
 │   │   ├── main.dart         # 入口
@@ -104,7 +104,7 @@ output_my_model/
 ├── scripts/                  # 工具脚本
 │   └── mock_node.js          # 模拟节点（测试用）
 ├── docs/                     # 文档与截图
-├── topic.png                 # README 头图
+├── OpenMyModel.png                 # README 头图
 ├── logo.png                  # 应用图标
 ├── LICENSE
 └── README.md

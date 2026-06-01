@@ -8,7 +8,7 @@ import { registerAdminRoutes } from "./routes/admin";
 import { wsTunnel, startHeartbeat } from "./services/websocket";
 
 /**
- * OutMyModel 云后端入口
+ * OpenMyModel 云后端入口
  */
 
 async function main() {
@@ -21,7 +21,7 @@ async function main() {
   if (!config.setupComplete) {
     console.log("");
     console.log("╔══════════════════════════════════════════════╗");
-    console.log("║  OutMyModel 云后端尚未初始化                  ║");
+    console.log("║  OpenMyModel 云后端尚未初始化                  ║");
     console.log("║  请运行 npm run setup 完成初始配置            ║");
     console.log("╚══════════════════════════════════════════════╝");
     console.log("");
@@ -61,7 +61,7 @@ async function main() {
 
   // 健康检查
   app.get("/", async () => ({
-    name: "OutMyModel Cloud API",
+    name: "OpenMyModel Cloud API",
     version: "1.0.0",
     domain: config.domain,
     endpoints: {
@@ -77,7 +77,7 @@ async function main() {
     await app.listen({ port: config.port, host: "0.0.0.0" });
     console.log("");
     console.log("╔══════════════════════════════════════════════╗");
-    console.log(`║  OutMyModel 云服务已启动                      ║`);
+    console.log(`║  OpenMyModel 云服务已启动                      ║`);
     console.log(`║  地址: http://0.0.0.0:${config.port}                  ║`);
     console.log(`║  域名: ${config.domain.padEnd(35)}║`);
     console.log("╚══════════════════════════════════════════════╝");

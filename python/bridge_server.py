@@ -24,7 +24,7 @@ from chat_handler import chat_handler
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("bridge")
 
-app = FastAPI(title="OutMyModel Bridge", version="1.0.0")
+app = FastAPI(title="OpenMyModel Bridge", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,

@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.outmymodel" "\0"
-            VALUE "FileDescription", "outmymodel" "\0"
+            VALUE "CompanyName", "com.OpenMyModel" "\0"
+            VALUE "FileDescription", "OpenMyModel" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "outmymodel" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.outmymodel. All rights reserved." "\0"
-            VALUE "OriginalFilename", "outmymodel.exe" "\0"
-            VALUE "ProductName", "outmymodel" "\0"
+            VALUE "InternalName", "OpenMyModel" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 com.OpenMyModel. All rights reserved." "\0"
+            VALUE "OriginalFilename", "OpenMyModel.exe" "\0"
+            VALUE "ProductName", "OpenMyModel" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
