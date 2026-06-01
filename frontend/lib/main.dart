@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
 import 'package:window_manager/window_manager.dart';
 import 'pages/home_page.dart';
@@ -21,15 +22,16 @@ class OutMyModelApp extends StatelessWidget {
     return ft.FluentApp(
       title: "OutMyModel",
       debugShowCheckedModeBanner: false,
-      themeMode: ThemeMode.dark,
-      darkTheme: ft.FluentThemeData.dark().copyWith(
-        
-        scaffoldBackgroundColor: const Color(0xFF1A1A2E),
+      themeMode: ThemeMode.light,
+      theme: ft.FluentThemeData(
+        brightness: Brightness.light,
+        fontFamily: "SimSun",
+        scaffoldBackgroundColor: const Color(0xFFF5F5F5),
         navigationPaneTheme: ft.NavigationPaneThemeData(
-          backgroundColor: const Color(0xFF16213E),
+          backgroundColor: const Color(0xFFFAFAFA),
         ),
       ),
-      home: const HomePage(),
+      home: HomePage(),
     );
   }
 }
