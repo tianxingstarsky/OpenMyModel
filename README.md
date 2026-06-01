@@ -215,3 +215,4 @@ MIT License — 详见 [LICENSE](LICENSE)
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) — GGUF 推理引擎
 - [Open WebUI](https://github.com/open-webui/open-webui) — 对话前端参考
 - [unsloth](https://github.com/unslothai/unsloth) — 参数设计灵感
+
