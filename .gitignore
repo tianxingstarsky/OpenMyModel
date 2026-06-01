@@ -1,0 +1,26 @@
+# Flutter
+frontend/.dart_tool/
+frontend/.packages
+frontend/build/
+frontend/.flutter-plugins*
+frontend/*.iml
+
+# Python
+python/__pycache__/
+python/*.pyc
+python/venv/
+python/.env
+
+# Node / TypeScript
+backend/node_modules/
+backend/dist/
+backend/.env
+
+# Data (contains passwords/keys)
+backend/data/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
