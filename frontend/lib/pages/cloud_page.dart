@@ -48,7 +48,7 @@ class _CloudPageState extends State<CloudPage> {
       final type = msg["type"] as String?;
       if (type == "auth_ok") {
         setState(() { _connected = true; _connStatus = "已连接 - 节点已注册"; });
-        _wsService.syncKeys(List<Map<String, dynamic>>.from(_apiKeys));
+        _wsService.setLocalKeys(List<Map<String, dynamic>>.from(_apiKeys));
         _startNodesPolling();
       }
       if (type == "keys_synced") {
@@ -160,23 +160,17 @@ class _CloudPageState extends State<CloudPage> {
       if (_testApiKey.isEmpty) _testApiKey = newKey["key"] as String;
     });
     tcKeyName.clear(); tcKeyLimit.clear();
-    _wsService.syncKeys(List<Map<String, dynamic>>.from(_apiKeys));
+    _wsService.setLocalKeys(List<Map<String, dynamic>>.from(_apiKeys));
     _saveKeysLocal();
     if (mounted) ft.displayInfoBar(context, builder: (c, cl) => ft.InfoBar(title: Text("Key generated: $n"), severity: ft.InfoBarSeverity.success));
   }
 
-  Future _revokeKey(String id) async {
+  Future _deleteKey(String id) async {
     setState(() {
-      _apiKeys = _apiKeys.map((k) {
-        if (k["id"] == id) {
-          final updated = Map<String, dynamic>.from(k);
-          updated["isActive"] = false;
-          return updated;
-        }
-        return k;
-      }).toList();
+      _apiKeys = _apiKeys.where((k) => k["id"] != id).toList();
+      _visibleKeys.remove(id);
     });
-    _wsService.syncKeys(List<Map<String, dynamic>>.from(_apiKeys));
+    _wsService.setLocalKeys(List<Map<String, dynamic>>.from(_apiKeys));
     _saveKeysLocal();
   }
 
@@ -304,12 +298,12 @@ class _CloudPageState extends State<CloudPage> {
               ),
               const Spacer(),
               ft.HyperlinkButton(
-                onPressed: () => _revokeKey(k["id"]),
-                child: const Text("吊销", style: TextStyle(color: Colors.red))),
+                onPressed: () => _deleteKey(k["id"]),
+                child: const Text("删除", style: TextStyle(color: Colors.red))),
             ]),
             Row(children: [
               Expanded(child: Text(
-                _visibleKeys.contains(k["id"]) ? (k["key"] ?? "") : "sk-oom-" + "•" * 18,
+                _visibleKeys.contains(k["id"]) ? (k["key"] ?? "") : "sk-" + "•" * 18,
                 style: TextStyle(fontSize: 10, color: Colors.grey[400], fontFamily: "monospace"),
               )),
               GestureDetector(
