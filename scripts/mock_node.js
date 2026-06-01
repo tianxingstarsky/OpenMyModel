@@ -1,47 +1,66 @@
-// 精简透传节点：连云端 WS，转发请求到本地 llama-server
-const WebSocket = require('ws');
-
-const CLOUD = process.argv[2] || 'ws://127.0.0.1:3000/ws/node';
-const PASS  = process.argv[3] || 'xiao20061209';
-const LLAMA = 'http://127.0.0.1:8080';
-
+const WebSocket = require("ws");
+const CLOUD = process.argv[2] || "ws://127.0.0.1:3000/ws/node";
+const PASS  = process.argv[3] || "xiao20061209";
+const LLAMA = "http://127.0.0.1:8080";
 const ws = new WebSocket(CLOUD);
 
-ws.on('open', () => {
-  console.log('[NODE] connected');
-  ws.send(JSON.stringify({ type:'auth', password:PASS, nodeId:'test-node-1', nodeName:'test-Windows', modelName:'Qwen3.5-9B' }));
+ws.on("open", () => {
+  console.log("[NODE] connected");
+  ws.send(JSON.stringify({type:"auth",password:PASS,nodeId:"t1",nodeName:"test",modelName:"Qwen3.5-9B"}));
 });
 
-ws.on('message', async raw => {
-  const msg = JSON.parse(raw.toString());
-  if (msg.type === 'auth_ok') { console.log('[NODE] authed:', msg.message); return; }
-  if (msg.type === 'ping') { ws.send(JSON.stringify({ type:'pong' })); return; }
+// ReadableStream -> async line iterator
+async function* streamLines(resp) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() || "";
+    for (const line of lines) yield line;
+  }
+  if (buf) yield buf;
+}
 
-  if (msg.type === 'chat_request') {
-    const { stream } = msg.data;
+ws.on("message", async raw => {
+  const msg = JSON.parse(raw.toString());
+  if (msg.type === "auth_ok") { console.log("[NODE] authed"); return; }
+  if (msg.type === "ping") { ws.send(JSON.stringify({type:"pong"})); return; }
+
+  // 原始 HTTP 镜像转发
+  if (msg.type === "http_relay") {
+    const rid = msg.requestId;
+    const isStream = msg.body?.includes('"stream":true');
+    console.log("[NODE] http_relay", rid, "stream=" + isStream);
+
     try {
-      const resp = await fetch(LLAMA + '/chat/completions', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ ...msg.data, stream: !!stream }),
+      const resp = await fetch(LLAMA + msg.path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: msg.body,
       });
 
-      if (stream) {
-        const text = await resp.text();
-        const chunks = [];
-        for (const line of text.split('\n')) {
-          if (line.startsWith('data:') && !line.includes('[DONE]')) {
-            try { const c = JSON.parse(line.slice(5).trim()); if (c) chunks.push(c); } catch (_) {}
-          }
+      if (isStream) {
+        // 流式: 逐行转发原始 SSE 数据
+        for await (const line of streamLines(resp)) {
+          ws.send(JSON.stringify({ type: "http_chunk", requestId: rid, data: line + "\n" }));
         }
-        ws.send(JSON.stringify({ type:'chat_response', requestId:msg.requestId, data:{ chunks } }));
+        ws.send(JSON.stringify({ type: "http_done", requestId: rid }));
+        console.log("[NODE] stream relayed");
       } else {
-        ws.send(JSON.stringify({ type:'chat_response', requestId:msg.requestId, data: await resp.json() }));
+        const text = await resp.text();
+        ws.send(JSON.stringify({ type: "http_done", requestId: rid, data: text }));
+        console.log("[NODE] non-stream relayed");
       }
     } catch (e) {
-      ws.send(JSON.stringify({ type:'chat_error', requestId:msg.requestId, error:e.message }));
+      ws.send(JSON.stringify({ type: "http_done", requestId: rid, data: JSON.stringify({error:e.message}) }));
+      console.log("[NODE] err:", e.message);
     }
   }
 });
 
-ws.on('close', () => console.log('[NODE] disconnected'));
-ws.on('error', e => console.log('[NODE] error:', e.message));
+ws.on("close", () => console.log("[NODE] dc"));
+ws.on("error", e => console.log("[NODE] err:", e.message));
