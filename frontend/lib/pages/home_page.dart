@@ -1,5 +1,7 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
+import 'package:window_manager/window_manager.dart';
 import 'package:file_picker/file_picker.dart';
 import '../models/server_config.dart';
 import '../services/python_bridge.dart';
@@ -13,7 +15,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WindowListener {
   int _currentIndex = 0;
   final PythonBridge _bridge = PythonBridge();
   final tcServer = TextEditingController();
@@ -24,20 +26,40 @@ class _HomePageState extends State<HomePage> {
   final _scrollCtrl = ScrollController();
 
   List<Map<String, dynamic>> _files = [];
-  bool _running = false, _starting = false;
-  String _status = "未启动";
+  bool _running = false, _starting = false, _bridgeReady = false;
+  String _status = "检查中...";
   ServerConfig _cfg = ServerConfig();
   List<dynamic> _profiles = [];
+  Process? _bridgeProcess;
+
+  // 保持页面存活
+  final _chatKey = GlobalKey<ChatPageState>();
 
   @override
   void initState() {
     super.initState();
-    _refresh(); _check(); _loadP();
+    _refresh();
+    _startBridge();
+    _loadP();
+  }
+
+  Future<void> _startBridge() async {
+    try {
+      final pythonPath = r"C:\Users\tianx\.conda\envs\myenv\python.exe";
+      final scriptPath = r"F:\llama_cpp\output_my_model\python\bridge_server.py";
+      _bridgeProcess = await Process.start(pythonPath, [scriptPath], workingDirectory: r"F:\llama_cpp\output_my_model");
+      await Future.delayed(const Duration(seconds: 3));
+      await _check();
+      setState(() => _bridgeReady = true);
+    } catch (e) {
+      setState(() { _status = "桥接启动失败: $e"; _bridgeReady = false; });
+    }
   }
 
   void _refresh() => setState(() => _files = LocalFileService.listFiles(tcFolder.text));
+
   Future _check() async {
-    try { final s = await _bridge.getStatus(); if (mounted) setState(() { _running = s["running"]??false; _status = _running?"运行中":"未启动"; }); } catch (_) {}
+    try { final s = await _bridge.getStatus(); if (mounted) setState(() { _running = s["running"]??false; _status = _running ? "运行中 - ${s["model"]}" : "已就绪，选择模型后启动"; }); } catch (_) { if (mounted) setState(() => _status = "桥接未就绪"); }
   }
   Future _loadP() async { try { final p = await _bridge.listProfiles(); if (mounted) setState(() => _profiles = p); } catch (_) {} }
 
@@ -47,15 +69,16 @@ class _HomePageState extends State<HomePage> {
   Future _start() async {
     if(tcServer.text.isEmpty){_msg("请设置 llama-server.exe 路径");return;}
     if(tcModel.text.isEmpty){_msg("请选模型");return;}
+    if(!_bridgeReady){_msg("桥接服务未就绪，请稍候");return;}
     setState(()=>_starting=true);
     try {
       _cfg.serverPath=tcServer.text; _cfg.modelPath=tcModel.text; _cfg.mmprojPath=tcMmproj.text;
       final ok = await _bridge.startServer(_cfg);
-      if(ok){setState((){_running=true;_status="运行中";});_msg("已启动",ok:true);}
-    }catch(e){_msg("失败: $e");}
+      if(ok){setState((){_running=true;_status="运行中 - ${tcModel.text.split("\\").last}";});_msg("已启动",ok:true);}
+    }catch(e){_msg("启动失败: $e");}
     setState(()=>_starting=false);
   }
-  Future _stop() async { await _bridge.stopServer(); setState((){_running=false;_status="已停止";}); }
+  Future _stop() async { await _bridge.stopServer(); setState((){_running=false;_status="已停止";});_check(); }
 
   Future _savePf() async {
     final n = tcProfile.text.trim(); if(n.isEmpty)return;
@@ -74,7 +97,7 @@ class _HomePageState extends State<HomePage> {
     final mms = _files.where((f)=>f["name"].toString().startsWith("mmproj")).toList();
     return ft.NavigationView(pane:ft.NavigationPane(selected:_currentIndex,onChanged:(i)=>setState(()=>_currentIndex=i),displayMode:ft.PaneDisplayMode.compact,items:[
       ft.PaneItem(icon:Icon(ft.FluentIcons.home),title:Text("首页"),body:_page(models,mms)),
-      ft.PaneItem(icon:Icon(ft.FluentIcons.chat),title:Text("对话"),body:ChatPage(bridge:_bridge)),
+      ft.PaneItem(icon:Icon(ft.FluentIcons.chat),title:Text("对话"),body: ChatPage(key:_chatKey,bridge:_bridge)),
       ft.PaneItem(icon:Icon(ft.FluentIcons.cloud),title:Text("云端连接"),body:CloudPage()),
     ]));
   }
@@ -84,12 +107,17 @@ class _HomePageState extends State<HomePage> {
       Text("OutMyModel",style:TextStyle(fontSize:26,fontWeight:FontWeight.bold)),
       Text("本地算力 / 云端共享",style:TextStyle(fontSize:14,color:Colors.grey[600])),
       SizedBox(height:20),
-      // 启动栏
       Row(children:[
-        Container(width:12,height:12,decoration:BoxDecoration(color:_running?Colors.green:Colors.grey[400],shape:BoxShape.circle)),
+        Container(width:12,height:12,decoration:BoxDecoration(color:_running?Colors.green:_bridgeReady?Colors.orange:Colors.grey,shape:BoxShape.circle)),
         SizedBox(width:10),
         Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(_running?"运行中":"未启动",style:TextStyle(fontSize:15,fontWeight:FontWeight.w600)),Text(_status,style:TextStyle(fontSize:12,color:Colors.grey[500]))])),
-        if(_running) ft.Button(onPressed:_stop,child:Text("停止")) else ft.FilledButton(onPressed:_starting?null:_start,child:Text(_starting?"启动中...":"启动 llama-server")),
+        SizedBox(width:8),
+        if(!_bridgeReady)
+          ft.FilledButton(onPressed:null,child:Text("桥接启动中..."))
+        else if(_running)
+          ft.Button(onPressed:_stop,child:Text("停止"))
+        else
+          ft.FilledButton(onPressed:_starting?null:_start,child:Text(_starting?"启动中...":"启动 llama-server")),
       ]),
       SizedBox(height:20),
       _lbl("llama-server.exe"), Row(children:[Expanded(child:ft.TextBox(controller:tcServer,placeholder:"选择 exe")),SizedBox(width:8),ft.Button(onPressed:_pickS,child:Text("浏览"))]),
@@ -99,7 +127,6 @@ class _HomePageState extends State<HomePage> {
       _lbl("模型"), _grid(models,tcModel), SizedBox(height:8),
       _lbl("mmproj (可选)"), _grid(mms,tcMmproj),
       SizedBox(height:16),
-      // 参数
       ft.Expander(header:Text("推理参数",style:TextStyle(fontWeight:FontWeight.w600,fontSize:14)),content:_params(),initiallyExpanded:false),
       SizedBox(height:8),
       ft.Expander(header:Text("配置档案",style:TextStyle(fontWeight:FontWeight.w600,fontSize:14)),content:_profs(),initiallyExpanded:false),
@@ -117,14 +144,14 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _params()=>Padding(padding:EdgeInsets.only(top:12),child:Wrap(spacing:14,runSpacing:10,children:[
-    _ip("ngl (GPU层)",_cfg.nGpuLayers,(v)=>_cfg.nGpuLayers=v),_ip("c (上下文)",_cfg.contextSize,(v)=>_cfg.contextSize=v),
-    _ip("b (批处理)",_cfg.batchSize,(v)=>_cfg.batchSize=v),_ip("ub (微批处理)",_cfg.ubatchSize,(v)=>_cfg.ubatchSize=v),
-    _ip("t (线程)",_cfg.threads,(v)=>_cfg.threads=v),_ip("np (槽位)",_cfg.slots,(v)=>_cfg.slots=v),
-    _ip("port (端口)",_cfg.port,(v)=>_cfg.port=v),
+    _ip("ngl",_cfg.nGpuLayers,(v)=>_cfg.nGpuLayers=v),_ip("c",_cfg.contextSize,(v)=>_cfg.contextSize=v),
+    _ip("b",_cfg.batchSize,(v)=>_cfg.batchSize=v),_ip("ub",_cfg.ubatchSize,(v)=>_cfg.ubatchSize=v),
+    _ip("t",_cfg.threads,(v)=>_cfg.threads=v),_ip("np",_cfg.slots,(v)=>_cfg.slots=v),
+    _ip("port",_cfg.port,(v)=>_cfg.port=v),
     _dp("缓存K",_cfg.cacheTypeK,["f16","q8_0","q4_0"],(v)=>_cfg.cacheTypeK=v),
     _dp("缓存V",_cfg.cacheTypeV,["f16","q8_0","q4_0"],(v)=>_cfg.cacheTypeV=v),
-    _tp("FlashAttn",_cfg.flashAttn,(v)=>_cfg.flashAttn=v),_tp("mlock",_cfg.mlLock,(v)=>_cfg.mlLock=v),
-    _tp("cont-batch",_cfg.contBatching,(v)=>_cfg.contBatching=v),_tp("embeddings",_cfg.embeddings,(v)=>_cfg.embeddings=v),
+    _tp("FA",_cfg.flashAttn,(v)=>_cfg.flashAttn=v),_tp("mlock",_cfg.mlLock,(v)=>_cfg.mlLock=v),
+    _tp("cbatch",_cfg.contBatching,(v)=>_cfg.contBatching=v),_tp("embed",_cfg.embeddings,(v)=>_cfg.embeddings=v),
   ]));
   Widget _ip(String l,int v,Function(int)s)=>SizedBox(width:150,child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(l,style:TextStyle(fontSize:11,color:Colors.grey)),ft.TextBox(controller:TextEditingController(text:v.toString()),onChanged:(x){final n=int.tryParse(x);if(n!=null){s(n);setState((){});}})]));
   Widget _dp(String l,String v,List<String>o,Function(String)s)=>SizedBox(width:150,child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(l,style:TextStyle(fontSize:11,color:Colors.grey)),ft.ComboBox(value:v,items:o.map((x)=>ft.ComboBoxItem(value:x,child:Text(x))).toList(),onChanged:(x){if(x!=null){s(x);setState((){});}})]));
@@ -137,5 +164,9 @@ class _HomePageState extends State<HomePage> {
   ]));
 
   @override
-  void dispose(){tcServer.dispose();tcFolder.dispose();tcModel.dispose();tcMmproj.dispose();tcProfile.dispose();_scrollCtrl.dispose();super.dispose();}
+  void dispose(){
+    tcServer.dispose();tcFolder.dispose();tcModel.dispose();tcMmproj.dispose();tcProfile.dispose();_scrollCtrl.dispose();
+    _bridgeProcess?.kill(); _bridgeProcess = null;
+    super.dispose();
+  }
 }

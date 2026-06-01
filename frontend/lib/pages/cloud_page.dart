@@ -1,204 +1,181 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
 import 'package:http/http.dart' as http;
-import 'dart:convert';
 import '../services/websocket_service.dart';
 
-/// OutMyModel to Internet - 云端连接管理页
+/// OutMyModel to Internet - 云端连接 + 测试按钮
 
 class CloudPage extends StatefulWidget {
   const CloudPage({super.key});
-
   @override
   State<CloudPage> createState() => _CloudPageState();
 }
 
 class _CloudPageState extends State<CloudPage> {
   final WebSocketService _wsService = WebSocketService();
-  final TextEditingController _urlCtrl = TextEditingController(text: "aiapi.topofmoon.com:3000");
-  final TextEditingController _passwordCtrl = TextEditingController();
-  final TextEditingController _keyNameCtrl = TextEditingController();
-  final TextEditingController _keyLimitCtrl = TextEditingController();
+  final tcUrl = TextEditingController(text: "aiapi.topofmoon.com:3000");
+  final tcPwd = TextEditingController();
+  final tcKeyName = TextEditingController();
+  final tcKeyLimit = TextEditingController();
 
   bool _connected = false;
-  String _connectionStatus = "未连接";
+  String _connStatus = "未连接";
   List<dynamic> _apiKeys = [];
-  bool _loadingKeys = false;
+  String _testResult = "";
+  bool _testing = false;
 
   @override
   void initState() {
     super.initState();
     _wsService.messages.listen((msg) {
-      if (msg["type"] == "auth_ok") {
-        setState(() {
-          _connected = true;
-          _connectionStatus = "已连接 - ${msg["message"]}";
-        });
-      }
+      if (msg["type"] == "auth_ok") setState(() { _connected = true; _connStatus = "已连接"; });
     });
   }
 
-  Future<void> _connect() async {
-    setState(() => _connectionStatus = "正在连接...");
-    final ok = await _wsService.connect(_urlCtrl.text.trim(), _passwordCtrl.text);
-    setState(() {
-      _connected = ok;
-      _connectionStatus = ok ? "已连接" : "连接失败，请检查地址和密码";
-    });
+  Future _connect() async {
+    setState(() => _connStatus = "连接中...");
+    final ok = await _wsService.connect(tcUrl.text.trim(), tcPwd.text);
+    setState(() { _connected = ok; _connStatus = ok ? "已连接" : "连接失败"; });
   }
+  void _disconnect() { _wsService.disconnect(); setState(() { _connected = false; _connStatus = "已断开"; }); }
 
-  void _disconnect() {
-    _wsService.disconnect();
-    setState(() {
-      _connected = false;
-      _connectionStatus = "已断开";
-    });
-  }
-
-  Future<void> _loadKeys() async {
-    setState(() => _loadingKeys = true);
+  Future _loadKeys() async {
+    final d = tcUrl.text.trim(); final p = tcPwd.text;
     try {
-      final domain = _urlCtrl.text.trim();
-      final password = _passwordCtrl.text;
-      final resp = await http.get(
-        Uri.parse("http://$domain/admin/keys"),
-        headers: {"x-admin-password": password},
-      );
-      if (resp.statusCode == 200) {
-        setState(() => _apiKeys = jsonDecode(resp.body));
+      final r = await http.get(Uri.parse("http://$d/admin/keys"), headers: {"x-admin-password": p});
+      if (r.statusCode == 200) setState(() => _apiKeys = jsonDecode(r.body));
+    } catch (_) {}
+  }
+
+  Future _createKey() async {
+    final d = tcUrl.text.trim(); final n = tcKeyName.text.trim(); final l = int.tryParse(tcKeyLimit.text) ?? 0;
+    if (n.isEmpty) return;
+    try {
+      await http.post(Uri.parse("http://$d/admin/keys"), headers: {"Content-Type": "application/json", "x-admin-password": tcPwd.text}, body: jsonEncode({"name": n, "tokenLimit": l}));
+      tcKeyName.clear(); tcKeyLimit.clear(); _loadKeys();
+    } catch (_) {}
+  }
+
+  Future _revokeKey(String id) async {
+    try { await http.delete(Uri.parse("http://${tcUrl.text.trim()}/admin/keys/$id"), headers: {"x-admin-password": tcPwd.text}); _loadKeys(); } catch (_) {}
+  }
+
+  // ==================== 测试按钮 ====================
+  Future _testConnection() async {
+    setState(() { _testing = true; _testResult = "发送测试请求..."; });
+
+    try {
+      final d = tcUrl.text.trim();
+      // 构建多模态测试请求（文字+图片）
+      final body = {
+        "model": "local-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {"type": "text", "text": "请描述这张图片的内容"},
+              {"type": "image_url", "image_url": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/256px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"}},
+            ],
+          },
+        ],
+        "max_tokens": 200,
+        "stream": true,
+      };
+
+      final client = http.Client();
+      final request = http.Request("POST", Uri.parse("http://$d/v1/chat/completions"));
+      request.headers["Content-Type"] = "application/json";
+      request.headers["Authorization"] = "Bearer test-key";
+      request.body = jsonEncode(body);
+
+      final response = await client.send(request);
+      final buffer = StringBuffer();
+      await for (final chunk in response.stream.transform(utf8.decoder)) {
+        for (final line in chunk.split("\n")) {
+          if (line.startsWith("data: ") && line != "data: [DONE]") {
+            try {
+              final data = jsonDecode(line.substring(6));
+              final choices = data["choices"] as List?;
+              if (choices != null && choices.isNotEmpty) {
+                final delta = choices[0]["delta"];
+                if (delta != null && delta["content"] != null) {
+                  buffer.write(delta["content"]);
+                  setState(() => _testResult = buffer.toString());
+                }
+              }
+            } catch (_) {}
+          }
+        }
       }
-    } catch (_) {}
-    setState(() => _loadingKeys = false);
-  }
-
-  Future<void> _createKey() async {
-    final domain = _urlCtrl.text.trim();
-    final name = _keyNameCtrl.text.trim();
-    final limit = int.tryParse(_keyLimitCtrl.text) ?? 0;
-    if (name.isEmpty) return;
-
-    try {
-      final resp = await http.post(
-        Uri.parse("http://$domain/admin/keys"),
-        headers: {
-          "Content-Type": "application/json",
-          "x-admin-password": _passwordCtrl.text,
-        },
-        body: jsonEncode({"name": name, "tokenLimit": limit}),
-      );
-      if (resp.statusCode == 200) {
-        _keyNameCtrl.clear();
-        _keyLimitCtrl.clear();
-        _loadKeys();
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _revokeKey(String id) async {
-    final domain = _urlCtrl.text.trim();
-    try {
-      await http.delete(
-        Uri.parse("http://$domain/admin/keys/$id"),
-        headers: {"x-admin-password": _passwordCtrl.text},
-      );
-      _loadKeys();
-    } catch (_) {}
+      client.close();
+      if (buffer.isEmpty) setState(() => _testResult = "(无响应内容，可能是模型思考中)");
+    } catch (e) {
+      setState(() => _testResult = "测试失败: $e");
+    }
+    setState(() => _testing = false);
   }
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text("OutMyModel → Internet", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 4),
-        Text("将本地算力共享到云服务器", style: TextStyle(fontSize: 13, color: Colors.grey[500])),
-        const SizedBox(height: 24),
+    return SingleChildScrollView(padding: const EdgeInsets.all(24), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text("OutMyModel / Internet", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+      Text("本地算力共享到云端", style: TextStyle(fontSize: 13, color: Colors.grey[500])),
+      const SizedBox(height: 20),
 
-        // 连接配置
-        _buildSection("云端服务器配置"),
-        Row(children: [
-          Expanded(child: ft.TextBox(controller: _urlCtrl, placeholder: "aiapi.topofmoon.com:3000", prefix: const Text("地址:"))),
-        ]),
-        const SizedBox(height: 8),
-        Row(children: [
-          Expanded(child: ft.TextBox(controller: _passwordCtrl, placeholder: "管理员密码", prefix: const Text("密码:"), obscureText: true)),
-        ]),
-        const SizedBox(height: 12),
-        Row(children: [
-          ft.FilledButton(
-            onPressed: _connected ? null : _connect,
-            child: Text(_connected ? "已连接" : "🔗 连接云端"),
-          ),
-          const SizedBox(width: 8),
-          ft.Button(
-            onPressed: _connected ? _disconnect : null,
-            child: const Text("断开"),
-          ),
-          const SizedBox(width: 16),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: _connected ? Colors.green.withAlpha(30) : Colors.grey.withAlpha(30),
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: Text(_connectionStatus, style: TextStyle(fontSize: 12, color: _connected ? Colors.green : Colors.grey)),
-          ),
-        ]),
-        const SizedBox(height: 32),
-
-        // API Key 管理
-        _buildSection("API Key 管理"),
-        const SizedBox(height: 8),
-        Row(children: [
-          Expanded(child: ft.TextBox(controller: _keyNameCtrl, placeholder: "密钥名称")),
-          const SizedBox(width: 8),
-          SizedBox(width: 120, child: ft.TextBox(controller: _keyLimitCtrl, placeholder: "Token 限制")),
-          const SizedBox(width: 8),
-          ft.FilledButton(onPressed: _createKey, child: const Text("生成 Key")),
-        ]),
-        const SizedBox(height: 8),
-        ft.Button(onPressed: _loadKeys, child: Text(_loadingKeys ? "加载中..." : "刷新密钥列表")),
-        const SizedBox(height: 12),
-
-        if (_apiKeys.isNotEmpty)
-          ...(_apiKeys.map((k) => ft.Card(
-            padding: const EdgeInsets.all(12),
-            margin: const EdgeInsets.only(bottom: 8),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                Text(k["name"] ?? "", style: const TextStyle(fontWeight: FontWeight.w600)),
-                const SizedBox(width: 8),
-                Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(color: (k["isActive"] == true ? Colors.green : Colors.red).withAlpha(30), borderRadius: BorderRadius.circular(4)),
-                  child: Text(k["isActive"] == true ? "有效" : "已吊销", style: TextStyle(fontSize: 11, color: k["isActive"] == true ? Colors.green : Colors.red))),
-                const Spacer(),
-                ft.HyperlinkButton(onPressed: () => _revokeKey(k["id"]), child: const Text("吊销", style: TextStyle(color: Colors.red))),
-              ]),
-              const SizedBox(height: 4),
-              Text(k["key"] ?? "", style: TextStyle(fontSize: 11, color: Colors.grey[400], fontFamily: "monospace")),
-              const SizedBox(height: 4),
-              Text("月用量: ${k["monthlyTokens"]} tokens / ${k["monthlyRequests"]} 次  |  累计: ${k["totalTokens"]} tokens",
-                style: TextStyle(fontSize: 11, color: Colors.grey[500])),
-            ]),
-          ))),
+      // 连接配置
+      _sec("服务器地址"), Row(children: [Expanded(child: ft.TextBox(controller: tcUrl, placeholder: "aiapi.topofmoon.com:3000"))]),
+      SizedBox(height: 8),
+      _sec("管理员密码"), Row(children: [Expanded(child: ft.TextBox(controller: tcPwd, placeholder: "密码", obscureText: true))]),
+      SizedBox(height: 12),
+      Row(children: [
+        ft.FilledButton(onPressed: _connected ? null : _connect, child: Text(_connected ? "已连接" : "连接")),
+        SizedBox(width: 8),
+        ft.Button(onPressed: _connected ? _disconnect : null, child: Text("断开")),
+        SizedBox(width: 8),
+        ft.Button(onPressed: _testing ? null : _testConnection, child: Text(_testing ? "测试中..." : "测试连接")),
+        SizedBox(width: 12),
+        Text(_connStatus, style: TextStyle(fontSize: 12, color: _connected ? Colors.green : Colors.grey)),
       ]),
-    );
+      SizedBox(height: 16),
+
+      // 测试结果
+      if (_testResult.isNotEmpty)
+        ft.Card(padding: const EdgeInsets.all(12), margin: const EdgeInsets.only(bottom: 16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text("测试结果", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+          SizedBox(height: 8),
+          Text(_testResult, style: const TextStyle(fontSize: 12)),
+        ])),
+
+      // API Key 管理
+      _sec("API Key 管理"), SizedBox(height: 8),
+      Row(children: [
+        Expanded(child: ft.TextBox(controller: tcKeyName, placeholder: "密钥名称")),
+        SizedBox(width: 8),
+        SizedBox(width: 100, child: ft.TextBox(controller: tcKeyLimit, placeholder: "Token限制")),
+        SizedBox(width: 8),
+        ft.FilledButton(onPressed: _createKey, child: Text("生成")),
+      ]),
+      SizedBox(height: 8),
+      ft.Button(onPressed: _loadKeys, child: Text("刷新列表")),
+      SizedBox(height: 12),
+
+      if (_apiKeys.isNotEmpty) ..._apiKeys.map((k) => ft.Card(padding: EdgeInsets.all(10), margin: EdgeInsets.only(bottom: 6), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Text(k["name"] ?? "", style: TextStyle(fontWeight: FontWeight.w600)),
+          SizedBox(width: 8),
+          Container(padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: (k["isActive"] == true ? Colors.green : Colors.red).withAlpha(30), borderRadius: BorderRadius.circular(4)), child: Text(k["isActive"] == true ? "有效" : "吊销", style: TextStyle(fontSize: 11, color: k["isActive"] == true ? Colors.green : Colors.red))),
+          Spacer(),
+          ft.HyperlinkButton(onPressed: () => _revokeKey(k["id"]), child: Text("吊销", style: TextStyle(color: Colors.red))),
+        ]),
+        Text(k["key"] ?? "", style: TextStyle(fontSize: 10, color: Colors.grey[400], fontFamily: "monospace")),
+        Text("月: ${k["monthlyTokens"]} tokens / ${k["totalTokens"]} 累计", style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+      ]))),
+    ]));
   }
 
-  Widget _buildSection(String title) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: const Color(0xFF00B7C3))),
-    );
-  }
+  Widget _sec(String t) => Padding(padding: EdgeInsets.only(bottom: 4), child: Text(t, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)));
 
   @override
-  void dispose() {
-    _urlCtrl.dispose();
-    _passwordCtrl.dispose();
-    _keyNameCtrl.dispose();
-    _keyLimitCtrl.dispose();
-    super.dispose();
-  }
+  void dispose() { tcUrl.dispose(); tcPwd.dispose(); tcKeyName.dispose(); tcKeyLimit.dispose(); super.dispose(); }
 }
