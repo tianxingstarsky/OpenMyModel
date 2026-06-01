@@ -33,6 +33,16 @@ class ChatHandler:
                         msg["content"] = msg["reasoning_content"]
         return data
 
+    async def list_models(self) -> list:
+        """获取模型列表"""
+        try:
+            s = await self._get_session()
+            async with s.get(f"{self.api_base}/models") as r:
+                data = await r.json()
+                return data.get("data", [])
+        except Exception:
+            return []
+
     async def health_check(self) -> bool:
         try:
             s = await self._get_session()
