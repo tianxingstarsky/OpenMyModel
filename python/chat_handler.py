@@ -1,109 +1,69 @@
 """
-聊天处理器
-处理本地对话请求，支持流式输出和多模态（图片输入）
+聊天处理器 - 使用 aiohttp 替代 httpx
 """
 
-import httpx
+import aiohttp
 import json
 import asyncio
 from typing import AsyncGenerator, Optional
 
 
 class ChatHandler:
-    """本地 llama-server 聊天处理器"""
-
     def __init__(self, api_base: str = "http://127.0.0.1:8080"):
         self.api_base = api_base.rstrip("/")
-        self.client: Optional[httpx.AsyncClient] = None
+        self._session: Optional[aiohttp.ClientSession] = None
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self.client is None:
-            self.client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
-        return self.client
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=300)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+        return self._session
 
     async def close(self):
-        if self.client:
-            await self.client.aclose()
-            self.client = None
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+    def _fix(self, data: dict) -> dict:
+        if data.get("choices"):
+            for c in data["choices"]:
+                for key in ("message", "delta"):
+                    msg = c.get(key, {})
+                    if msg and not msg.get("content") and msg.get("reasoning_content"):
+                        msg["content"] = msg["reasoning_content"]
+        return data
 
     async def health_check(self) -> bool:
-        """检查 llama-server 是否可用"""
         try:
-            client = await self._get_client()
-            resp = await client.get(f"{self.api_base}/health")
-            return resp.status_code == 200
+            s = await self._get_session()
+            async with s.get(f"{self.api_base}/health") as r:
+                return r.status == 200
         except Exception:
             return False
 
-    async def list_models(self) -> list[dict]:
-        """获取可用模型列表"""
-        try:
-            client = await self._get_client()
-            resp = await client.get(f"{self.api_base}/v1/models")
-            return resp.json().get("data", [])
-        except Exception:
-            return []
+    async def chat_completion(self, messages: list, temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 4096, stream: bool = False) -> dict:
+        s = await self._get_session()
+        payload = {"messages": messages, "temperature": temperature, "top_p": top_p, "max_tokens": max_tokens}
+        async with s.post(f"{self.api_base}/chat/completions", json=payload) as r:
+            r.raise_for_status()
+            return self._fix(await r.json())
 
-    async def chat_completion(
-        self,
-        messages: list[dict],
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        max_tokens: int = 4096,
-        stream: bool = False,
-    ) -> dict:
-        """发送聊天完成请求（非流式）"""
-        client = await self._get_client()
-        payload = {
-            "messages": messages,
-            "temperature": temperature,
-            "top_p": top_p,
-            "max_tokens": max_tokens,
-            "stream": False,
-        }
-        resp = await client.post(
-            f"{self.api_base}/v1/chat/completions",
-            json=payload,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    async def chat_completion_stream(
-        self,
-        messages: list[dict],
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        max_tokens: int = 4096,
-    ) -> AsyncGenerator[str, None]:
-        """发送聊天完成请求（流式），逐块返回 SSE 数据"""
-        client = await self._get_client()
-        payload = {
-            "messages": messages,
-            "temperature": temperature,
-            "top_p": top_p,
-            "max_tokens": max_tokens,
-            "stream": True,
-        }
-        async with client.stream(
-            "POST",
-            f"{self.api_base}/v1/chat/completions",
-            json=payload,
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if line.startswith("data: "):
-                    yield line
-
-    async def tokenize(self, text: str) -> dict:
-        """分词"""
-        client = await self._get_client()
-        resp = await client.post(
-            f"{self.api_base}/tokenize",
-            json={"content": text},
-        )
-        resp.raise_for_status()
-        return resp.json()
+    async def chat_completion_stream(self, messages: list, temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 4096) -> AsyncGenerator[str, None]:
+        s = await self._get_session()
+        payload = {"messages": messages, "temperature": temperature, "top_p": top_p, "max_tokens": max_tokens, "stream": True}
+        async with s.post(f"{self.api_base}/chat/completions", json=payload) as r:
+            r.raise_for_status()
+            async for line in r.content:
+                text = line.decode("utf-8").strip()
+                if text.startswith("data: "):
+                    if text == "data: [DONE]":
+                        break
+                    try:
+                        data = json.loads(text[6:])
+                        data = self._fix(data)
+                        yield "data: " + json.dumps(data) + "\n"
+                    except Exception:
+                        pass
 
 
-# 全局实例
 chat_handler = ChatHandler()
