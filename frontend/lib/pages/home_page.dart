@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
@@ -26,6 +27,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
   final tcModel = TextEditingController();
   final tcMmproj = TextEditingController();
   final tcProfile = TextEditingController();
+  final Map<String, TextEditingController> _numCtrls = {};
   final _scrollCtrl = ScrollController();
 
   List<Map<String, dynamic>> _files = [];
@@ -219,7 +221,24 @@ class _HomePageState extends State<HomePage> with WindowListener {
     ]),initiallyExpanded:false),
   ]));
 
-  Widget _num(String flag,String name,String desc,int value,Function(int) onChanged)=>Padding(padding:EdgeInsets.only(bottom:10),child:SizedBox(width:380,child:ft.Card(padding:EdgeInsets.all(10),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[Text(flag,style:TextStyle(fontSize:11,fontFamily:"monospace",color:Color(0xFF0078D4))),SizedBox(width:8),Text(name,style:TextStyle(fontSize:13,fontWeight:FontWeight.w600))]),SizedBox(height:4),Text(desc,style:TextStyle(fontSize:11,color:Colors.grey[600])),SizedBox(height:6),SizedBox(width:200,child:ft.TextBox(controller:TextEditingController(text:value.toString()),onChanged:(x){final n=int.tryParse(x);if(n!=null)onChanged(n);}))]))));
+  Widget _num(String flag, String name, String desc, int value, Function(int) onChanged) {
+    final ctrl = _numCtrls.putIfAbsent(flag, () => TextEditingController(text: value.toString()));
+    if (ctrl.text != value.toString() && int.tryParse(ctrl.text) != value) {
+      ctrl.text = value.toString();
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: SizedBox(width: 380, child: ft.Card(padding: const EdgeInsets.all(10), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [Text(flag, style: const TextStyle(fontSize: 11, fontFamily: "monospace", color: Color(0xFF0078D4))), const SizedBox(width: 8), Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600))]),
+        const SizedBox(height: 4), Text(desc, style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+        const SizedBox(height: 6),
+        SizedBox(width: 200, child: Directionality(textDirection: TextDirection.ltr, child: ft.TextBox(
+          controller: ctrl,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          onChanged: (x) { final n = int.tryParse(x); if (n != null) onChanged(n); },
+        ))),
+      ]))));
+  }
   Widget _choice(String flag,String name,String desc,String value,List<String> options,Function(String) onChanged)=>Padding(padding:EdgeInsets.only(bottom:10),child:SizedBox(width:380,child:ft.Card(padding:EdgeInsets.all(10),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[Text(flag,style:TextStyle(fontSize:11,fontFamily:"monospace",color:Color(0xFF0078D4))),SizedBox(width:8),Text(name,style:TextStyle(fontSize:13,fontWeight:FontWeight.w600))]),SizedBox(height:4),Text(desc,style:TextStyle(fontSize:11,color:Colors.grey[600])),SizedBox(height:6),SizedBox(width:200,child:ft.ComboBox(value:value,items:options.map((o)=>ft.ComboBoxItem(value:o,child:Text(o))).toList(),onChanged:(x){if(x!=null)onChanged(x);}))]))));
   Widget _bool(String flag,String name,String desc,bool value,Function(bool) onChanged)=>Padding(padding:EdgeInsets.only(bottom:10),child:SizedBox(width:380,child:ft.Card(padding:EdgeInsets.all(10),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[Text(flag,style:TextStyle(fontSize:11,fontFamily:"monospace",color:Color(0xFF0078D4))),SizedBox(width:8),Text(name,style:TextStyle(fontSize:13,fontWeight:FontWeight.w600)),Spacer(),ft.ToggleSwitch(checked:value,onChanged:(v){onChanged(v);})]),Text(desc,style:TextStyle(fontSize:11,color:Colors.grey[600]))]))));
   Widget _section(String t)=>Text(t,style:TextStyle(fontSize:14,fontWeight:FontWeight.w600));
