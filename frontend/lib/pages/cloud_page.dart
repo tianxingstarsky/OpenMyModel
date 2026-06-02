@@ -229,7 +229,7 @@ class _CloudPageState extends State<CloudPage> {
         }
         setState(() => _testResult = content.isNotEmpty ? "success: $content" : "success: (流式响应已接收)");
       } else {
-        setState(() => _testResult = "HTTP ${resp.statusCode}: ${utf8.decode(resp.bodyBytes).substring(0, 200)}");
+        setState(() => _testResult = "HTTP ${resp.statusCode}: ${utf8.decode(resp.bodyBytes).length > 200 ? utf8.decode(resp.bodyBytes).substring(0, 200) + "..." : utf8.decode(resp.bodyBytes)}");
       }
     } catch (e) {
       setState(() => _testResult = "error: $e");

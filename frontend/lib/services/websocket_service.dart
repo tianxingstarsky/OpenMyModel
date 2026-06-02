@@ -19,7 +19,12 @@ class WebSocketService {
 
   void setLlamaUrl(String url) => _llamaUrl = url;
   void setModelName(String n) => _modelName = n;
-  void setLocalKeys(List<Map<String, dynamic>> keys) => _localKeys = keys;
+  void setLocalKeys(List<Map<String, dynamic>> keys) {
+    _localKeys = keys;
+    _send({"cmd": "set_keys", "keys": keys});
+  }
+
+  void _oldSetLocalKeys(List<Map<String, dynamic>> keys) => _localKeys = keys;
   void setBridgePath(String path) => _bridgePath = path;
 
   void _send(Map<String, dynamic> cmd) {
@@ -75,6 +80,10 @@ class WebSocketService {
         "llamaUrl": _llamaUrl,
         "modelName": _modelName,
       });
+      // Sync keys after connect
+      if (_localKeys.isNotEmpty) {
+        _send({"cmd": "set_keys", "keys": _localKeys});
+      }
 
       // Wait for connected or error
       final c = Completer<bool>();
