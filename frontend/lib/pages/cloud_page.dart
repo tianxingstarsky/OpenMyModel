@@ -40,6 +40,7 @@ class _CloudPageState extends State<CloudPage> {
   @override
   void initState() {
     super.initState();
+    _wsService.setBridgePath(r"F:\llama_cpp\output_my_model\scripts\cloud_bridge.js");
     _loadPrefs();
     _loadKeysLocal();
     _wsService.setLlamaUrl(widget.llamaUrl);
@@ -56,7 +57,7 @@ class _CloudPageState extends State<CloudPage> {
         if (keys != null) setState(() => _apiKeys = keys);
       }
       if (type == "disconnected") {
-        setState(() { _connected = false; _connStatus = "已断开"; });
+        setState(() { _connected = false; _connStatus = "已断开，可重新连接"; });
         _nodesPollTimer?.cancel();
       }
     });
@@ -117,17 +118,31 @@ class _CloudPageState extends State<CloudPage> {
 
   Future _connect() async {
     if (!widget.serverRunning) {
-      setState(() => _connStatus = "请先启动 llama-server");
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text("提示"),
+          content: const Text("请先在首页启动 llama-server 后再连接云端。"),
+          actions: [TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text("知道了"))],
+        ),
+      );
       return;
     }
     if (tcUrl.text.trim().isEmpty || tcPwd.text.isEmpty) {
-      setState(() => _connStatus = "请输入服务器地址和密码");
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text("提示"),
+          content: const Text("请先填写服务器地址和密码。"),
+          actions: [TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text("知道了"))],
+        ),
+      );
       return;
     }
-    setState(() => _connStatus = "连接中...");
+    setState(() => _connStatus = "正在启动 Node.js 桥接...");
     _savePrefs();
     final ok = await _wsService.connect(tcUrl.text.trim(), tcPwd.text, nodeName: "OpenMyModel-本地节点");
-    setState(() { _connected = ok; _connStatus = ok ? "已连接" : "连接失败"; });
+    setState(() { _connected = ok; _connStatus = ok ? "已连接 - 节点在线" : "连接超时，请检查地址、密码和llama-server"; });
     if (ok) _loadKeys();
   }
 

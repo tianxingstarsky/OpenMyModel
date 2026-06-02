@@ -1,18 +1,16 @@
 import "dart:async";
 import "dart:convert";
-import "package:http/http.dart" as http;
-import "package:web_socket_channel/web_socket_channel.dart";
+import "dart:io";
 
-/// WebSocket 隧道 —— 透传云后端请求到本地 llama-server
-/// API Key 完全由本地管理，收到 validate_key 时本地核对
+/// WebSocket 隧道 - 通过 Node.js 桥接进程管理云端连接
 class WebSocketService {
-  WebSocketChannel? _ch;
-  StreamSubscription? _sub;
+  Process? _process;
   bool _connected = false;
   String _nodeId = "";
   String _llamaUrl = "http://127.0.0.1:8080";
   String _modelName = "";
   List<Map<String, dynamic>> _localKeys = [];
+  String _bridgePath = "";
 
   final _msgCtrl = StreamController<Map<String, dynamic>>.broadcast();
   Stream<Map<String, dynamic>> get messages => _msgCtrl.stream;
@@ -21,103 +19,96 @@ class WebSocketService {
 
   void setLlamaUrl(String url) => _llamaUrl = url;
   void setModelName(String n) => _modelName = n;
-
-  /// 设置本地 Key 列表（由 CloudPage 管理）
   void setLocalKeys(List<Map<String, dynamic>> keys) => _localKeys = keys;
+  void setBridgePath(String path) => _bridgePath = path;
+
+  void _send(Map<String, dynamic> cmd) {
+    if (_process != null) {
+      _process!.stdin.write(jsonEncode(cmd) + "\n");
+    }
+  }
 
   Future<bool> connect(String serverUrl, String password, {String nodeName = "local-node"}) async {
     try {
-      _ch = WebSocketChannel.connect(Uri.parse("ws://" + serverUrl + "/ws/node"));
-      await _ch!.ready;
-      _ch!.sink.add(jsonEncode({"type":"auth","password":password,"nodeId":_nodeId,"nodeName":nodeName,"modelName":_modelName}));
+      // Kill existing process
+      _process?.kill();
+      _process = null;
 
-      final c = Completer<bool>();
-      _sub = _ch!.stream.listen(
-        (d) {
-          final m = jsonDecode(d as String);
-          switch (m["type"]) {
-            case "auth_ok":
-              _nodeId = m["nodeId"] ?? "";
-              _connected = true;
-              if (!c.isCompleted) c.complete(true);
-              _msgCtrl.add(m);
-            case "auth_error":
-              if (!c.isCompleted) c.complete(false);
-            case "ping":
-              _ch?.sink.add(jsonEncode({"type":"pong"}));
-            case "validate_key":
-              // 云端请求验证 API Key → 本地核对
-              _handleValidateKey(m);
-            case "http_relay":
-              _handleHttpRelay(m);
-            default:
-              _msgCtrl.add(m);
-          }
-        },
-        onError: (_) { _connected = false; if (!c.isCompleted) c.complete(false); },
-        onDone: () { _connected = false; _msgCtrl.add({"type":"disconnected"}); },
-      );
-      return await c.future.timeout(const Duration(seconds: 10));
-    } catch (_) { _connected = false; return false; }
-  }
+      final bridgeScript = _bridgePath.isNotEmpty
+          ? _bridgePath
+          : "scripts/cloud_bridge.js";
 
-  /// 本地验证 API Key
-  void _handleValidateKey(Map<String, dynamic> msg) {
-    final requestId = msg["requestId"] as String;
-    final key = msg["key"] as String;
-    bool valid = false;
-    for (final k in _localKeys) {
-      if (k["key"] == key && k["isActive"] == true) {
-        valid = true;
-        break;
-      }
-    }
-    _ch?.sink.add(jsonEncode({"type":"key_valid","requestId":requestId,"valid":valid}));
-  }
+      _process = await Process.start("node", [bridgeScript]);
+      _connected = false;
 
-  /// 原始 HTTP 镜像转发到 llama-server
-  Future<void> _handleHttpRelay(Map<String, dynamic> msg) async {
-    final requestId = msg["requestId"] as String;
-    final path = msg["path"] as String? ?? "/v1/chat/completions";
-    final body = msg["body"] as String? ?? "{}";
-
-    try {
-      final req = http.Request("POST", Uri.parse("$_llamaUrl$path"));
-      req.headers["Content-Type"] = "application/json";
-      req.body = body;
-
-      final resp = await http.Client().send(req);
-      final isStream = body.contains('"stream":true') || body.contains('"stream": true');
-
-      if (isStream) {
-        final stream = resp.stream
+      // Listen for stdout (JSON messages)
+      _process!.stdout
           .transform(utf8.decoder)
-          .transform(const LineSplitter());
-
-        await for (final line in stream) {
-          if (line.isNotEmpty) {
-            _ch?.sink.add(jsonEncode({"type":"http_chunk","requestId":requestId,"data":line + "\n"}));
+          .transform(const LineSplitter())
+          .listen((line) {
+        try {
+          final msg = jsonDecode(line) as Map<String, dynamic>;
+          final type = msg["type"] as String?;
+          if (type == "connected") {
+            _nodeId = msg["nodeId"] ?? "";
+            _connected = true;
+          } else if (type == "disconnected") {
+            _connected = false;
+          } else if (type == "error") {
+            _connected = false;
           }
+          _msgCtrl.add(msg);
+        } catch (_) {}
+      });
+
+      // Listen for stderr
+      _process!.stderr
+          .transform(utf8.decoder)
+          .listen((d) {/* ignore stderr */});
+
+      // Send connect command
+      _send({
+        "cmd": "connect",
+        "url": serverUrl,
+        "password": password,
+        "nodeName": nodeName,
+        "llamaUrl": _llamaUrl,
+        "modelName": _modelName,
+      });
+
+      // Wait for connected or error
+      final c = Completer<bool>();
+      StreamSubscription? sub;
+      sub = _msgCtrl.stream.listen((msg) {
+        if (msg["type"] == "connected") {
+          if (!c.isCompleted) c.complete(true);
+        } else if (msg["type"] == "error") {
+          if (!c.isCompleted) c.complete(false);
+        } else if (msg["type"] == "disconnected") {
+          if (!c.isCompleted) c.complete(false);
         }
-      } else {
-        final respBody = await resp.stream.bytesToString();
-        _ch?.sink.add(jsonEncode({"type":"http_chunk","requestId":requestId,"data":respBody}));
-      }
-      _ch?.sink.add(jsonEncode({"type":"http_done","requestId":requestId}));
-    } catch (e) {
-      _ch?.sink.add(jsonEncode({
-        "type":"http_chunk","requestId":requestId,
-        "data":'{"error":{"message":"${e.toString()}","type":"proxy_error"}}',
-      }));
-      _ch?.sink.add(jsonEncode({"type":"http_done","requestId":requestId}));
+      });
+
+      final result = await c.future.timeout(const Duration(seconds: 10));
+      sub?.cancel();
+      return result;
+    } catch (_) {
+      _connected = false;
+      return false;
     }
   }
 
   void sendStatusUpdate(String n) {
     _modelName = n;
-    if (_connected) _ch?.sink.add(jsonEncode({"type":"status_update","modelName":n}));
+    _send({"cmd": "status_update", "modelName": n});
   }
 
-  void disconnect() { _sub?.cancel(); _ch?.sink.close(); _connected = false; }
+  void disconnect() {
+    _send({"cmd": "disconnect"});
+    _process?.kill();
+    _process = null;
+    _connected = false;
+  }
+
   void dispose() { disconnect(); _msgCtrl.close(); }
 }
