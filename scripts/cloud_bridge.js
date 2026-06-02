@@ -45,6 +45,7 @@ function connectToCloud(url, password, nodeName) {
             ws.send(JSON.stringify({ type: "pong" }));
             break;
           case "validate_key":
+            process.stderr.write("[bridge] GOT validate_key: " + (msg.key||"").substring(0,15) + "\n");
             validateKey(msg.requestId, msg.key);
             break;
           case "http_relay":
@@ -86,6 +87,8 @@ function stopPing() {
 }
 
 function validateKey(requestId, key) {
+    process.stderr.write("[bridge] validateKey: key=" + key.substring(0,20) + "... localKeys count=" + localKeys.length);
+    localKeys.forEach((k,i) => process.stderr.write("[bridge]   key["+i+"]: " + (k.key||"").substring(0,20) + " active=" + k.isActive + " match=" + (k.key === key)));
   const valid = localKeys.some(k => k.key === key && k.isActive === true);
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "key_valid", requestId, valid }));
@@ -182,6 +185,7 @@ rl.on("line", (line) => {
         break;
       case "set_keys":
         localKeys = cmd.keys || [];
+        process.stderr.write("[bridge] set_keys received: " + localKeys.length + " keys, sample: " + (localKeys.length>0 ? (localKeys[0].key||"").substring(0,15) : "none"));
         break;
       case "set_llama_url":
         llamaUrl = cmd.llamaUrl || "http://127.0.0.1:8080";

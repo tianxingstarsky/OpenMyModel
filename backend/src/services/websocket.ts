@@ -202,10 +202,13 @@ class WebSocketTunnel {
   }
 
   getAvailableNode(): TunnelConnection | null {
+    let latest: TunnelConnection | null = null;
     for (const conn of this.connections.values()) {
-      if (conn.authenticated) return conn;
+      if (conn.authenticated) {
+        if (!latest || conn.nodeId > latest.nodeId) latest = conn;
+      }
     }
-    return null;
+    return latest;
   }
 
   private registerNode(conn: TunnelConnection): void {
