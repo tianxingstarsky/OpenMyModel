@@ -170,9 +170,11 @@ npx ts-node src/cli.ts
 
 
 
-## ☁️ 云后端部署指南（宝塔面板 · 超详细）
+## ☁️ 云后端部署指南（宝塔面板 · 按钮级操作）
 
-> **目标**：在阿里云/腾讯云服务器上使用宝塔面板部署 OpenMyModel 云后端，对接自有域名。
+> **目标**：在阿里云/腾讯云服务器上，通过宝塔面板以纯图形化方式部署 OpenMyModel 云后端。
+>
+> 全程无需手动敲 PM2 命令，全部通过宝塔面板的「Node项目」和「反向代理」功能完成。
 
 ### 前置条件
 
@@ -180,68 +182,59 @@ npx ts-node src/cli.ts
 |------|------|
 | 服务器 | 阿里云 ECS / 腾讯云 CVM，最低 1 核 2G |
 | 系统 | CentOS 7+ / Ubuntu 20.04+ / Debian 11+ |
-| 域名 | 已备案域名，DNS 已解析到服务器 IP |
+| 域名 | 已备案，DNS 已解析到服务器 IP |
 | 宝塔面板 | 已安装并可登录 |
-| SSH | root 权限 |
+| SSH | root 权限（上传代码用） |
 
 ---
 
-### 第一步：宝塔面板环境准备
+### 第一步：宝塔软件商店安装环境
 
-#### 1.1 登录宝塔 → 软件商店 → 安装
+登录宝塔面板，左侧菜单 **「软件商店」**，搜索并安装以下软件（点击「安装」按钮即可）：
 
-| 软件 | 用途 | 说明 |
-|------|------|------|
-| Nginx | 反向代理（80/443 端口 → 后端 3000） | 免费，一键安装 |
-| Node.js 版本管理器 | 管理多版本 Node.js 运行时 | 免费，一键安装 |
+| 软件 | 用途 | 安装方式 |
+|------|------|----------|
+| **Nginx** | 反向代理（80/443 转发到后端 3000） | 软件商店 -> 搜索 Nginx -> 点击「安装」-> 选最新稳定版 |
+| **Node.js版本管理器** | 管理多版本 Node.js | 软件商店 -> 搜索 Node -> 点击「安装」 |
+| **PM2管理器** | 进程守护，面板内启停 | 软件商店 -> 搜索 PM2 -> 点击「安装」 |
 
-#### 1.2 安装 Node.js（关键！）
-
-宝塔 → 软件商店 → Node.js 版本管理器 → 安装 **v22.x**（v24 亦可，推荐 v22 LTS）
-
-**⚠️ 宝塔 PM2 管理器的坑（重要！）**：
-
-- 宝塔的「PM2 管理器」插件默认绑定宝塔自带的 Node.js 版本（通常是 v16/v18）
-- 你用 Node.js 版本管理器切换到 v22 后，宝塔 PM2 管理器找不到正确的 node 路径
-- **推荐做法**：**不装宝塔 PM2 管理器**，直接用 npm 全局安装 PM2
-- 如果已装了宝塔 PM2 管理器：软件商店 → 卸载 PM2 管理器，然后继续
-
-#### 1.3 创建项目目录（绕过宝塔 www 限制）
-
-**⚠️ 关于宝塔的 `/www/wwwroot/` 限制**：
-
-宝塔「网站」功能默认把站点绑定到 `/www/wwwroot/` 下，但这只是宝塔管理静态网站的惯例，并非技术限制。我们的后端是独立 Node.js 进程，可以放在**任意路径**，只要 Nginx 反向代理指向正确端口即可。
-
-```bash
-# 创建独立工作目录（不在 /www/wwwroot/ 内）
-mkdir -p /aiapi
-cd /aiapi
-```
+> **关于 PM2 管理器**：宝塔的 PM2 管理器可以在面板中独立管理不同 Node.js 版本的项目。它和 Node.js 版本管理器协同工作 -- 你在版本管理器里装好 Node 后，PM2 管理器会自动识别。
 
 ---
 
-### 第二步：云服务器安全组配置
+### 第二步：安装 Node.js 版本
 
-阿里云/腾讯云控制台 → 安全组 → 入方向规则 → 添加：
+宝塔面板，左侧菜单 **「软件商店」**，找到已安装的 **「Node.js版本管理器」**，点击右侧 **「设置」** 按钮：
+
+1. 在弹出窗口中，看到 Node.js 版本列表
+2. 找到 **v22.x**（推荐 v22 LTS），点击右侧的 **「安装」** 按钮
+3. 等待安装完成，状态变为「已安装」
+4. 点击 v22.x 右侧的 **「命令行版本」** 按钮，设为默认版本
+
+> 如果服务器上已有其他版本（如 v16、v18），不影响 -- 可以共存。在 Node项目 中可以为每个项目单独选择版本。
+
+---
+
+### 第三步：云服务器安全组配置
+
+阿里云/腾讯云控制台 -> 安全组 -> 入方向 -> 添加规则：
 
 | 端口 | 协议 | 授权对象 | 说明 |
 |------|------|----------|------|
-| 80 | TCP | 0.0.0.0/0 | HTTP（Nginx 对外） |
-| 443 | TCP | 0.0.0.0/0 | HTTPS（SSL，推荐配置） |
-| 22 | TCP | 你的出口 IP | SSH 远程管理 |
+| 80 | TCP | 0.0.0.0/0 | HTTP（Nginx 对外入口） |
+| 443 | TCP | 0.0.0.0/0 | HTTPS（SSL，强烈建议） |
+| 22 | TCP | 你的出口 IP | SSH 管理 |
 
-**⚠️ 3000 端口不要对外开放！** 安全策略：
-
-```
-外部请求 → Nginx(80/443) → 反向代理 → 127.0.0.1:3000(后端)
-                                     ↑ 仅本机可访问
-```
-
-如果之前误开了 3000 端口对外，现在去安全组**删除**那条规则。
+> **3000 端口不需要对外开放！** 流量路径：
+>
+> 外部请求 -> Nginx(80) -> 反向代理 -> 127.0.0.1:3000(后端)
+>                                       仅本机可访问
+>
+> 如果之前误开了 3000 端口对外，现在去安全组删除那条规则。
 
 ---
 
-### 第三步：部署后端代码
+### 第四步：上传后端代码
 
 SSH 登录服务器：
 
@@ -250,39 +243,25 @@ SSH 登录服务器：
 mkdir -p /aiapi
 cd /aiapi
 
-# 方案 A：git clone（推荐）
+# 克隆代码
 git clone https://github.com/tianxingstarsky/OpenMyModel.git backend
 cd backend/backend
-
-# 方案 B：本机打包上传（如果服务器网络差）
-# 本机执行：tar -czf backend.tar.gz 你的项目路径/backend/
-# scp backend.tar.gz root@你的服务器:/aiapi/
-# 服务器：cd /aiapi && mkdir -p backend && tar -xzf backend.tar.gz
 
 # 安装依赖
 npm install
 
-# 编译 TypeScript（关键步骤！）
+# 编译 TypeScript（关键！！！）
 npm run build
 ```
 
-**⚠️ 为什么必须 `npm run build`？**
+> **必须执行 `npm run build`**：源码是 TypeScript，`tsconfig.json` 配置输出 CommonJS 格式。编译后 `dist/index.js` 才是可运行文件。不编译会报 `Cannot use import statement outside a module`。
 
-`tsconfig.json` 已配置 `"module": "commonjs"`，编译后的 `dist/index.js` 使用 `require()` 而非 `import`。如果直接运行 `src/index.ts` 或用 `tsx` 跑源码，会报：
-
-```
-SyntaxError: Cannot use import statement outside a module
-```
-
-编译后验证：
-
+验证编译结果：
 ```bash
-# 确认 dist 目录存在
 ls dist/
-
-# 确认是 CommonJS 格式（第一行应为 require）
+# 应有：index.js  config.js  db/  routes/
 head -3 dist/index.js
-# 正确输出示例：
+# 正确输出（CommonJS 格式）：
 # "use strict";
 # var __importDefault = ...
 # const fastify_1 = __importDefault(require("fastify"));
@@ -290,87 +269,75 @@ head -3 dist/index.js
 
 ---
 
-### 第四步：初始化配置（两种方式任选）
+### 第五步：宝塔「Node项目」启动后端（纯面板操作，不敲命令！）
 
-#### 方式 A：CLI 向导（推荐，中文交互）
+#### 5.1 进入 Node 项目管理
 
-```bash
-cd /aiapi/backend/backend
-npm run setup
-```
-
-交互对话示例：
+宝塔面板 -> 左侧菜单 **「网站」** -> 顶部标签栏切换到 **「Node项目」**：
 
 ```
-╔══════════════════════════════════════════════╗
-║       OpenMyModel 云后端 - 初始化向导          ║
-╚══════════════════════════════════════════════╝
-
-Step 1: 域名 (如 aiapi.topofmoon.com)
-域名: aiapi.topofmoon.com          ← 输入你的域名
-
-Step 2: 管理员密码（至少6字符，用于前端连接）
-密码: ********                     ← 设置强密码
-确认密码: ********
-
-Step 3: 端口
-端口 [3000]:                       ← 回车默认 3000
-
-╔══════════════════════════════════════════════╗
-║          配置完成                             ║
-║  域名: aiapi.topofmoon.com                  ║
-║  端口: 3000                                  ║
-║  配置文件: data/config.json                  ║
-╚══════════════════════════════════════════════╝
+[ 网站 ]  [ Node项目 ]  [ ... ]
+          ^^^^^^^^^^^^
+          点这个标签
 ```
 
-#### 方式 B：环境变量（适合自动化）
+#### 5.2 添加 Node 项目
 
-```bash
-cd /aiapi/backend/backend
+点击 **「添加Node项目」** 按钮（通常位于列表右上角），弹出配置窗口，逐项填写：
 
-export ADMIN_PASSWORD="你的强密码"
-export DOMAIN="aiapi.topofmoon.com"
-export PORT=3000
+**项目目录**：
+```
+/aiapi/backend/backend
+```
+-> 点右侧「选择」按钮浏览目录，或直接粘贴路径。
 
-# 首次启动时，后端检测到缺失 config.json 会自动创建
+**启动选项**：
+```
+dist/index.js
+```
+-> 下拉选择「启动文件」，输入 `dist/index.js`
+-> **注意：不是 `src/index.ts`！必须是编译后的 dist 目录下的文件！**
+
+**项目名称**：
+```
+openmymodel
+```
+-> 自定义名称，在面板列表中识别用。
+
+**运行端口**：
+```
+3000
 ```
 
-**⚠️ 密码持久化说明**：密码以 SHA-256 + salt 哈希存储在 `data/config.json` 中，非明文。首次通过环境变量初始化后，后续 PM2 启动无需再设环境变量。
+**Node版本**：
+-> 下拉选择 **v22.x**
 
----
-
-### 第五步：PM2 进程守护
-
-```bash
-cd /aiapi/backend/backend
-
-# 1. 全局安装 PM2（不用宝塔 PM2 管理器）
-npm install -g pm2
-
-# 2. 确认安装成功
-which pm2
-pm2 -v
-
-# 3. 启动后端
-pm2 start dist/index.js --name openmymodel
-
-# 4. 保存进程列表
-pm2 save
-
-# 5. 设置开机自启（执行输出的那行命令）
-pm2 startup
-# 输出示例: sudo env PATH=$PATH:/usr/bin pm2 startup systemd -u root --hp /root
-# 复制并执行上面那行命令！
-
-# 6. 查看运行状态
-pm2 status
-
-# 7. 查看启动日志
-pm2 logs openmymodel --lines 20
+**项目备注**（可选）：
+```
+OpenMyModel 云端 API 服务
 ```
 
-**启动成功的标志**——日志中应看到：
+**绑定域名**：
+-> 先留空，后面通过反向代理配置
+
+**开机启动**：
+-> 勾选 ✅
+
+填写完毕后，点击窗口底部 **「提交」** 按钮。
+
+#### 5.3 启动项目
+
+回到「Node项目」列表，找到刚创建的 `openmymodel`：
+
+| 项目名称 | 端口 | 状态 | 操作 |
+|----------|------|------|------|
+| openmymodel | 3000 | ● 已停止 | [启动] [重启] [设置] [删除] [日志] |
+
+点击 **「启动」** 按钮。状态变为 **● 运行中** 即成功。
+
+#### 5.4 查看日志确认成功
+
+在 `openmymodel` 所在行，点击 **「日志」** 按钮，应看到：
 
 ```
 ╔══════════════════════════════════════════════╗
@@ -383,46 +350,113 @@ pm2 logs openmymodel --lines 20
 ╚══════════════════════════════════════════════╝
 ```
 
-如果看到 `SyntaxError: Cannot use import statement outside a module`，说明没执行 `npm run build`，回到第三步重新编译。
+#### 5.5 PM2 管理器确认（可选）
+
+宝塔面板 -> 左侧菜单 **「软件商店」** -> 找到 **「PM2管理器」** -> 点击 **「设置」**：
+
+你会看到 `openmymodel` 进程已经在列表中，状态为 `online`。宝塔已经自动通过 PM2 管理了这个进程。
 
 ---
 
-### 第六步：宝塔反向代理（WebSocket 关键配置！）
+### 第六步：初始化配置（域名 + 密码）
 
-#### 6.1 添加站点
+虽然项目已启动，但还需设置域名和密码。SSH 执行：
 
-宝塔面板 → 网站 → 添加站点：
+```bash
+cd /aiapi/backend/backend
+npm run setup
+```
+
+交互对话（中文）：
+
+```
+╔══════════════════════════════════════════════╗
+║       OpenMyModel 云后端 - 初始化向导          ║
+╚══════════════════════════════════════════════╝
+
+域名: aiapi.topofmoon.com          <- 输入你的域名（不带 http://）
+管理员密码: ********                <- 设置强密码（至少6位）
+确认密码: ********
+端口 [3000]:                       <- 回车，用默认 3000
+
+╔══════════════════════════════════════════════╗
+║          配置完成                             ║
+║  域名: aiapi.topofmoon.com                  ║
+║  端口: 3000                                  ║
+║  配置文件: data/config.json                  ║
+╚══════════════════════════════════════════════╝
+```
+
+> 密码存储在 `data/config.json`（SHA-256 + salt 哈希，非明文）。配置完成后回到宝塔 Node项目页面，点击 **「重启」** 让新配置生效。
+
+---
+
+### 第七步：创建网站站点 + 反向代理（精确到按钮！）
+
+#### 7.1 添加网站站点
+
+宝塔面板 -> 左侧菜单 **「网站」** -> 顶部标签 **「网站」**（默认就是）-> 点击 **「添加站点」**（绿色按钮）：
+
+弹出窗口填写：
 
 | 字段 | 值 |
 |------|-----|
 | 域名 | `aiapi.topofmoon.com` |
-| 根目录 | `/www/wwwroot/aiapi`（建个空目录即可） |
-| PHP 版本 | **纯静态** |
+| 根目录 | `/www/wwwroot/aiapi` |
+| PHP版本 | **纯静态** |
 
-```bash
-mkdir -p /www/wwwroot/aiapi
+其他字段保持默认，点击 **「提交」**。
+
+> 如果没有 `/www/wwwroot/aiapi` 目录，宝塔会自动创建。
+
+#### 7.2 进入站点设置
+
+在「网站」列表中找到刚创建的 `aiapi.topofmoon.com`：
+
+点击站点域名（或点击右侧的 **「设置」** 链接），弹出站点设置窗口。顶部有一排标签：
+
+```
+[ 域名管理 ] [ SSL ] [ 反向代理 ] [ 配置文件 ] [ 目录 ] [ ... ]
 ```
 
-#### 6.2 配置反向代理
+#### 7.3 添加反向代理
 
-站点列表 → `aiapi.topofmoon.com` → 反向代理 → 添加反向代理：
+点击 **「反向代理」** 标签 -> 点击 **「添加反向代理」** 按钮（绿色按钮）：
+
+弹出窗口填写：
 
 | 字段 | 值 |
 |------|-----|
 | 代理名称 | `openmymodel` |
-| 目标 URL | `http://127.0.0.1:3000` |
+| 目标URL | `http://127.0.0.1:3000` |
 | 发送域名 | `$host` |
+| 内容替换 | 留空 |
 
-#### 6.3 编辑配置文件（WebSocket 支持 —— 最重要的一步！）
+点击 **「提交」**。
 
-站点 → 配置文件 → 找到 `location /` 块，**完整替换**为：
+#### 7.4 编辑配置文件（添加 WebSocket 支持 -- 最关键一步！）
 
+宝塔自动生成的反向代理配置**缺少 WebSocket 支持**，必须手动添加。
+
+继续在站点设置窗口中，点击 **「配置文件」** 标签。你会看到 Nginx 配置内容。找到 `location /` 这一段。
+
+宝塔自动生成的配置长这样（仅供参考，你的可能略有不同）：
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    ...
+}
+```
+
+**你需要把它完整替换为**：
 ```nginx
 location / {
     proxy_pass http://127.0.0.1:3000;
     proxy_http_version 1.1;
 
-    # WebSocket 支持（必须！缺少会导致前端连不上云端）
+    # ===== WebSocket 支持（必须！缺少会导致前端闪断）=====
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
 
@@ -432,7 +466,7 @@ location / {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
 
-    # 超时设置（WebSocket 长连接）
+    # 超时（WebSocket 长连接，至少 1 小时）
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
 
@@ -444,156 +478,160 @@ location / {
 }
 ```
 
-**⚠️ 这是最容易出错的步骤**：
+> **这就是「前端闪一下就断开」的根因。** 宝塔自动生成的配置没有 `Upgrade` 和 `Connection` 两行，WebSocket 升级请求被 Nginx 丢弃，导致连接瞬间断开。
 
-- 缺少 `Upgrade` 和 `Connection` 头 → WebSocket 瞬间断开（「闪一下就断了」的 Bug 根因）
-- 缺少 `proxy_buffering off` → SSE 流式响应被缓冲，看不到逐字输出
-- 目标 URL 必须是 `http://127.0.0.1:3000`，不是 `http://localhost:3000`
-
-保存后宝塔会自动 reload Nginx。
+编辑完成后，点击配置文件编辑器右下角的 **「保存」** 按钮。宝塔会自动重载 Nginx。
 
 ---
 
-### 第七步：HTTPS/SSL 证书（推荐）
+### 第八步：HTTPS/SSL 证书（强烈推荐）
 
-宝塔面板 → 网站 → `aiapi.topofmoon.com` → SSL：
+在站点设置窗口中，点击 **「SSL」** 标签：
 
-1. 选择「Let's Encrypt」或「宝塔 SSL」
-2. 勾选域名 → 申请
-3. 开启「强制 HTTPS」
+1. 证书类型选择 **「Let's Encrypt」**
+2. 勾选你的域名 `aiapi.topofmoon.com`
+3. 点击 **「申请」** 按钮
+4. 等待申请完成
+5. 打开 **「强制HTTPS」** 开关
 
-**申请后再次检查 Nginx 配置**，确认 `location /` 块仍包含第六步的 WebSocket 配置（有时宝塔 SSL 会覆盖之前的手动修改）。
+> **SSL 申请后务必回去检查「配置文件」标签！** 宝塔 SSL 有时会覆盖你之前手动添加的 WebSocket 配置。确认 `location /` 块里仍有 `proxy_set_header Upgrade $http_upgrade;` 和 `Connection "upgrade";` 两行。如果被覆盖了，重新按 7.4 步骤编辑。
 
 ---
 
-### 第八步：验证部署
+### 第九步：验证部署
 
-#### 8.1 浏览器测试
+#### 9.1 浏览器测试
 
-访问 `http://你的域名/`，应返回：
+访问 `http://aiapi.topofmoon.com/`（或 `https://`），应返回：
 
 ```json
-{"name":"OpenMyModel Cloud API","version":"1.0.0","domain":"你的域名","endpoints":{"models":"/v1/models","chat":"/v1/chat/completions","admin":"/admin/*","websocket":"/ws/node"}}
+{"name":"OpenMyModel Cloud API","version":"1.0.0","domain":"aiapi.topofmoon.com","endpoints":{"models":"/v1/models","chat":"/v1/chat/completions","admin":"/admin/*","websocket":"/ws/node"}}
 ```
 
-#### 8.2 WebSocket 测试
+#### 9.2 WebSocket 测试
 
 ```bash
 npm install -g wscat
-wscat -c ws://你的域名/ws/node
+wscat -c ws://aiapi.topofmoon.com/ws/node
+
 # 连接后手动输入：
 {"type":"auth","password":"你的管理员密码"}
+
 # 应收到：
-{"type":"auth_ok","nodeId":"xxx-xxx-xxx","message":"认证成功，节点已注册"}
+{"type":"auth_ok","nodeId":"xxx-xxx","message":"认证成功，节点已注册"}
 ```
 
-#### 8.3 PM2 确认
+#### 9.3 宝塔面板内确认
 
-```bash
-pm2 status
-pm2 logs openmymodel --lines 10
-```
+回到 **「网站」->「Node项目」**，`openmymodel` 状态为 **● 运行中**。
 
 ---
 
-### 第九步：Flutter 前端连接云端
+### 第十步：Flutter 桌面端连接云端
 
-打开 OpenMyModel 桌面端 → 云端连接：
+打开 OpenMyModel 桌面端 -> **「云端连接」** 标签页：
 
 | 字段 | 值 | 说明 |
 |------|-----|------|
 | 服务器地址 | `aiapi.topofmoon.com` | **不加 http://，不加端口号！** |
-| 密码 | 你设置的管理员密码 | 第四步 `npm run setup` 设置的密码 |
+| 密码 | 你在第六步设置的密码 | |
 
-**⚠️ 为什么不能加端口号？**
+> **为什么不能加端口号？**
+>
+> `aiapi.topofmoon.com:3000` = 直连后端 3000 = 安全组已禁止外部访问 = 超时 ❌
+> `aiapi.topofmoon.com` = Nginx(80) = 反向代理到 127.0.0.1:3000 = 成功 ✅
 
-```
-错误: aiapi.topofmoon.com:3000 → 直连后端 3000 端口 → 安全组已禁止外部访问 → 超时
-正确: aiapi.topofmoon.com      → Nginx 80/443 → 反向代理到 127.0.0.1:3000 → 成功
-```
-
-**连接成功标志**：状态指示灯绿色 → 显示「已连接」→ 可生成 API Key。
+**连接成功标志**：状态灯变绿 -> 显示「已连接」-> 可生成 API Key。
 
 ---
 
 ## 🐛 排错指南（真实踩坑记录）
 
-### PM2 相关
+### PM2 / Node项目 相关
 
 | 问题 | 原因 | 解决 |
 |------|------|------|
-| 宝塔提示「PM2 未安装」 | 宝塔 PM2 管理器用了自带的旧 Node.js | 卸载宝塔 PM2 管理器，用 `npm install -g pm2` 全局安装 |
-| PM2 报 `Cannot use import statement outside a module` | 直接跑了 TS 源码 | 执行 `npm run build` 后再启动 |
-| `ERR_MODULE_NOT_FOUND: Cannot find module './config'` | 之前 tsconfig 是 ESM 模式 | 已改为 CommonJS，重新 `npm run build` 即可 |
+| PM2管理器里找不到项目 | 手动 `pm2 start` 启动的，没通过宝塔「Node项目」添加 | 在 PM2 管理器里删掉手动进程，回 Node项目 -> 添加Node项目 |
+| 启动报 `Cannot use import statement outside a module` | 启动文件选了 `src/index.ts`（源码） | Node项目设置 -> 启动文件改为 `dist/index.js`；SSH 执行 `npm run build` |
+| `ERR_MODULE_NOT_FOUND: ./config` | 旧的 ESM tsconfig 残留 | 重新 `npm run build`（当前已是 CommonJS） |
 
-### WebSocket / 连接相关
+### WebSocket 连接相关
 
 | 问题 | 原因 | 解决 |
 |------|------|------|
-| 前端连接「闪一下就断开」 | Nginx 缺 WebSocket 代理头 | 第六步 → 确认 `Upgrade` 和 `Connection` 头存在 |
-| 浏览器 JSON 正常，前端连不上 | HTTP 不需要 WebSocket 头，所以浏览器 OK | 同上，改 Nginx 配置 |
-| 显示「无在线节点」 | Flutter 还没连 | 正常——打开桌面端连上后才有节点 |
-| `RangeError: Not in inclusive range 0.69: 200` | HTTP 状态码解析异常 | 检查后端错误日志 `pm2 logs openmymodel --err` |
+| 前端「闪一下就断开」 | Nginx 缺少 WebSocket 代理头 | 第七步 7.4 -> 确认 `Upgrade` 和 `Connection` 头存在 |
+| 浏览器 JSON 正常，前端连不上 | HTTP 不需要 WebSocket 头（所以浏览器 OK），但 WebSocket 需要 | 同上：只有 WebSocket 会暴露配置缺失 |
+| Node项目运行中，域名访问无响应 | 反向代理目标URL填错 或 安全组没开 80 | 检查目标URL是 `http://127.0.0.1:3000`；检查安全组 |
 
 ### API Key 相关
 
 | 问题 | 原因 | 解决 |
 |------|------|------|
-| `HTTP 401: Invalid API Key` | 密钥未同步到当前 WebSocket 节点 | **新建一个密钥**（v0.3.1+ 连接前会自动加载密钥） |
-| 旧密钥用不了，新建才行 | 节点重连后旧映射可能失效 | 正常行为——重连后建议新建密钥 |
-| 已有密钥但 401 | 密钥加载时序问题 | 已修复，确保用的是最新版 |
+| 测试报 `HTTP 401: Invalid API Key` | 密钥未同步到当前节点 | 在桌面端「云端连接」页面**新建一个密钥**后再测试 |
+| 旧密钥失效，新密钥才能用 | 节点重连后旧映射可能过期 | 正常行为；重连后新建密钥即可 |
+| 已有密钥但始终 401 | 密钥加载时序竞争 | 已修复（v0.3.1+）；升级到最新版 |
 
 ### 网络 / 端口
 
 | 问题 | 原因 | 解决 |
 |------|------|------|
-| 域名访问无响应 | 安全组未开 80/443 | 云控制台 → 安全组 → 添加规则 |
-| `wscat` 超时 | DNS 未解析 或 安全组未开 | `ping 你的域名` 检查；查安全组 |
+| 域名访问无响应 | 安全组未开放 80/443 | 云控制台 -> 安全组 -> 添加入方向规则 |
+| `wscat` 连接超时 | DNS 未解析 或 安全组问题 | `ping 你的域名` 确认解析 |
+| Nginx 配置保存后不生效 | 需要手动重载 | 宝塔「网站」-> Nginx 服务 -> 重载配置 |
 
 ---
 
-## 🔄 后续运维
+## 🔄 后续运维（全在宝塔面板操作）
 
-### 日常管理
+### 启动 / 停止 / 重启
+
+**操作路径**：宝塔 -> **「网站」** -> **「Node项目」** -> 找到 `openmymodel`：
+
+点击 [启动] [停止] [重启] [设置] [删除] [日志] 按钮即可。
+
+### 查看日志
+
+点击 **「日志」** 按钮查看实时运行日志。错误信息也会显示在这里。
+
+### 修改配置
+
+**修改管理员密码**：SSH 执行：
+```bash
+cd /aiapi/backend/backend
+npm run setup
+# 选择「重置密码」
+```
+然后回到 Node项目 页面点击 **「重启」**。
+
+**查看当前配置**：
+```bash
+cat /aiapi/backend/backend/data/config.json
+```
+（密码是哈希过的，安全无害）
+
+### 更新后端代码
 
 ```bash
-# PM2 管理
-pm2 status                          # 查看状态
-pm2 logs openmymodel                # 实时日志
-pm2 logs openmymodel --err          # 只看错误
-pm2 restart openmymodel             # 重启
-pm2 stop openmymodel                # 停止
-pm2 delete openmymodel              # 删除进程
-
-# 查看配置
-cat /aiapi/backend/backend/data/config.json
-
-# 修改管理员密码
-cd /aiapi/backend/backend && npm run setup
-# 选择「重置密码」→ pm2 restart openmymodel
-
-# 更新代码
 cd /aiapi/backend/backend
 git pull origin main
 npm install
-npm run build                       # 每次更新必须重新编译！
-pm2 restart openmymodel
-pm2 logs openmymodel --lines 10     # 确认启动成功
+npm run build        # 每次更新必须重新编译！
 ```
+然后回到宝塔 Node项目 页面，点击 **「重启」**。
 
 ### 服务器目录结构
 
 ```
 /aiapi/
 └── backend/
-    └── backend/              # 后端项目根目录
-        ├── dist/             # 编译产物（实际运行）
-        │   ├── index.js      # PM2 启动的入口
+    └── backend/              # 项目根目录
+        ├── dist/             # 编译产物（Node项目实际运行的文件）
+        │   ├── index.js      # 入口文件
         │   ├── config.js
         │   ├── db/
         │   └── routes/
         ├── data/
-        │   ├── config.json   # 配置文件（密码哈希、域名等）
+        │   ├── config.json   # 中心配置
         │   └── openmymodel.db # SQLite 数据库
         ├── src/              # TypeScript 源码
         ├── node_modules/
@@ -601,7 +639,35 @@ pm2 logs openmymodel --lines 10     # 确认启动成功
         └── tsconfig.json
 ```
 
-> 💡 重装系统前，备份 `data/` 目录即可保留所有配置和节点数据。
+> 💡 重装系统前，备份 `data/` 目录即可保留全部配置和数据库。
+
+---
+
+### 完整 Nginx 配置参考
+
+如果宝塔的配置编辑器混乱，可以直接全量替换为以下模板：
+
+```nginx
+server {
+    listen 80;
+    server_name aiapi.topofmoon.com;
+    client_max_body_size 50m;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+}
+```
 
 ---
 
