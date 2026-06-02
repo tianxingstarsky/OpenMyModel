@@ -43,3 +43,5 @@ Thumbs.db
 *.zip
 *.spec
 release/
+
+deploy/
