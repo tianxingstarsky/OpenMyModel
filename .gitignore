@@ -38,3 +38,8 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Release artifacts
+*.zip
+*.spec
+release/
