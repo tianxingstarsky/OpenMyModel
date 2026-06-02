@@ -1,0 +1,48 @@
+# OpenMyModel 云端部署模拟环境
+# 启动: docker compose up -d --build
+# 停止: docker compose down
+
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: openmymodel-backend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - backend-data:/app/data
+    environment:
+      - ADMIN_PASSWORD=admin123456
+      - DOMAIN=localhost
+      - PORT=3000
+      - NODE_ENV=production
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/',function(r){process.exit(r.statusCode===200?0:1)})\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - openmymodel-net
+
+  nginx:
+    image: docker.m.daocloud.io/library/nginx:alpine
+    container_name: openmymodel-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx-docker.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - openmymodel-net
+
+networks:
+  openmymodel-net:
+    driver: bridge
+
+volumes:
+  backend-data:

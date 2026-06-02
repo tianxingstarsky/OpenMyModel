@@ -1,0 +1,15 @@
+node_modules
+dist
+data
+.git
+*.md
+deploy
+frontend
+python
+release
+*.zip
+*.rar
+*.png
+*.db
+*.db-shm
+*.db-wal
