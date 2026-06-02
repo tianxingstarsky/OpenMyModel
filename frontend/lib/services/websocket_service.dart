@@ -27,6 +27,16 @@ class WebSocketService {
   void _oldSetLocalKeys(List<Map<String, dynamic>> keys) => _localKeys = keys;
   void setBridgePath(String path) => _bridgePath = path;
 
+  String _findBundledScript(String relative) {
+    // Try relative to exe first (for bundled release)
+    return relative;
+  }
+
+  String get _nodeExe {
+    // Bundled portable Node.js
+    return "scripts/node/node.exe";
+  }
+
   void _send(Map<String, dynamic> cmd) {
     if (_process != null) {
       _process!.stdin.write(jsonEncode(cmd) + "\n");
@@ -41,9 +51,9 @@ class WebSocketService {
 
       final bridgeScript = _bridgePath.isNotEmpty
           ? _bridgePath
-          : "scripts/cloud_bridge.js";
+          : _findBundledScript("scripts/cloud_bridge.js");
 
-      _process = await Process.start("node", [bridgeScript]);
+      _process = await Process.start(_nodeExe, [bridgeScript]);
       _connected = false;
 
       // Listen for stdout (JSON messages)
