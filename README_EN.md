@@ -111,6 +111,449 @@ npx ts-node src/cli.ts
 
 ---
 
+
+## ☁️ Cloud Backend Deployment Guide (Baota Panel · Ultra-Detailed)
+
+> **Goal**: Deploy the OpenMyModel cloud backend on an Alibaba Cloud / Tencent Cloud server using the Baota panel, with your own domain.
+
+### Prerequisites
+
+| Condition | Details |
+|-----------|---------|
+| Server | Alibaba Cloud ECS / Tencent Cloud CVM, minimum 1 core 2 GB |
+| OS | CentOS 7+ / Ubuntu 20.04+ / Debian 11+ |
+| Domain | A registered domain with DNS pointing to the server IP |
+| Baota Panel | Installed and accessible |
+| SSH | Root access |
+
+---
+
+### Step 1: Baota Panel Environment Setup
+
+#### 1.1 Login to Baota → App Store → Install
+
+| Software | Purpose | Notes |
+|----------|---------|-------|
+| Nginx | Reverse proxy (port 80/443 → backend 3000) | Free, one-click install |
+| Node.js Version Manager | Manage multiple Node.js versions | Free, one-click install |
+
+#### 1.2 Install Node.js (Critical!)
+
+Baota → App Store → Node.js Version Manager → Install **v22.x** (v20+ also works, v22 LTS recommended)
+
+**⚠️ The Baota PM2 Manager Trap (Important!)**:
+
+- The Baota "PM2 Manager" plugin is hardwired to Baota's own Node.js (usually v16/v18)
+- After you switch to v22 via Node.js Version Manager, the Baota PM2 Manager cannot find the correct `node` binary
+- **Recommended approach**: **Do NOT install the Baota PM2 Manager plugin**. Install PM2 globally via npm instead.
+- If you already installed it: App Store → Uninstall PM2 Manager, then continue below.
+
+```bash
+# Verify Node.js version
+node -v
+# Should output: v22.x.x
+
+# Install PM2 globally
+npm install -g pm2
+
+# Verify PM2
+pm2 -v
+```
+
+#### 1.3 Create Project Directory (Bypassing Baota www constraints)
+
+> ⚠️ Baota's website feature defaults to `/www/wwwroot/`, but this is just a convention for static sites. Our backend is an independent Node.js process — it can live **anywhere** on the filesystem. The only requirement is that Nginx reverse-proxies to the correct port.
+
+```bash
+mkdir -p /aiapi
+cd /aiapi
+```
+
+---
+
+### Step 2: Cloud Security Group Configuration
+
+Cloud provider console → Security Groups → Inbound Rules → Add:
+
+| Port | Protocol | Source | Purpose |
+|------|----------|--------|---------|
+| 80 | TCP | 0.0.0.0/0 | HTTP (Nginx public) |
+| 443 | TCP | 0.0.0.0/0 | HTTPS (SSL, recommended) |
+| 22 | TCP | Your IP | SSH management |
+
+**⚠️ Do NOT open port 3000 to the public!** Security model:
+
+```
+External traffic → Nginx(80/443) → reverse proxy → 127.0.0.1:3000(backend)
+                                                   ↑ loopback only
+```
+
+If you previously opened port 3000 publicly, remove that rule now.
+
+---
+
+### Step 3: Deploy Backend Code
+
+SSH into your server:
+
+```bash
+mkdir -p /aiapi
+cd /aiapi
+
+# Option A: git clone (recommended for easy updates)
+git clone https://github.com/tianxingstarsky/OpenMyModel.git backend
+cd backend/backend
+
+# Option B: Upload zip from your local machine (if GitHub is slow)
+# On your PC: zip the backend/ folder → scp to server → unzip
+
+# Install dependencies
+npm install
+
+# Compile TypeScript → JavaScript (critical step!)
+npm run build
+```
+
+**⚠️ Why `npm run build` is mandatory:**
+
+`tsconfig.json` is set to `"module": "commonjs"`. The compiled `dist/index.js` uses `require()`, not `import`. If you run the TypeScript source directly, you'll get:
+
+```
+SyntaxError: Cannot use import statement outside a module
+```
+
+Verify the build:
+
+```bash
+ls dist/
+# Should contain: index.js  config.js  db/  routes/ ...
+
+head -3 dist/index.js
+# Expected output (CommonJS format):
+# "use strict";
+# var __importDefault = ...
+# const fastify_1 = __importDefault(require("fastify"));
+```
+
+---
+
+### Step 4: Initialize Configuration (Two Methods)
+
+#### Method A: CLI Wizard (Recommended, Chinese prompts)
+
+```bash
+cd /aiapi/backend/backend
+npm run setup
+```
+
+Interactive wizard:
+
+```
+╔══════════════════════════════════════════════╗
+║       OpenMyModel Cloud Backend - Setup       ║
+╚══════════════════════════════════════════════╝
+
+Step 1: Domain (e.g. aiapi.topofmoon.com)
+Domain: aiapi.topofmoon.com          ← Enter your domain
+
+Step 2: Admin password (min 6 chars, used by the desktop app to connect)
+Password: ********
+Confirm: ********
+
+Step 3: Port
+Port [3000]:                         ← Press Enter for default 3000
+
+╔══════════════════════════════════════════════╗
+║          Setup Complete                       ║
+║  Domain: aiapi.topofmoon.com                ║
+║  Port: 3000                                  ║
+║  Config: data/config.json                    ║
+╚══════════════════════════════════════════════╝
+```
+
+#### Method B: Environment Variables (for automation)
+
+```bash
+cd /aiapi/backend/backend
+
+export ADMIN_PASSWORD="your-strong-password"
+export DOMAIN="aiapi.topofmoon.com"
+export PORT=3000
+
+# On first start, the backend auto-creates data/config.json
+```
+
+**⚠️ Password persistence**: The password is stored as SHA-256 + salt hash in `data/config.json`. After the first initialization via env vars, subsequent PM2 restarts do not need environment variables.
+
+---
+
+### Step 5: PM2 Process Manager
+
+```bash
+cd /aiapi/backend/backend
+
+# 1. Install PM2 globally (NOT the Baota PM2 Manager plugin)
+npm install -g pm2
+
+# 2. Verify
+which pm2 && pm2 -v
+
+# 3. Start the backend
+pm2 start dist/index.js --name openmymodel
+
+# 4. Save the process list
+pm2 save
+
+# 5. Enable auto-start on boot (copy and run the command it outputs)
+pm2 startup
+# Example output: sudo env PATH=$PATH:/usr/bin pm2 startup systemd -u root --hp /root
+# ← Copy & run that command!
+
+# 6. Check status
+pm2 status
+
+# 7. View logs
+pm2 logs openmymodel --lines 20
+```
+
+**Success indicator** — the logs should show:
+
+```
+╔══════════════════════════════════════════════╗
+║  OpenMyModel Cloud API Started                ║
+║  Address: http://0.0.0.0:3000                ║
+║  Domain: aiapi.topofmoon.com                ║
+║  WebSocket: /ws/node                         ║
+║  API: /v1/chat/completions                   ║
+║  Admin: /admin/*                             ║
+╚══════════════════════════════════════════════╝
+```
+
+If you see `SyntaxError: Cannot use import statement outside a module`, you forgot `npm run build` — go back to Step 3.
+
+---
+
+### Step 6: Baota Reverse Proxy (WebSocket Configuration — Critical!)
+
+#### 6.1 Add a Website
+
+Baota Panel → Websites → Add Site:
+
+| Field | Value |
+|-------|-------|
+| Domain | `aiapi.topofmoon.com` |
+| Root Directory | `/www/wwwroot/aiapi` (empty directory is fine) |
+| PHP Version | **Static** |
+
+```bash
+mkdir -p /www/wwwroot/aiapi
+```
+
+#### 6.2 Configure Reverse Proxy
+
+Site list → `aiapi.topofmoon.com` → Reverse Proxy → Add:
+
+| Field | Value |
+|-------|-------|
+| Proxy Name | `openmymodel` |
+| Target URL | `http://127.0.0.1:3000` |
+| Send Domain | `$host` |
+
+#### 6.3 Edit Nginx Config (WebSocket Support — Most Important Step!)
+
+Site → Config File → Find the `location /` block → **Replace entirely** with:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+
+    # WebSocket support (MANDATORY! Without this, the desktop app cannot connect)
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+
+    # Standard proxy headers
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # Timeout for long-lived WebSocket connections
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+
+    # Disable buffering (required for SSE streaming responses)
+    proxy_buffering off;
+
+    # Upload limit
+    client_max_body_size 50m;
+}
+```
+
+**⚠️ This is the step where most things go wrong**:
+
+- Missing `Upgrade` and `Connection` headers → WebSocket disconnects immediately (the "flash connect then disconnect" bug)
+- Missing `proxy_buffering off` → SSE streaming is buffered, no token-by-token output
+- Target URL must be `http://127.0.0.1:3000`, NOT `http://localhost:3000`
+
+After saving, Baota will auto-reload Nginx.
+
+---
+
+### Step 7: HTTPS / SSL Certificate (Recommended)
+
+Baota Panel → Websites → `aiapi.topofmoon.com` → SSL:
+
+1. Choose "Let's Encrypt" or "Baota SSL"
+2. Select your domain → Apply
+3. Enable "Force HTTPS"
+
+**After applying SSL, re-check the Nginx config** to ensure the `location /` block from Step 6 is intact (Baota SSL sometimes overwrites manual edits).
+
+---
+
+### Step 8: Verify the Deployment
+
+#### 8.1 Browser Test
+
+Visit `http://your-domain/` (or `https://` if SSL is set up). The response should be:
+
+```json
+{"name":"OpenMyModel Cloud API","version":"1.0.0","domain":"your-domain","endpoints":{"models":"/v1/models","chat":"/v1/chat/completions","admin":"/admin/*","websocket":"/ws/node"}}
+```
+
+#### 8.2 WebSocket Test
+
+```bash
+npm install -g wscat
+wscat -c ws://your-domain/ws/node
+# (use wss:// for HTTPS)
+
+# Type in:
+{"type":"auth","password":"your-admin-password"}
+
+# Expected response:
+{"type":"auth_ok","nodeId":"xxx-xxx-xxx","message":"Authentication successful, node registered"}
+```
+
+#### 8.3 PM2 Check
+
+```bash
+pm2 status
+pm2 logs openmymodel --lines 10
+```
+
+---
+
+### Step 9: Connect from the Flutter Desktop App
+
+Open the OpenMyModel desktop app → Cloud Connection tab:
+
+| Field | Value | Notes |
+|-------|-------|-------|
+| Server Address | `aiapi.topofmoon.com` | **No `http://`, no port number!** |
+| Password | Your admin password | Set in Step 4 |
+
+**⚠️ Why no port number?**
+
+```
+Wrong: aiapi.topofmoon.com:3000 → direct to backend port 3000 → blocked by security group → timeout
+Right: aiapi.topofmoon.com       → Nginx 80/443 → reverse proxy to 127.0.0.1:3000 → works
+```
+
+**Success signs**: Status indicator turns green → "Connected" → API keys can be generated.
+
+---
+
+## 🐛 Troubleshooting (Real Issues Encountered)
+
+### PM2 Issues
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Baota says "PM2 not installed" | Baota PM2 Manager uses its own old Node.js | Uninstall Baota PM2 Manager, use `npm install -g pm2` |
+| `Cannot use import statement outside a module` | Running TypeScript source directly | Run `npm run build` first, then start `dist/index.js` |
+| `ERR_MODULE_NOT_FOUND: Cannot find module './config'` | Old ESM tsconfig produced broken imports | Fixed in current version (CommonJS), re-run `npm run build` |
+
+### WebSocket / Connection Issues
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Frontend connects then instantly disconnects | Nginx missing WebSocket proxy headers | Step 6.3 → ensure `Upgrade` and `Connection` headers exist |
+| Browser shows JSON OK, but desktop app cannot connect | HTTP works without WebSocket headers, WebSocket doesn't | Same as above — fix Nginx config |
+| Status shows "No online nodes" | Desktop app hasn't connected yet | Normal — nodes appear after the desktop app connects |
+| `RangeError: Not in inclusive range 0.69: 200` | HTTP status code parsing error | Check backend error logs: `pm2 logs openmymodel --err` |
+
+### API Key Issues
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| `HTTP 401: Invalid API Key` | Key not synced to current WebSocket node | **Create a new key** (v0.3.1+ loads keys before connecting) |
+| Old keys don't work, new ones do | Node reconnection invalidates old key mappings | Expected behavior — generate a fresh key after reconnecting |
+| Keys exist but still get 401 | Key load timing race condition | Fixed in latest version, ensure you're up to date |
+
+### Network / Port Issues
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Domain not responding | Security group missing port 80/443 | Cloud console → Security Groups → Add inbound rules |
+| `wscat` timeout | DNS not resolved or security group closed | `ping your-domain` to verify; check security group |
+
+---
+
+## 🔄 Ongoing Maintenance
+
+### Daily Commands
+
+```bash
+# PM2 management
+pm2 status                          # View status
+pm2 logs openmymodel                # Live logs
+pm2 logs openmymodel --err          # Error logs only
+pm2 restart openmymodel             # Restart
+pm2 stop openmymodel                # Stop
+pm2 delete openmymodel              # Remove process
+
+# View config
+cat /aiapi/backend/backend/data/config.json
+
+# Change admin password
+cd /aiapi/backend/backend && npm run setup
+# Select "Reset Password" → pm2 restart openmymodel
+
+# Update code
+cd /aiapi/backend/backend
+git pull origin main
+npm install
+npm run build                       # Must rebuild after every update!
+pm2 restart openmymodel
+pm2 logs openmymodel --lines 10     # Confirm successful start
+```
+
+### Server Directory Structure
+
+```
+/aiapi/
+└── backend/
+    └── backend/              # Backend project root
+        ├── dist/             # Compiled output (what actually runs)
+        │   ├── index.js      # Entry point (PM2 starts this)
+        │   ├── config.js
+        │   ├── db/
+        │   └── routes/
+        ├── data/
+        │   ├── config.json   # Config (password hash, domain, etc.)
+        │   └── openmymodel.db # SQLite database
+        ├── src/              # TypeScript source
+        ├── node_modules/
+        ├── package.json
+        └── tsconfig.json
+```
+
+> 💡 Before reinstalling the OS, back up the `data/` directory — it contains all configuration and node records.
+
+---
+
 ## Security Design
 
 ```
