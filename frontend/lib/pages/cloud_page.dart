@@ -42,7 +42,7 @@ class _CloudPageState extends State<CloudPage> {
     super.initState();
     _wsService.setBridgePath(r"F:\llama_cpp\output_my_model\scripts\cloud_bridge.js");
     _loadPrefs();
-    _loadKeysLocal();
+    _ensureKeysLoaded();
     _wsService.setLlamaUrl(widget.llamaUrl);
     _wsService.setModelName(widget.modelName);
     _wsService.messages.listen((msg) {
@@ -143,12 +143,19 @@ class _CloudPageState extends State<CloudPage> {
     _savePrefs();
     final ok = await _wsService.connect(tcUrl.text.trim(), tcPwd.text, nodeName: "OpenMyModel-本地节点");
     setState(() { _connected = ok; _connStatus = ok ? "已连接 - 节点在线" : "连接超时，请检查地址、密码和llama-server"; });
-    if (ok) _loadKeys();
+    if (ok) {
+      if (!_keysLoaded) await _ensureKeysLoaded();
+      _loadKeys();
+    }
   }
 
   void _disconnect() { _wsService.disconnect(); _nodesPollTimer?.cancel(); setState(() { _connected = false; _connStatus = "已断开"; }); }
 
-  Future _loadKeys() async {}
+  Future _loadKeys() async {
+    if (_apiKeys.isNotEmpty) {
+      _wsService.setLocalKeys(List<Map<String, dynamic>>.from(_apiKeys));
+    }
+  }
 
   String _genKey() {
     final random = Random.secure();
@@ -416,6 +423,13 @@ class _CloudPageState extends State<CloudPage> {
   Future<void> _saveKeysLocal() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString("api_keys", jsonEncode(_apiKeys));
+  }
+
+  bool _keysLoaded = false;
+
+  Future<void> _ensureKeysLoaded() async {
+    await _loadKeysLocal();
+    _keysLoaded = true;
   }
 
   Future<void> _loadKeysLocal() async {
