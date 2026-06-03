@@ -380,21 +380,23 @@ OpenMyModel 云端 API 服务
 
 > 如果没有 `/www/wwwroot/aiapi` 目录，宝塔会自动创建。
 
-#### 7.2 进入站点设置
+#### 6.2 进入网站站点设置（注意：是"网站"设置，不是"Node项目"设置！）
 
-在「网站」列表中找到刚创建的 `api.your-domain.com`：
-
-点击站点域名（或点击右侧的 **「设置」** 链接），弹出站点设置窗口。顶部有一排标签：
+在「网站」列表中找到刚创建的 `api.your-domain.com`，点击站点域名打开设置窗口。顶部标签栏：
 
 ```
-[ 域名管理 ] [ SSL ] [ 反向代理 ] [ 配置文件 ] [ 目录 ] [ ... ]
+[ 域名管理 ] [ SSL ] [ 反向代理 ] [ 配置文件 ] [ ... ]
+            ↑                            ↑
+       反向代理在这里配             WebSocket 配置在这里改
 ```
 
-#### 7.3 添加反向代理
+> ⚠️ **关键区别**："Node项目"的设置页面里**没有**反向代理标签。反向代理只能通过"网站"站点来配置。两个是独立的：
+> - **网站站点**：负责域名绑定 + 反向代理 + SSL
+> - **Node项目**：只负责运行 Node.js 进程
 
-点击 **「反向代理」** 标签 -> 点击 **「添加反向代理」** 按钮（绿色按钮）：
+#### 6.3 添加反向代理
 
-弹出窗口填写：
+站点设置窗口 -> 点击 **「反向代理」** 标签 -> 点击 **「添加反向代理」** 按钮：
 
 | 字段 | 值 |
 |------|-----|
@@ -403,55 +405,30 @@ OpenMyModel 云端 API 服务
 | 发送域名 | `$host` |
 | 内容替换 | 留空 |
 
-点击 **「提交」**。
+点击「提交」。
 
-#### 7.4 编辑配置文件（添加 WebSocket 支持 -- 最关键一步！）
+#### 6.4 编辑配置文件（WebSocket 支持 —— 最关键一步！）
 
-宝塔自动生成的反向代理配置**缺少 WebSocket 支持**，必须手动添加。
+在站点设置窗口（注意，是"网站"站点的设置，不是 Node项目的），点击 **「配置文件」** 标签。找到 `location /` 块，**完整替换**为：
 
-继续在站点设置窗口中，点击 **「配置文件」** 标签。你会看到 Nginx 配置内容。找到 `location /` 这一段。
-
-宝塔自动生成的配置长这样（仅供参考，你的可能略有不同）：
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:3000;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    ...
-}
-```
-
-**你需要把它完整替换为**：
 ```nginx
 location / {
     proxy_pass http://127.0.0.1:3000;
     proxy_http_version 1.1;
-
-    # ===== WebSocket 支持（必须！缺少会导致前端闪断）=====
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
-
-    # 标准代理头
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-
-    # 超时（WebSocket 长连接，至少 1 小时）
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
-
-    # 关闭缓冲（SSE 流式响应需要）
     proxy_buffering off;
-
-    # 上传限制
     client_max_body_size 50m;
 }
 ```
 
-> **这就是「前端闪一下就断开」的根因。** 宝塔自动生成的配置没有 `Upgrade` 和 `Connection` 两行，WebSocket 升级请求被 Nginx 丢弃，导致连接瞬间断开。
-
-编辑完成后，点击配置文件编辑器右下角的 **「保存」** 按钮。宝塔会自动重载 Nginx。
+点击「保存」，宝塔自动重载 Nginx。
 
 ---
 
@@ -532,6 +509,8 @@ wscat -c ws://api.your-domain.com/ws/node
 |------|------|------|
 | 前端「闪一下就断开」 | Nginx 缺少 WebSocket 代理头 | 第六步 6.4 -> 确认 `Upgrade` 和 `Connection` 头存在 |
 | 浏览器 JSON 正常，前端连不上 | HTTP 不需要 WebSocket 头（所以浏览器 OK），但 WebSocket 需要 | 同上：只有 WebSocket 会暴露配置缺失 |
+| 在Node项目设置里找不到"反向代理"标签 | Node项目的设置里没有反向代理功能 | 反向代理要到「网站」-> 站点设置里配置，不是 Node项目设置 |
+
 | Node项目运行中，域名访问无响应 | 反向代理目标URL填错 或 安全组没开 80 | 检查目标URL是 `http://127.0.0.1:3000`；检查安全组 |
 
 ### API Key 相关
