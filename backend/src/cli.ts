@@ -75,7 +75,7 @@ async function setupWizard() {
   const cfg = loadConfig();
 
   // Domain
-  console.log("Step 1: 域名 (如 aiapi.topofmoon.com)");
+  console.log("Step 1: 域名 (如 api.your-domain.com)");
   let domain = await q(`域名 [${cfg.domain || "localhost"}]: `);
   if (!domain) domain = cfg.domain || "localhost";
 

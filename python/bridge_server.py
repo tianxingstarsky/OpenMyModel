@@ -90,7 +90,7 @@ class SaveProfileRequest(BaseModel):
 
 class CloudConfig(BaseModel):
     """云端连接配置"""
-    server_url: str = ""        # 如 aiapi.topofmoon.com
+    server_url: str = ""        # 如 api.your-domain.com
     password: str = ""          # 云端设置的密码
 
 
