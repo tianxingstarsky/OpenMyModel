@@ -585,8 +585,7 @@ cat /aiapi/backend/backend/data/config.json
 ```bash
 cd /aiapi/backend/backend
 git pull origin main
-npm install
-npm run build        # 每次更新必须重新编译！
+npm install`r`n# ⚠️ 如果报 NODE_MODULE_VERSION 错误，先执行：`r`n# rm -rf node_modules && npm install`r`nnpm run build        # 每次更新必须重新编译！
 ```
 然后回到宝塔 Node项目 页面，点击 **「重启」**。
 

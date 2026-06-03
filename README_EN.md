@@ -557,8 +557,7 @@ cat /aiapi/backend/backend/data/config.json
 ```bash
 cd /aiapi/backend/backend
 git pull origin main
-npm install
-npm run build        # Must rebuild after every update!
+npm install`r`n# ⚠️ If NODE_MODULE_VERSION error, run first:`r`n# rm -rf node_modules && npm install`r`nnpm run build        # Must rebuild after every update!
 ```
 Then back in Node Projects page, click **"Restart"**.
 
