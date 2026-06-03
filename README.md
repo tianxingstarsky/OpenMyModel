@@ -287,7 +287,7 @@ head -3 dist/index.js
 
 **项目目录**：
 ```
-/aiapi/backend/backend
+/aiapi/OpenMyModel/backend
 ```
 -> 点右侧「选择」按钮浏览目录，或直接粘贴路径。
 
@@ -363,7 +363,7 @@ OpenMyModel 云端 API 服务
 虽然项目已启动，但还需设置域名和密码。SSH 执行：
 
 ```bash
-cd /aiapi/backend/backend
+cd /aiapi/OpenMyModel/backend
 npm run setup
 ```
 
@@ -597,7 +597,7 @@ wscat -c ws://api.your-domain.com/ws/node
 
 **修改管理员密码**：SSH 执行：
 ```bash
-cd /aiapi/backend/backend
+cd /aiapi/OpenMyModel/backend
 npm run setup
 # 选择「重置密码」
 ```
@@ -605,14 +605,14 @@ npm run setup
 
 **查看当前配置**：
 ```bash
-cat /aiapi/backend/backend/data/config.json
+cat /aiapi/OpenMyModel/backend/data/config.json
 ```
 （密码是哈希过的，安全无害）
 
 ### 更新后端代码
 
 ```bash
-cd /aiapi/backend/backend
+cd /aiapi/OpenMyModel/backend
 git pull origin main
 npm install
 npm run build        # 每次更新必须重新编译！
@@ -623,7 +623,7 @@ npm run build        # 每次更新必须重新编译！
 
 ```
 /aiapi/
-└── backend/
+└── OpenMyModel/
     └── backend/              # 项目根目录
         ├── dist/             # 编译产物（Node项目实际运行的文件）
         │   ├── index.js      # 入口文件
