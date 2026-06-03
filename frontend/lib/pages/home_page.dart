@@ -70,29 +70,22 @@ class _HomePageState extends State<HomePage> with WindowListener {
 
   Future<void> _startBridge() async {
     try {
-      // Find Python: try PATH first, then common locations
+      // Find Python: try PATH first
       String pythonPath = "python";
-      const pyNames = ["python3", "python"];
-      for (final name in pyNames) {
+      for (final name in ["python3", "python"]) {
         try {
           final r = await Process.run(name, ["--version"]);
           if (r.exitCode == 0) { pythonPath = name; break; }
         } catch (_) {}
-
-      // Try conda environments
+      }
+      // Try conda if PATH python not found
       if (pythonPath == "python") {
-        final home = Platform.environment["USERPROFILE"] ?? "";
-        final bases = [
-          home + "/.conda/envs",
-          home + "/miniconda3/envs",
-          home + "/anaconda3/envs",
-        ];
-        for (final base in bases) {
+        final home = Platform.environment["USERPROFILE"] ?? Platform.environment["HOME"] ?? "";
+        for (final base in [home + "/.conda/envs", home + "/miniconda3/envs", home + "/anaconda3/envs"]) {
           try {
             final dir = Directory(base);
             if (await dir.exists()) {
-              final ents = dir.listSync();
-              for (final env in ents) {
+              for (final env in dir.listSync()) {
                 final py = env.path + "/python.exe";
                 if (File(py).existsSync()) { pythonPath = py; break; }
               }
@@ -100,32 +93,32 @@ class _HomePageState extends State<HomePage> with WindowListener {
           } catch (_) {}
           if (pythonPath != "python") break;
         }
-      }      }
-      // Find bridge script: exe dir (release) or source tree (dev)
-      final exeDir = Directory(Platform.resolvedExecutable).parent.path;
-      final releaseScript = exeDir + "/bridge_server.py";
-      final devScript = "python/bridge_server.py";
-      final scriptPath = await File(releaseScript).exists() ? releaseScript : devScript;
-      
-            final pkgDir = exeDir + '/_packages';
-      final env = Map<String, String>.from(Platform.environment);
-      if (await Directory(pkgDir).exists()) {
-        env['PYTHONPATH'] = pkgDir + (env['PYTHONPATH']?.isNotEmpty == true ? ';' + env['PYTHONPATH']! : '');
       }
-      _bridgeProcess = await Process.start(pythonPath, [scriptPath], workingDirectory: exeDir, environment: env);
-      
-      // Capture stderr for error diagnosis
+      // Find bridge script
+      final exeDir = Directory(Platform.resolvedExecutable).parent.path;
+      final scriptPath = File("$exeDir/bridge_server.py").existsSync()
+          ? "$exeDir/bridge_server.py"
+          : "python/bridge_server.py";
+      // Set PYTHONPATH for bundled packages
+      final env = Map<String, String>.from(Platform.environment);
+      if (Directory("$exeDir/_packages").existsSync()) {
+        final existing = env["PYTHONPATH"] ?? "";
+        env["PYTHONPATH"] = "$exeDir/_packages" + (existing.isNotEmpty ? ";$existing" : "");
+      }
+      // Start bridge process
+      _bridgeProcess = await Process.start(pythonPath, [scriptPath],
+          workingDirectory: exeDir, environment: env);
+      // Listen for errors
       _bridgeProcess!.stderr.transform(utf8.decoder).listen((err) {
         if (err.contains("ModuleNotFoundError") || err.contains("Traceback")) {
           setState(() => _status = "Python缺少依赖: pip install -r requirements.txt");
         }
       });
-      
       await Future.delayed(const Duration(seconds: 3));
       await _check();
       setState(() => _bridgeReady = true);
     } catch (e) {
-      setState(() { _status = "Python未找到，请安装Python 3.10+ 并执行 pip install -r requirements.txt"; _bridgeReady = false; });
+      setState(() { _status = "Python未找到，请安装Python 3.10+"; _bridgeReady = false; });
     }
   }
 
