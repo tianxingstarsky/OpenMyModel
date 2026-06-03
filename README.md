@@ -244,7 +244,7 @@ mkdir -p /aiapi
 cd /aiapi
 
 # 克隆代码
-git clone https://github.com/tianxingstarsky/OpenMyModel.git backend
+git clone https://github.com/tianxingstarsky/OpenMyModel.git backend backend
 cd backend/backend
 
 # 安装依赖
@@ -287,7 +287,7 @@ head -3 dist/index.js
 
 **项目目录**：
 ```
-/aiapi/OpenMyModel/backend
+/aiapi/backend/backend
 ```
 -> 点右侧「选择」按钮浏览目录，或直接粘贴路径。
 
@@ -363,7 +363,7 @@ OpenMyModel 云端 API 服务
 虽然项目已启动，但还需设置域名和密码。SSH 执行：
 
 ```bash
-cd /aiapi/OpenMyModel/backend
+cd /aiapi/backend/backend
 npm run setup
 ```
 
@@ -597,7 +597,7 @@ wscat -c ws://api.your-domain.com/ws/node
 
 **修改管理员密码**：SSH 执行：
 ```bash
-cd /aiapi/OpenMyModel/backend
+cd /aiapi/backend/backend
 npm run setup
 # 选择「重置密码」
 ```
@@ -605,14 +605,14 @@ npm run setup
 
 **查看当前配置**：
 ```bash
-cat /aiapi/OpenMyModel/backend/data/config.json
+cat /aiapi/backend/backend/data/config.json
 ```
 （密码是哈希过的，安全无害）
 
 ### 更新后端代码
 
 ```bash
-cd /aiapi/OpenMyModel/backend
+cd /aiapi/backend/backend
 git pull origin main
 npm install
 npm run build        # 每次更新必须重新编译！

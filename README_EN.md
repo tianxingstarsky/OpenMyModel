@@ -187,7 +187,7 @@ mkdir -p /aiapi
 cd /aiapi
 
 # Clone the repo
-git clone https://github.com/tianxingstarsky/OpenMyModel.git backend
+git clone https://github.com/tianxingstarsky/OpenMyModel.git backend backend
 cd backend/backend
 
 # Install dependencies
@@ -230,7 +230,7 @@ Click the **"Add Node Project"** button (usually top-right of the list). Fill in
 
 **Project Directory**:
 ```
-/aiapi/OpenMyModel/backend
+/aiapi/backend/backend
 ```
 -> Click the "Select" button to browse, or paste the path directly.
 
@@ -306,7 +306,7 @@ You'll see the `openmymodel` process listed as `online`. Baota has automatically
 The project is running but needs domain and password. Run via SSH:
 
 ```bash
-cd /aiapi/OpenMyModel/backend
+cd /aiapi/backend/backend
 npm run setup
 ```
 
@@ -540,7 +540,7 @@ Click the **"Logs"** button for live runtime logs. Errors also show here.
 
 **Change admin password** (via SSH):
 ```bash
-cd /aiapi/OpenMyModel/backend
+cd /aiapi/backend/backend
 npm run setup
 # Select "Reset Password"
 ```
@@ -548,14 +548,14 @@ Then back in Node Projects page, click **"Restart"**.
 
 **View current config**:
 ```bash
-cat /aiapi/OpenMyModel/backend/data/config.json
+cat /aiapi/backend/backend/data/config.json
 ```
 (Password is hashed, safe to view)
 
 ### Update Backend Code
 
 ```bash
-cd /aiapi/OpenMyModel/backend
+cd /aiapi/backend/backend
 git pull origin main
 npm install
 npm run build        # Must rebuild after every update!
