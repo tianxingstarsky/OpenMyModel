@@ -172,58 +172,86 @@ npx ts-node src/cli.ts
 
 ## ☁️ 云后端部署指南（宝塔面板）
 
-> 目标：在云服务器上通过宝塔面板部署 OpenMyModel 后端。
+> 在云服务器上通过宝塔面板部署 OpenMyModel 后端，三步完成。
 
 ### 前置条件
-- 云服务器（阿里云/腾讯云，1核2G起步）
-- 已备案域名，DNS 已解析
+
+- 云服务器（1核2G起步）+ 已备案域名 DNS 已解析
 - 宝塔面板已安装
 - 安全组已开放 80/443 端口
+- 软件商店已安装：**Nginx**、**Node.js版本管理器**、**PM2管理器**
 
 ---
 
-### 第一步：服务器环境
-
-宝塔软件商店安装：
-- Nginx
-- Node.js 版本管理器（安装 v22.x）
-- PM2 管理器
-
----
-
-### 第二步：部署代码
+### 第一步：服务器编译部署
 
 ```bash
 ssh root@你的服务器
 cd /aiapi
 git clone https://github.com/tianxingstarsky/OpenMyModel.git backend
 cd backend/backend
+
+# 安装依赖并编译
 npm install
 npm run build
 ```
 
----
-
-### 第三步：宝塔中启动
-
-通过宝塔的 Node 项目管理功能添加项目：
-- 项目目录：`/aiapi/backend/backend`
-- 启动文件：`dist/index.js`
-- 端口：`3000`
-- 绑定域名并配置反向代理到 `http://127.0.0.1:3000`
-- **关键**：确保 Nginx 配置包含 WebSocket 支持：
-  ```nginx
-  proxy_set_header Upgrade $http_upgrade;
-  proxy_set_header Connection "upgrade";
-  proxy_read_timeout 3600s;
-  proxy_buffering off;
-  ```
-
-首次启动会自动生成管理员密码，在日志中查看。
+> ⚠️ `npm install` 必须在服务器上执行（`better-sqlite3` 是原生模块，需 Linux 编译）。
+> 如果报 `NODE_MODULE_VERSION` 错误：`rm -rf node_modules && npm install`
 
 ---
 
-### 第四步：验证
+### 第二步：宝塔 Node 项目启动
+
+「网站」→「Node项目」→ 添加项目：
+
+| 设置项 | 值 |
+|--------|-----|
+| 项目目录 | `/aiapi/backend/backend` |
+| 启动文件 | `dist/index.js` |
+| 项目名称 | `openmymodel` |
+| 运行端口 | `3000` |
+
+**关键**：Node版本选择栏里选你安装的 **v22.x**（不是系统默认的旧版本）。
+
+启动后点击「日志」查看自动生成的管理员密码。
+
+> 首次启动自动初始化，无需手动配置域名或运行 `npm run setup`。
+
+---
+
+### 第三步：反向代理配置
+
+「网站」→顶部「反向代理」页 → 添加反向代理：
+
+| 设置项 | 值 |
+|--------|-----|
+| 域名 | `api.your-domain.com` |
+| 目标URL | `http://127.0.0.1:3000` |
+| 发送域名 | `$host` |
+
+然后编辑该站点的 Nginx 配置文件，在 `location /` 块中确保包含：
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+proxy_read_timeout 600s;
+proxy_buffering off;
+```
+
+并在文件最外层（`server` 块之前）添加：
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+```
+
+---
+
+### 验证
 
 浏览器访问 `http://你的域名/`，返回 JSON 即成功。
 
@@ -234,19 +262,21 @@ npm run build
 ```bash
 cd /aiapi/backend/backend
 git pull && npm install && npm run build
-# 宝塔中重启项目
 ```
+然后在宝塔 Node 项目中点击「重启」。
 
 ---
 
 ### 常见问题
 
-| 问题 | 解决 |
-|------|------|
-| 启动闪退 | `npm run build` 后启动的是 `dist/index.js` 不是 `src/index.ts` |
-| `NODE_MODULE_VERSION` 错误 | `rm -rf node_modules && npm install`（必须在服务器上编译） |
-| WebSocket 连接闪断 | Nginx 配置缺少 `Upgrade` 和 `Connection` 头 |
-| API Key 401 | 重连后新建一个 Key |
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| 启动闪退 | 源码未编译或 Node 版本不对 | `npm run build`，Node 选 v22 |
+| `NODE_MODULE_VERSION` | 本机带了 node_modules | 服务器上 `rm -rf node_modules && npm install` |
+| WebSocket 闪断 | Nginx 缺 Upgrade 头 | 加上 `proxy_set_header Upgrade $http_upgrade;` |
+| 域名不通 | 反向代理目标 IP 错误 | 确保是 `http://127.0.0.1:3000` 不是 `172.0.0.1` |
+| API Key 401 | 重连后密钥未同步 | 新建一个 Key 再测试 |
+
 
 ---
 
