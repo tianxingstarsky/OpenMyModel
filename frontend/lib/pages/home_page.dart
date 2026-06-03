@@ -70,8 +70,11 @@ class _HomePageState extends State<HomePage> with WindowListener {
   Future<void> _startBridge() async {
     try {
       String pythonPath = "python";
-      final scriptPath = r"F:\llama_cpp\output_my_model\python\bridge_server.py";
-      _bridgeProcess = await Process.start(pythonPath, [scriptPath], workingDirectory: Directory.current.path);
+      final exeDir = Directory(Platform.resolvedExecutable).parent.path;
+      final releaseScript = exeDir + "/bridge_server.py";
+      final devScript = "python/bridge_server.py";
+      final scriptPath = await File(releaseScript).exists() ? releaseScript : devScript;
+      _bridgeProcess = await Process.start(pythonPath, [scriptPath], workingDirectory: exeDir);
       await Future.delayed(const Duration(seconds: 3));
       await _check();
       setState(() => _bridgeReady = true);
