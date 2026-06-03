@@ -60,10 +60,10 @@ async function main() {
   startHeartbeat(wsTunnel);
 
   // 健康检查
-  app.get("/", async () => ({
+  app.get("/", async (request) => ({
     name: "OpenMyModel Cloud API",
     version: "1.0.0",
-    domain: config.domain,
+    domain: request.hostname || 'localhost',
     endpoints: {
       models: "/v1/models",
       chat: "/v1/chat/completions",
@@ -79,7 +79,6 @@ async function main() {
     console.log("╔══════════════════════════════════════════════╗");
     console.log(`║  OpenMyModel 云服务已启动                      ║`);
     console.log(`║  地址: http://0.0.0.0:${config.port}                  ║`);
-    console.log(`║  域名: ${config.domain.padEnd(35)}║`);
     console.log("╚══════════════════════════════════════════════╝");
     console.log("");
   } catch (err) {

@@ -30,19 +30,11 @@ async function showConfig() {
   console.log("╔══════════════════════════════════════════════╗");
   console.log("║          OpenMyModel 当前配置                  ║");
   console.log("╠══════════════════════════════════════════════╣");
-  console.log(`║  域名:    ${(cfg.domain || "未设置").padEnd(35)}║`);
   console.log(`║  端口:    ${String(cfg.port).padEnd(35)}║`);
   console.log(`║  已初始化: ${(cfg.setupComplete ? "是" : "否").padEnd(35)}║`);
   console.log("╚══════════════════════════════════════════════╝");
   console.log("");
   await checkNodeStatus();
-}
-
-async function changeDomain() {
-  const cfg = loadConfig();
-  console.log(`当前域名: ${cfg.domain || "未设置"}`);
-  const d = await q("新域名 (回车保持): ");
-  if (d) { cfg.domain = d; saveConfig(cfg); console.log("域名已更新"); }
 }
 
 async function changePort() {
@@ -74,14 +66,9 @@ async function setupWizard() {
   console.log("");
   const cfg = loadConfig();
 
-  // Domain
-  console.log("Step 1: 域名 (如 api.your-domain.com)");
-  let domain = await q(`域名 [${cfg.domain || "localhost"}]: `);
-  if (!domain) domain = cfg.domain || "localhost";
-
   // Password
   console.log("");
-  console.log("Step 2: 管理员密码 (至少6字符，用于前端连接)");
+  console.log("Step 1: 管理员密码 (至少6字符，用于前端连接)");
   let password = "";
   while (password.length < 6) { password = await q("密码: "); if (password.length < 6) console.log("太短"); }
   const confirm = await q("确认密码: ");
@@ -89,11 +76,10 @@ async function setupWizard() {
 
   // Port
   console.log("");
-  console.log("Step 3: 端口");
+  console.log("Step 2: 端口");
   const ps = await q(`端口 [${cfg.port || 3000}]: `);
   const port = parseInt(ps) || cfg.port || 3000;
 
-  cfg.domain = domain;
   cfg.passwordHash = hashPassword(password);
   cfg.port = port;
   cfg.setupComplete = true;
@@ -102,7 +88,6 @@ async function setupWizard() {
   console.log("");
   console.log("╔══════════════════════════════════════════════╗");
   console.log("║          配置完成                             ║");
-  console.log(`║  域名: ${domain.padEnd(37)}║`);
   console.log(`║  端口: ${String(port).padEnd(37)}║`);
   console.log("║  运行 npm start 启动服务                      ║");
   console.log("╚══════════════════════════════════════════════╝");
@@ -116,7 +101,7 @@ async function main() {
   // Quick status check
   if (args.includes("--status") || args.includes("status")) {
     const cfg = loadConfig();
-    console.log(`OpenMyModel 云后端 | 域名: ${cfg.domain || "未设置"} | 端口: ${cfg.port}`);
+    console.log(`OpenMyModel 云后端 | 端口: ${cfg.port}`);
     await checkNodeStatus();
     rl.close();
     return;
@@ -136,11 +121,10 @@ async function main() {
   while (true) {
     console.log("管理菜单:");
     console.log("  1. 查看配置");
-    console.log("  2. 修改域名");
-    console.log("  3. 修改端口");
-    console.log("  4. 重置密码");
-    console.log("  5. 重新初始化 (全部重设)");
-    console.log("  6. 查看节点状态");
+    console.log("  2. 修改端口");
+    console.log('  3. 重置密码');
+    console.log('  4. 重新初始化 (全部重设)');
+    console.log('  5. 查看节点状态');
     console.log("  0. 退出");
     console.log("");
 
@@ -148,11 +132,10 @@ async function main() {
 
     switch (choice) {
       case "1": await showConfig(); break;
-      case "2": await changeDomain(); break;
-      case "3": await changePort(); break;
-      case "4": await resetPassword(); break;
-      case "5": await setupWizard(); break;
-      case "6": await checkNodeStatus(); break;
+      case "2": await changePort(); break;
+      case "3": await resetPassword(); break;
+      case "4": await setupWizard(); break;
+      case "5": await checkNodeStatus(); break;
       case "0": console.log("再见"); rl.close(); return;
       default: console.log("无效选项");
     }

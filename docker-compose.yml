@@ -14,7 +14,6 @@ services:
       - backend-data:/app/data
     environment:
       - ADMIN_PASSWORD=admin123456
-      - DOMAIN=localhost
       - PORT=3000
       - NODE_ENV=production
     healthcheck:

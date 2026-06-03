@@ -18,9 +18,6 @@ if [ ! -f "$CONFIG_FILE" ]; then
     echo "[WARN] 未设置 ADMIN_PASSWORD，使用默认密码: $ADMIN_PASSWORD"
   fi
 
-  if [ -z "$DOMAIN" ]; then
-    DOMAIN="localhost"
-  fi
 
   if [ -z "$PORT" ]; then
     PORT=3000

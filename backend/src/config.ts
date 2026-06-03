@@ -9,7 +9,6 @@ const CONFIG_DIR = join(process.cwd(), "data");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
 interface AppConfig {
-  domain: string;
   passwordHash: string;
   port: number;
   setupComplete: boolean;
@@ -38,22 +37,19 @@ export function loadConfig(): AppConfig {
   } else {
     // Auto-init for Docker: use env vars to create config
     const password = process.env.ADMIN_PASSWORD || "";
-    const domain = process.env.DOMAIN || "";
     const port = parseInt(process.env.PORT || "3000");
 
     if (password) {
       _config = {
-        domain,
         passwordHash: hashPassword(password),
         port,
         setupComplete: true,
       };
       getConfigDir();
       writeFileSync(CONFIG_FILE, JSON.stringify(_config, null, 2), "utf-8");
-      console.log("[auto-init] Config created from env: domain=%s port=%d", domain, port);
+      console.log("[auto-init] Config created from env, port=%d", port);
     } else {
       _config = {
-        domain: "",
         passwordHash: "",
         port,
         setupComplete: false,
