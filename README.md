@@ -343,7 +343,7 @@ OpenMyModel 云端 API 服务
 ╔══════════════════════════════════════════════╗
 ║  OpenMyModel 云服务已启动                      ║
 ║  地址: http://0.0.0.0:3000                  ║
-║  域名: aiapi.topofmoon.com                  ║
+║  域名: api.your-domain.com                  ║
 ║  WebSocket: /ws/node                        ║
 ║  API: /v1/chat/completions                  ║
 ║  管理员接口: /admin/*                        ║
@@ -374,14 +374,14 @@ npm run setup
 ║       OpenMyModel 云后端 - 初始化向导          ║
 ╚══════════════════════════════════════════════╝
 
-域名: aiapi.topofmoon.com          <- 输入你的域名（不带 http://）
+域名: api.your-domain.com          <- 输入你的域名（不带 http://）
 管理员密码: ********                <- 设置强密码（至少6位）
 确认密码: ********
 端口 [3000]:                       <- 回车，用默认 3000
 
 ╔══════════════════════════════════════════════╗
 ║          配置完成                             ║
-║  域名: aiapi.topofmoon.com                  ║
+║  域名: api.your-domain.com                  ║
 ║  端口: 3000                                  ║
 ║  配置文件: data/config.json                  ║
 ╚══════════════════════════════════════════════╝
@@ -401,7 +401,7 @@ npm run setup
 
 | 字段 | 值 |
 |------|-----|
-| 域名 | `aiapi.topofmoon.com` |
+| 域名 | `api.your-domain.com` |
 | 根目录 | `/www/wwwroot/aiapi` |
 | PHP版本 | **纯静态** |
 
@@ -411,7 +411,7 @@ npm run setup
 
 #### 7.2 进入站点设置
 
-在「网站」列表中找到刚创建的 `aiapi.topofmoon.com`：
+在「网站」列表中找到刚创建的 `api.your-domain.com`：
 
 点击站点域名（或点击右侧的 **「设置」** 链接），弹出站点设置窗口。顶部有一排标签：
 
@@ -489,7 +489,7 @@ location / {
 在站点设置窗口中，点击 **「SSL」** 标签：
 
 1. 证书类型选择 **「Let's Encrypt」**
-2. 勾选你的域名 `aiapi.topofmoon.com`
+2. 勾选你的域名 `api.your-domain.com`
 3. 点击 **「申请」** 按钮
 4. 等待申请完成
 5. 打开 **「强制HTTPS」** 开关
@@ -502,17 +502,17 @@ location / {
 
 #### 9.1 浏览器测试
 
-访问 `http://aiapi.topofmoon.com/`（或 `https://`），应返回：
+访问 `http://api.your-domain.com/`（或 `https://`），应返回：
 
 ```json
-{"name":"OpenMyModel Cloud API","version":"1.0.0","domain":"aiapi.topofmoon.com","endpoints":{"models":"/v1/models","chat":"/v1/chat/completions","admin":"/admin/*","websocket":"/ws/node"}}
+{"name":"OpenMyModel Cloud API","version":"1.0.0","domain":"api.your-domain.com","endpoints":{"models":"/v1/models","chat":"/v1/chat/completions","admin":"/admin/*","websocket":"/ws/node"}}
 ```
 
 #### 9.2 WebSocket 测试
 
 ```bash
 npm install -g wscat
-wscat -c ws://aiapi.topofmoon.com/ws/node
+wscat -c ws://api.your-domain.com/ws/node
 
 # 连接后手动输入：
 {"type":"auth","password":"你的管理员密码"}
@@ -533,13 +533,13 @@ wscat -c ws://aiapi.topofmoon.com/ws/node
 
 | 字段 | 值 | 说明 |
 |------|-----|------|
-| 服务器地址 | `aiapi.topofmoon.com` | **不加 http://，不加端口号！** |
+| 服务器地址 | `api.your-domain.com` | **不加 http://，不加端口号！** |
 | 密码 | 你在第六步设置的密码 | |
 
 > **为什么不能加端口号？**
 >
-> `aiapi.topofmoon.com:3000` = 直连后端 3000 = 安全组已禁止外部访问 = 超时 ❌
-> `aiapi.topofmoon.com` = Nginx(80) = 反向代理到 127.0.0.1:3000 = 成功 ✅
+> `api.your-domain.com:3000` = 直连后端 3000 = 安全组已禁止外部访问 = 超时 ❌
+> `api.your-domain.com` = Nginx(80) = 反向代理到 127.0.0.1:3000 = 成功 ✅
 
 **连接成功标志**：状态灯变绿 -> 显示「已连接」-> 可生成 API Key。
 
@@ -650,7 +650,7 @@ npm run build        # 每次更新必须重新编译！
 ```nginx
 server {
     listen 80;
-    server_name aiapi.topofmoon.com;
+    server_name api.your-domain.com;
     client_max_body_size 50m;
 
     location / {

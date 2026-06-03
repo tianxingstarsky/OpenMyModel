@@ -286,7 +286,7 @@ Click the **"Logs"** button on the `openmymodel` row. You should see:
 ╔══════════════════════════════════════════════╗
 ║  OpenMyModel Cloud API Started                ║
 ║  Address: http://0.0.0.0:3000                ║
-║  Domain: aiapi.topofmoon.com                ║
+║  Domain: api.your-domain.com                ║
 ║  WebSocket: /ws/node                         ║
 ║  API: /v1/chat/completions                   ║
 ║  Admin: /admin/*                             ║
@@ -317,14 +317,14 @@ Interactive wizard (Chinese prompts):
 ║       OpenMyModel Cloud Backend - Setup       ║
 ╚══════════════════════════════════════════════╝
 
-Domain: aiapi.topofmoon.com          <- Your domain (no http://)
+Domain: api.your-domain.com          <- Your domain (no http://)
 Admin password: ********             <- Set a strong password (min 6 chars)
 Confirm password: ********
 Port [3000]:                         <- Press Enter for default 3000
 
 ╔══════════════════════════════════════════════╗
 ║          Setup Complete                       ║
-║  Domain: aiapi.topofmoon.com                ║
+║  Domain: api.your-domain.com                ║
 ║  Port: 3000                                  ║
 ║  Config: data/config.json                    ║
 ╚══════════════════════════════════════════════╝
@@ -344,7 +344,7 @@ Fill in:
 
 | Field | Value |
 |-------|-------|
-| Domain | `aiapi.topofmoon.com` |
+| Domain | `api.your-domain.com` |
 | Root Directory | `/www/wwwroot/aiapi` |
 | PHP Version | **Static** |
 
@@ -354,7 +354,7 @@ Leave other fields as default, click **"Submit"**.
 
 #### 7.2 Open Site Settings
 
-In the "Websites" list, find `aiapi.topofmoon.com`:
+In the "Websites" list, find `api.your-domain.com`:
 
 Click the domain name (or the **"Settings"** link on the right). A settings window pops up with tabs:
 
@@ -432,7 +432,7 @@ After editing, click **"Save"** at the bottom-right of the config editor. Baota 
 In the site settings window, click the **"SSL"** tab:
 
 1. Certificate type: **"Let's Encrypt"**
-2. Check your domain `aiapi.topofmoon.com`
+2. Check your domain `api.your-domain.com`
 3. Click **"Apply"**
 4. Wait for completion
 5. Enable **"Force HTTPS"**
@@ -445,17 +445,17 @@ In the site settings window, click the **"SSL"** tab:
 
 #### 9.1 Browser Test
 
-Visit `http://aiapi.topofmoon.com/` (or `https://`). Expected response:
+Visit `http://api.your-domain.com/` (or `https://`). Expected response:
 
 ```json
-{"name":"OpenMyModel Cloud API","version":"1.0.0","domain":"aiapi.topofmoon.com","endpoints":{"models":"/v1/models","chat":"/v1/chat/completions","admin":"/admin/*","websocket":"/ws/node"}}
+{"name":"OpenMyModel Cloud API","version":"1.0.0","domain":"api.your-domain.com","endpoints":{"models":"/v1/models","chat":"/v1/chat/completions","admin":"/admin/*","websocket":"/ws/node"}}
 ```
 
 #### 9.2 WebSocket Test
 
 ```bash
 npm install -g wscat
-wscat -c ws://aiapi.topofmoon.com/ws/node
+wscat -c ws://api.your-domain.com/ws/node
 
 # Type in after connecting:
 {"type":"auth","password":"your-admin-password"}
@@ -476,13 +476,13 @@ Open the OpenMyModel desktop app -> **"Cloud Connection"** tab:
 
 | Field | Value | Notes |
 |-------|-------|-------|
-| Server Address | `aiapi.topofmoon.com` | **No http://, no port number!** |
+| Server Address | `api.your-domain.com` | **No http://, no port number!** |
 | Password | Your admin password from Step 6 | |
 
 > **Why no port number?**
 >
-> `aiapi.topofmoon.com:3000` = direct to backend port 3000 = blocked by security group = timeout ❌
-> `aiapi.topofmoon.com` = Nginx(80) = reverse proxy to 127.0.0.1:3000 = works ✅
+> `api.your-domain.com:3000` = direct to backend port 3000 = blocked by security group = timeout ❌
+> `api.your-domain.com` = Nginx(80) = reverse proxy to 127.0.0.1:3000 = works ✅
 
 **Success signs**: Status indicator turns green -> "Connected" -> API keys can be generated.
 
@@ -593,7 +593,7 @@ If the Baota config editor gets messy, replace everything with this template:
 ```nginx
 server {
     listen 80;
-    server_name aiapi.topofmoon.com;
+    server_name api.your-domain.com;
     client_max_body_size 50m;
 
     location / {
