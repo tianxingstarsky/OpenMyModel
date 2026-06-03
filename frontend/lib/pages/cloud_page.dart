@@ -45,7 +45,7 @@ class _CloudPageState extends State<CloudPage> {
     final exeDir = Directory(Platform.resolvedExecutable).parent.path;
     final releaseBridge = exeDir + "/scripts/cloud_bridge.js";
     final devBridge = "scripts/cloud_bridge.js";
-    final bridgePath = await File(releaseBridge).exists() ? releaseBridge : devBridge;
+    final bridgePath = File(releaseBridge).existsSync() ? releaseBridge : devBridge;
     _wsService.setBridgePath(bridgePath);
     _loadPrefs();
     _ensureKeysLoaded();
