@@ -45,3 +45,6 @@ Thumbs.db
 release/
 
 deploy/
+
+# Release zips
+OpenMyModel-win-x64-*.zip
