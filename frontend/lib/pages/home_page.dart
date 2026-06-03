@@ -43,21 +43,11 @@ class _HomePageState extends State<HomePage> with WindowListener {
   @override
   void initState() {
     super.initState();
-    _loadPrefs();
+    // Do NOT load saved paths - privacy (release build)
     _refresh();
     _startBridge();
     _loadP();
     _startPolling();
-  }
-
-  Future<void> _loadPrefs() async {
-    final prefs = await SharedPreferences.getInstance();
-    final sp = prefs.getString("server_path");
-    final mf = prefs.getString("model_folder");
-    if (mounted) setState(() {
-      if (sp != null && sp.isNotEmpty) tcServer.text = sp;
-      if (mf != null && mf.isNotEmpty) tcFolder.text = mf;
-    });
   }
 
 
