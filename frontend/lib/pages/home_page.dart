@@ -107,7 +107,12 @@ class _HomePageState extends State<HomePage> with WindowListener {
       final devScript = "python/bridge_server.py";
       final scriptPath = await File(releaseScript).exists() ? releaseScript : devScript;
       
-      _bridgeProcess = await Process.start(pythonPath, [scriptPath], workingDirectory: exeDir);
+            final pkgDir = exeDir + '/_packages';
+      final env = Map<String, String>.from(Platform.environment);
+      if (await Directory(pkgDir).exists()) {
+        env['PYTHONPATH'] = pkgDir + (env['PYTHONPATH']?.isNotEmpty == true ? ';' + env['PYTHONPATH']! : '');
+      }
+      _bridgeProcess = await Process.start(pythonPath, [scriptPath], workingDirectory: exeDir, environment: env);
       
       // Capture stderr for error diagnosis
       _bridgeProcess!.stderr.transform(utf8.decoder).listen((err) {
