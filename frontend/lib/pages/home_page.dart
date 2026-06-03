@@ -69,7 +69,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
 
   Future<void> _startBridge() async {
     try {
-      final pythonPath = r"C:\Users\tianx\.conda\envs\myenv\python.exe";
+      String pythonPath = "python";
       final scriptPath = r"F:\llama_cpp\output_my_model\python\bridge_server.py";
       _bridgeProcess = await Process.start(pythonPath, [scriptPath], workingDirectory: Directory.current.path);
       await Future.delayed(const Duration(seconds: 3));

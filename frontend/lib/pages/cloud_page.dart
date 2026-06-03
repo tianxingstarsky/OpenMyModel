@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
@@ -40,7 +41,12 @@ class _CloudPageState extends State<CloudPage> {
   @override
   void initState() {
     super.initState();
-    _wsService.setBridgePath(r"F:\llama_cpp\output_my_model\scripts\cloud_bridge.js");
+        // Auto-detect bridge script relative to exe location
+    final exeDir = Directory(Platform.resolvedExecutable).parent.path;
+    final releaseBridge = exeDir + "/scripts/cloud_bridge.js";
+    final devBridge = "scripts/cloud_bridge.js";
+    final bridgePath = await File(releaseBridge).exists() ? releaseBridge : devBridge;
+    _wsService.setBridgePath(bridgePath);
     _loadPrefs();
     _ensureKeysLoaded();
     _wsService.setLlamaUrl(widget.llamaUrl);
