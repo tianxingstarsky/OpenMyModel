@@ -19,13 +19,25 @@ async function main() {
   const config = loadConfig();
 
   if (!config.setupComplete) {
+    // 自动初始化：生成随机密码，打印到日志
+    const { createHash, randomBytes } = require("crypto");
+    const autoPassword = randomBytes(8).toString("hex");
+    const salt = randomBytes(16).toString("hex");
+    const hash = createHash("sha256").update(salt + autoPassword).digest("hex");
+    config.passwordHash = salt + ":" + hash;
+    config.setupComplete = true;
+    const { saveConfig } = require("./config");
+    saveConfig(config);
     console.log("");
     console.log("╔══════════════════════════════════════════════╗");
-    console.log("║  OpenMyModel 云后端尚未初始化                  ║");
-    console.log("║  请运行 npm run setup 完成初始配置            ║");
+    console.log("║  OpenMyModel - 首次启动，已自动初始化          ║");
     console.log("╚══════════════════════════════════════════════╝");
     console.log("");
-    process.exit(0);
+    console.log("  ⚠ 自动生成的管理员密码（请妥善保存）：");
+    console.log(`     ${autoPassword}`);
+    console.log("");
+    console.log("  修改密码：npm run setup → 选择「重置密码」");
+    console.log("");
   }
 
   // 创建 Fastify 实例
