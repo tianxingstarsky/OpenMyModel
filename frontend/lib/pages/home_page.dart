@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -43,13 +44,23 @@ class _HomePageState extends State<HomePage> with WindowListener {
   @override
   void initState() {
     super.initState();
-    // Do NOT load saved paths - privacy (release build)
+    _loadPrefs();
     _refresh();
     _startBridge();
     _loadP();
     _startPolling();
   }
 
+
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final sp = prefs.getString("server_path");
+    final mf = prefs.getString("model_folder");
+    if (mounted) setState(() {
+      if (sp != null && sp.isNotEmpty) tcServer.text = sp;
+      if (mf != null && mf.isNotEmpty) tcFolder.text = mf;
+    });
+  }
 
   Future<void> _savePrefs() async {
     final prefs = await SharedPreferences.getInstance();
@@ -59,17 +70,35 @@ class _HomePageState extends State<HomePage> with WindowListener {
 
   Future<void> _startBridge() async {
     try {
+      // Find Python: try PATH first, then common locations
       String pythonPath = "python";
+      const pyNames = ["python3", "python"];
+      for (final name in pyNames) {
+        try {
+          final r = await Process.run(name, ["--version"]);
+          if (r.exitCode == 0) { pythonPath = name; break; }
+        } catch (_) {}
+      }
+      // Find bridge script: exe dir (release) or source tree (dev)
       final exeDir = Directory(Platform.resolvedExecutable).parent.path;
       final releaseScript = exeDir + "/bridge_server.py";
       final devScript = "python/bridge_server.py";
       final scriptPath = await File(releaseScript).exists() ? releaseScript : devScript;
+      
       _bridgeProcess = await Process.start(pythonPath, [scriptPath], workingDirectory: exeDir);
+      
+      // Capture stderr for error diagnosis
+      _bridgeProcess!.stderr.transform(utf8.decoder).listen((err) {
+        if (err.contains("ModuleNotFoundError") || err.contains("Traceback")) {
+          setState(() => _status = "Python缺少依赖: pip install -r requirements.txt");
+        }
+      });
+      
       await Future.delayed(const Duration(seconds: 3));
       await _check();
       setState(() => _bridgeReady = true);
     } catch (e) {
-      setState(() { _status = "桥接启动失败: $e"; _bridgeReady = false; });
+      setState(() { _status = "Python未找到，请安装Python 3.10+ 并执行 pip install -r requirements.txt"; _bridgeReady = false; });
     }
   }
 
