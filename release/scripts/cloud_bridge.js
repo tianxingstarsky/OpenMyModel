@@ -55,6 +55,13 @@ function connectToCloud(url, password, nodeName) {
             dlog("http_relay received: requestId=" + msg.requestId + " path=" + msg.path);
             relayHttp(msg.requestId, msg.path, msg.body);
             break;
+          case "cancel_request":
+            dlog("cancel_request: " + msg.requestId);
+            if (activeRequests[msg.requestId]) {
+              activeRequests[msg.requestId].destroy();
+              delete activeRequests[msg.requestId];
+            }
+            break;
           default:
             break;
         }

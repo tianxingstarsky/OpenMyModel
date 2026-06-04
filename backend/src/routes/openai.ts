@@ -42,7 +42,7 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
           "X-Accel-Buffering": "no",
         });
         const requestId = Math.random().toString(36).slice(2);
-        request.raw.on("close", () => {
+        reply.raw.on("close", () => {
           wsTunnel.cancelRelay(node.nodeId, requestId);
         });
         await wsTunnel.relayHttp(node.nodeId, { path: request.url, body: rawBody }, (chunk: string) => {
