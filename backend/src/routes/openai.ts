@@ -28,14 +28,7 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
     const valid = await wsTunnel.validateKey(auth.slice(7), node.nodeId);
     if (!valid) return reply.status(401).send({ error: { message: "Invalid API Key", type: "authentication_error" } });
 
-    let rawBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body || {});
-    try {
-      const parsed = JSON.parse(rawBody);
-      if (parsed.max_tokens == null || parsed.max_tokens < 0) {
-        parsed.max_tokens = 4096;
-        rawBody = JSON.stringify(parsed);
-      }
-    } catch (_) {}
+    const rawBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body || {});
 
     const isStream = rawBody.includes('"stream":true');
 
