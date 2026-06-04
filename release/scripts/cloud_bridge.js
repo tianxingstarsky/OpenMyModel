@@ -118,24 +118,13 @@ function relayHttp(requestId, path, body) { dlog("relayHttp: requestId=" + reque
           const lines = buffer.split("\n");
           buffer = lines.pop() || "";
           for (const line of lines) {
-            if (line.trim() && ws && ws.readyState === WebSocket.OPEN) {
-              let output = line + "\n";
-              // Fix: move reasoning_content to content if content is empty
-              if (line.startsWith("data: ") && line !== "data: [DONE]") {
-                try {
-                  const parsed = JSON.parse(line.substring(6));
-                  if (parsed.choices) {
-                    for (const c of parsed.choices) {
-                      const msg = c.delta || c.message || {};
-                      if (msg && !msg.content && msg.reasoning_content) {
-                        msg.content = msg.reasoning_content;
-                      }
-                    }
-                  }
-                  output = "data: " + JSON.stringify(parsed) + "\n";
-                } catch(_) {}
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              if (!line.trim()) {
+                // Empty line = SSE message separator, must be preserved
+                ws.send(JSON.stringify({ type: "http_chunk", requestId, data: "\n" }));
+              } else {
+                ws.send(JSON.stringify({ type: "http_chunk", requestId, data: line + "\n" }));
               }
-              ws.send(JSON.stringify({ type: "http_chunk", requestId, data: output }));
             }
           }
         });
@@ -152,19 +141,6 @@ function relayHttp(requestId, path, body) { dlog("relayHttp: requestId=" + reque
         res.on("data", (c) => { data += c; });
         res.on("end", () => {
           if (ws && ws.readyState === WebSocket.OPEN) {
-            // Fix: move reasoning_content to content if content is empty
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.choices) {
-                for (const c of parsed.choices) {
-                  const msg = c.message || c.delta || {};
-                  if (msg && !msg.content && msg.reasoning_content) {
-                    msg.content = msg.reasoning_content;
-                  }
-                }
-              }
-              data = JSON.stringify(parsed);
-            } catch(_) {}
             ws.send(JSON.stringify({ type: "http_chunk", requestId, data }));
             ws.send(JSON.stringify({ type: "http_done", requestId }));
           }
