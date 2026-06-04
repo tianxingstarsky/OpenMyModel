@@ -41,8 +41,14 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
           Connection: "keep-alive",
           "X-Accel-Buffering": "no",
         });
-        await wsTunnel.relayHttp(node.nodeId, { path: request.url, body: rawBody }, (chunk: string) => reply.raw.write(chunk));
-        reply.raw.end();
+        const requestId = Math.random().toString(36).slice(2);
+        request.raw.on("close", () => {
+          wsTunnel.cancelRelay(node.nodeId, requestId);
+        });
+        await wsTunnel.relayHttp(node.nodeId, { path: request.url, body: rawBody }, (chunk: string) => {
+          if (!reply.raw.destroyed) reply.raw.write(chunk);
+        }, requestId);
+        if (!reply.raw.destroyed) reply.raw.end();
       } else {
         const result = await wsTunnel.relayHttp(node.nodeId, { path: request.url, body: rawBody });
         try { return JSON.parse(result as string); } catch { return result; }

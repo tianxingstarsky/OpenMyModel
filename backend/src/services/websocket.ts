@@ -144,7 +144,7 @@ class WebSocketTunnel {
     if (!conn) return false;
 
     return new Promise((resolve) => {
-      const requestId = uuidv4();
+      const requestId = externalRequestId || uuidv4();
       const timeout = setTimeout(() => {
         conn.pendingRequests.delete(requestId);
         resolve(false);
@@ -160,6 +160,7 @@ class WebSocketTunnel {
     nodeId: string,
     req: { path: string; body: string },
     onChunk?: (chunk: string) => void,
+    externalRequestId?: string,
   ): Promise<any> {
     const conn = this.connections.get(nodeId);
     if (!conn) return Promise.reject(new Error("节点未连接"));
@@ -191,6 +192,16 @@ class WebSocketTunnel {
         body: req.body,
       }));
     });
+  }
+
+
+  /** 取消正在进行的 HTTP 中继 */
+  cancelRelay(nodeId: string, requestId: string): void {
+    const conn = this.connections.get(nodeId);
+    if (conn && conn.ws.readyState === WebSocket.OPEN) {
+      conn.ws.send(JSON.stringify({ type: "cancel_request", requestId }));
+      conn.pendingRequests.delete(requestId);
+    }
   }
 
   getOnlineNodes(): any[] {

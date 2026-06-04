@@ -6,6 +6,7 @@ const WebSocket = require("ws");
 const http = require("http");
 
 let ws = null;
+let activeRequests = {};
 let connected = false;
 let nodeId = "";
 let llamaUrl = "http://127.0.0.1:8080";
@@ -110,6 +111,7 @@ function relayHttp(requestId, path, body) { dlog("relayHttp: requestId=" + reque
   try {
     const isStream = body.includes('"stream":true');
     const req = http.request(options, (res) => {
+      activeRequests[requestId] = req;
       if (isStream) {
         res.setEncoding("utf8");
         let buffer = "";
@@ -129,6 +131,7 @@ function relayHttp(requestId, path, body) { dlog("relayHttp: requestId=" + reque
           }
         });
         res.on("end", () => {
+          delete activeRequests[requestId];
           if (buffer.trim() && ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: "http_chunk", requestId, data: buffer }));
           }
@@ -148,6 +151,7 @@ function relayHttp(requestId, path, body) { dlog("relayHttp: requestId=" + reque
       }
     });
     req.on("error", (e) => {
+      delete activeRequests[requestId];
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "http_chunk", requestId, data: JSON.stringify({ error: { message: e.message, type: "proxy_error" } }) }));
         ws.send(JSON.stringify({ type: "http_done", requestId }));
