@@ -144,7 +144,7 @@ class WebSocketTunnel {
     if (!conn) return false;
 
     return new Promise((resolve) => {
-      const requestId = externalRequestId || uuidv4();
+      const requestId = uuidv4();
       const timeout = setTimeout(() => {
         conn.pendingRequests.delete(requestId);
         resolve(false);
@@ -166,7 +166,7 @@ class WebSocketTunnel {
     if (!conn) return Promise.reject(new Error("节点未连接"));
 
     return new Promise((resolve, reject) => {
-      const requestId = uuidv4();
+      const requestId = externalRequestId || uuidv4();
       const chunks: string[] = [];
       const timeout = setTimeout(() => {
         conn.pendingRequests.delete(requestId);
