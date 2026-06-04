@@ -34,7 +34,7 @@ class WebSocketService {
 
   String get _nodeExe {
     // Bundled portable Node.js
-    return "scripts/node/node.exe";
+    return "scripts/node.exe";
   }
 
   void _send(Map<String, dynamic> cmd) {

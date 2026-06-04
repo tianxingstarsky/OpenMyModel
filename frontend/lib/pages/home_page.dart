@@ -44,6 +44,8 @@ class _HomePageState extends State<HomePage> with WindowListener {
   @override
   void initState() {
     super.initState();
+    windowManager.setPreventClose(true);
+    super.initState();
     _loadPrefs();
     _refresh();
     _startBridge();
@@ -53,6 +55,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
 
 
   Future<void> _loadPrefs() async {
+
     final prefs = await SharedPreferences.getInstance();
     final sp = prefs.getString("server_path");
     final mf = prefs.getString("model_folder");
@@ -70,69 +73,64 @@ class _HomePageState extends State<HomePage> with WindowListener {
 
   Future<void> _startBridge() async {
     try {
-      // Find Python: try PATH first
-      String pythonPath = "python";
-      for (final name in ["python3", "python"]) {
-        try {
-          final r = await Process.run(name, ["--version"]);
-          if (r.exitCode == 0) { pythonPath = name; break; }
-        } catch (_) {}
-      }
-      // Try conda if PATH python not found
-      if (pythonPath == "python") {
-        final home = Platform.environment["USERPROFILE"] ?? Platform.environment["HOME"] ?? "";
-        for (final base in [home + "/.conda/envs", home + "/miniconda3/envs", home + "/anaconda3/envs"]) {
-          try {
-            final dir = Directory(base);
-            if (await dir.exists()) {
-              for (final env in dir.listSync()) {
-                final py = env.path + "/python.exe";
-                if (File(py).existsSync()) { pythonPath = py; break; }
-              }
-            }
-          } catch (_) {}
-          if (pythonPath != "python") break;
+      final exeDir = Directory(Platform.resolvedExecutable).parent.path;
+      // Choose Python: bundled > system PATH
+      String pythonPath;
+      if (File("$exeDir/python/python.exe").existsSync()) {
+        pythonPath = "$exeDir/python/python.exe";
+      } else {
+        pythonPath = "python";
+        for (final name in ["python3", "python"]) {
+          try { final r = await Process.run(name, ["--version"]); if (r.exitCode == 0) { pythonPath = name; break; } } catch (_) {}
         }
       }
       // Find bridge script
-      final exeDir = Directory(Platform.resolvedExecutable).parent.path;
       final scriptPath = File("$exeDir/bridge_server.py").existsSync()
           ? "$exeDir/bridge_server.py"
           : "python/bridge_server.py";
-      // Set PYTHONPATH for bundled packages
-      final env = Map<String, String>.from(Platform.environment);
-      if (Directory("$exeDir/_packages").existsSync()) {
-        final existing = env["PYTHONPATH"] ?? "";
-        env["PYTHONPATH"] = "$exeDir/_packages" + (existing.isNotEmpty ? ";$existing" : "");
-      }
-      // Start bridge process
+      // Start bridge without custom PYTHONPATH (embedded Python uses ._pth file)
       _bridgeProcess = await Process.start(pythonPath, [scriptPath],
-          workingDirectory: exeDir, environment: env);
+          workingDirectory: exeDir);
       // Listen for errors
       _bridgeProcess!.stderr.transform(utf8.decoder).listen((err) {
         if (err.contains("ModuleNotFoundError") || err.contains("Traceback")) {
-          setState(() => _status = "Python缺少依赖: pip install -r requirements.txt");
+          if (mounted) setState(() => _status = "桥接错误: $err");
         }
       });
       await Future.delayed(const Duration(seconds: 3));
       await _check();
-      setState(() => _bridgeReady = true);
+      if (mounted) setState(() => _bridgeReady = true);
     } catch (e) {
-      setState(() { _status = "Python未找到，请安装Python 3.10+"; _bridgeReady = false; });
+      if (mounted) setState(() { _status = "桥接异常: $e"; _bridgeReady = false; });
     }
   }
 
   void _refresh() => setState(() => _files = LocalFileService.listFiles(tcFolder.text));
 
+  int _bridgeFailCount = 0;
   Future _check() async {
     try {
       final s = await _bridge.getStatus();
+      _bridgeFailCount = 0;
       if (mounted) setState(() {
         _running = s["running"] ?? false;
         _status = _running ? "运行中 - ${s["model"] ?? ""}" : "已就绪，选择模型后启动";
+        _bridgeReady = true;
       });
     } catch (_) {
-      if (mounted) setState(() { _running = false; _status = "桥接未就绪"; });
+      _bridgeFailCount++;
+      if (mounted) setState(() { _running = false; });
+      if (_bridgeFailCount == 1) {
+        if (mounted) setState(() => _status = "桥接未就绪，自动重连中...");
+      }
+      if (_bridgeFailCount >= 3) {
+        try { _bridgeProcess?.kill(); } catch (_) {}
+        _bridgeProcess = null;
+        _bridgeReady = false;
+        if (mounted) setState(() => _status = "桥接已断开，正在重启...");
+        _bridgeFailCount = 0;
+        await _startBridge();
+      }
     }
   }
 
@@ -292,10 +290,25 @@ class _HomePageState extends State<HomePage> with WindowListener {
   ]));
 
   @override
-  void dispose(){
+  void onWindowClose() async {
+    // Stop llama-server gracefully with timeout (don't hang if bridge is dead)
+    try {
+      await _bridge.stopServer().timeout(const Duration(seconds: 3));
+    } catch (_) {}
+    try {
+      _bridgeProcess?.kill();
+    } catch (_) {}
+    _bridgeProcess = null;
+    _bridge.dispose();
+    await windowManager.destroy();
+  }
+
+  void dispose() {
     _pollTimer?.cancel();
     tcServer.dispose();tcFolder.dispose();tcModel.dispose();tcMmproj.dispose();tcProfile.dispose();_scrollCtrl.dispose();
-    _bridgeProcess?.kill(); _bridgeProcess = null;
+    try { _bridgeProcess?.kill(); } catch (_) {}
+    _bridgeProcess = null;
+    _bridge.dispose();
     super.dispose();
   }
 }

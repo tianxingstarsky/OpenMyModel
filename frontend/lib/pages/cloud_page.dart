@@ -53,7 +53,7 @@ class _CloudPageState extends State<CloudPage> {
     _wsService.setModelName(widget.modelName);
     _wsService.messages.listen((msg) {
       final type = msg["type"] as String?;
-      if (type == "auth_ok") {
+      if (type == "connected") {
         setState(() { _connected = true; _connStatus = "已连接 - 节点已注册"; });
         _wsService.setLocalKeys(List<Map<String, dynamic>>.from(_apiKeys));
         _startNodesPolling();
@@ -152,6 +152,7 @@ class _CloudPageState extends State<CloudPage> {
     if (ok) {
       if (!_keysLoaded) await _ensureKeysLoaded();
       _loadKeys();
+      _wsService.setLocalKeys(List<Map<String, dynamic>>.from(_apiKeys));
     }
   }
 
