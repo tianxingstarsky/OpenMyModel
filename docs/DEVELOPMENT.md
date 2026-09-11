@@ -66,7 +66,7 @@ flutter test
 flutter build windows --release
 ```
 
-`.github/workflows/verify.yml` 在 push/PR 上验证三层代码，并在 Windows runner 上编译桌面端。后端和 Bridge 测试使用临时端口及假上游，不需要真实模型/GPU，也不使用现有管理员密码或数据目录。
+[CI 工作流模板](ci-workflow.example.yml) 可放入 `.github/workflows/verify.yml`，在 push/PR 上验证三层代码，并在 Windows runner 上编译桌面端。当前 GitHub OAuth 凭据缺少 `workflow` 权限，源码分支未包含激活的工作流；完整工作流保留在本地 `ci/full-stack-verification` 分支（提交 `47b3049`）。后端和 Bridge 测试使用临时端口及假上游，不需要真实模型/GPU，也不使用现有管理员密码或数据目录。
 
 `npm --prefix scripts test` 覆盖：状态码、UTF-8 跨块、SSE 空行、响应头前取消、云断线清理、超时、Key 删除、压缩拒绝和重连竞争。后端包含自身路由/隧道回归和实际 Bridge 联调测试。
 
