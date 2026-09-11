@@ -12,7 +12,7 @@
 > Free online LLM platforms are everywhere, but nearly all serve aggressively quantized models -- a downgraded version of intelligence. I have tested this firsthand: **Qwen 3.5 9B at INT8** running on a consumer GPU consistently outperforms the so-called flagship free-tier online services on logic and mathematical reasoning tasks. Free APIs compress quality for cost at scale -- what you get is merely a shadow of the same model name. When you control precision and parameters yourself, every inference runs on real weights, and the difference exceeds expectations.
 >
 > #### Beyond Solo Use: Share and Monetize
-> OpenMyModel was designed for more than personal use -- it is built for compute sharing. Distribute API keys to teammates, friends, or community users, with per-key quota management and usage tracking. Idle GPUs are no longer sunk cost: start monetizing spare compute with a single `sk-` key.
+> OpenMyModel was designed for more than personal use -- it is built for compute sharing. Distribute API keys to teammates, friends, or community users and enable, disable or delete them locally. Token quotas, billing and usage metering are not implemented; do not rely on this version for metered commercial service.
 
 **Tunnel local llama.cpp compute to the cloud via WebSocket, exposed as an OpenAI-compatible API.**
 
@@ -27,11 +27,12 @@ flowchart LR
     subgraph Local Machine
         A[Flutter Desktop] --> B[Python Bridge]
         B --> C[llama-server<br/>Local GPU Inference]
-        A <-->|WebSocket| D[Cloud Backend<br/>TypeScript]
+        A --> N[Node Bridge<br/>Local Key Validation]
+        N --> C
     end
 
     subgraph Cloud Server
-        D --> E[OpenAI-Compatible API<br/>Admin / Users]
+        D[Cloud Backend<br/>Fastify + WebSocket] --> E[OpenAI-Compatible API<br/>Admin / Users]
     end
 
     subgraph External Consumers
@@ -40,15 +41,16 @@ flowchart LR
         E --> H[Any OpenAI SDK]
     end
 
-    D <== WebSocket Tunnel ==> A
+    D <== WebSocket Tunnel ==> N
 ```
 
-### Three Components
+### Components
 
 | Component | Stack | Role |
 |-----------|-------|------|
 | **Flutter Desktop** | Flutter + Dart | UI / llama-server management / API Key management (local-only, no cloud storage) / Chat interface |
-| **Python Bridge** | Python | Process management / llama-server lifecycle / WebSocket tunnel client |
+| **Python Bridge** | Python + FastAPI | Local HTTP API / llama-server lifecycle / local chat proxy |
+| **Node Bridge** | Node.js + ws | Desktop stdin/stdout control / local key validation / WebSocket HTTP tunnel |
 | **Cloud Backend** | TypeScript + Node.js | WebSocket server / Request transparent proxying to llama-server / CLI management |
 
 ---
@@ -57,7 +59,7 @@ flowchart LR
 
 - **Local GPU Inference**: Full llama.cpp parameter control, Q8 cache, GPU acceleration
 - **WebSocket Tunnel**: No public IP needed -- home lab goes cloud
-- **Local-Only Key Management**: API keys stored exclusively on your machine, zero cloud storage -- no leaks
+- **Local Key Storage**: Keys are persisted locally, not in the cloud database. Validation still passes through the cloud and tunnel; use HTTPS/WSS and protect local user data.
 - **OpenAI-Compatible API**: `/v1/chat/completions`, `/v1/models`, SSE streaming
 - **Multimodal Support**: mmproj vision projector, image understanding
 - **Built-in Chat**: Multi-image upload + text, streaming responses
@@ -73,19 +75,23 @@ flowchart LR
 
 - **Flutter** 3.x+ (Windows/macOS/Linux)
 - **Python** 3.10+ (conda virtual env recommended)
-- **Node.js** 18+ (cloud backend)
+- **Node.js** 22+ (cloud backend and local tunnel)
 - **llama.cpp** compiled `llama-server` binary
 - **GGUF model files** (e.g., Qwen 3.5 9B Q8) + optional mmproj
 
 ### 1. Frontend (Windows)
 
+Prepare local Python and Node dependencies from the repository root. The desktop manages its own Python bridge; do not start another bridge on port 8765 at the same time.
+
 ```bash
+python -m pip install -r python/requirements.txt
+npm --prefix scripts ci
 cd frontend
 flutter pub get
 flutter run -d windows
 ```
 
-### 2. Python Bridge
+### 2. Python Bridge (standalone debugging only)
 
 ```bash
 cd python
@@ -98,7 +104,8 @@ python bridge_server.py
 
 ```bash
 cd backend
-npm install
+npm ci
+npm run setup                      # Configure admin password before first launch
 npm run dev
 ```
 
@@ -106,7 +113,7 @@ npm run dev
 
 ```bash
 cd backend
-npx ts-node src/cli.ts
+npm run setup
 ```
 
 ---
@@ -156,9 +163,9 @@ npm run build
 
 **Critical**: Select **v22.x** in the Node version dropdown.
 
-Click "Logs" after starting to see the auto-generated admin password.
+Before the first launch, set `ADMIN_PASSWORD` in the process environment or run `npm run setup` in `backend/`. Passwords are never printed to logs.
 
-> First launch auto-initializes. No manual setup needed.
+> Existing `data/config.json` is preserved. Changing the environment does not replace an existing password; use `npm run setup` to reset it without deleting the database.
 
 ---
 
@@ -217,7 +224,9 @@ Then click "Restart" in Baota Node Projects.
 | `NODE_MODULE_VERSION` | node_modules from wrong platform | `rm -rf node_modules && npm install` |
 | WebSocket disconnects | Missing Upgrade header in Nginx | Add `proxy_set_header Upgrade $http_upgrade;` |
 | Domain unreachable | Wrong target IP in proxy | Must be `http://127.0.0.1:3000` not `172.0.0.1` |
-| API Key 401 | Key not synced after reconnect | Generate a new key |
+| API Key 401 | Key is disabled or its owning node is offline | Check the original key's node and enabled state; do not regenerate blindly |
+| First launch refused | No admin password configured | Set `ADMIN_PASSWORD` or run `npm run setup` |
+| Bridge protocol error | Desktop/cloud version mismatch | Update both cloud backend and desktop Node bridge |
 
 
 ---
@@ -229,7 +238,7 @@ API Key Validation Flow:
   User Request -> Cloud Backend -> Extract API Key
                                  -> Look up WebSocket node
                                  -> Send { action: "validate_key", key: "sk-xxx" }
-                                 -> Flutter Frontend validates locally
+                                 -> Local Node bridge checks keys supplied by Flutter
                                  -> Returns validation result
                                  -> If passed, transparently proxy to llama-server
 
@@ -256,6 +265,22 @@ curl https://your-domain/v1/chat/completions \
 ```
 
 ---
+
+## Development and releases
+
+See [development, testing and packaging notes](docs/DEVELOPMENT.md). Update the cloud backend and desktop bridge together; old bridges cannot report upstream HTTP status correctly.
+
+```bash
+npm --prefix scripts ci
+npm --prefix scripts test
+npm --prefix scripts run check:release
+npm --prefix backend ci
+npm --prefix backend run build
+npm --prefix backend test
+python -m unittest discover -s python/tests -v
+```
+
+For Docker, copy `.env.example` to `.env`, set a strong password, then run `docker compose up -d --build`. Public deployments require TLS at the reverse proxy and an `https://` desktop server URL; the bundled nginx example does not supply certificates.
 
 ## License
 

@@ -1,159 +1,118 @@
-"""
-配置档案管理器
-支持保存、加载、删除多份 llama-server 配置档案
-"""
+"""Validated, atomic storage for named llama-server configuration profiles."""
 
 import json
+import logging
 import os
-from pathlib import Path
+import tempfile
+import threading
+from dataclasses import asdict, fields
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from server_manager import ServerConfig
 
+logger = logging.getLogger("bridge.profiles")
 
-class ConfigProfile:
-    """一份完整的配置档案"""
-    def __init__(self, name: str, config: ServerConfig):
-        self.name = name
-        self.config = config
-        self.created_at: str = datetime.now().isoformat()
-        self.updated_at: str = datetime.now().isoformat()
+
+class ProfileNameError(ValueError):
+    """A name is unsafe or aliases another existing profile."""
 
 
 class ConfigManager:
-    """配置档案管理器"""
-
     def __init__(self, config_dir: str = ""):
-        if config_dir:
-            self.config_dir = Path(config_dir)
-        else:
-            self.config_dir = Path.home() / ".openmymodel" / "profiles"
-        self.config_dir.mkdir(parents=True, exist_ok=True)
+        self.config_dir = Path(config_dir) if config_dir else Path.home() / ".openmymodel" / "profiles"
+        self._lock = threading.RLock()
 
     def _profile_path(self, name: str) -> Path:
-        """获取配置文件路径"""
-        safe_name = "".join(c for c in name if c.isalnum() or c in "._- ")
-        return self.config_dir / f"{safe_name}.json"
+        # Keep the previous valid alphabet, including Chinese and literal spaces,
+        # but never silently drop characters or trim a name into another name.
+        if not isinstance(name, str) or not name.strip() or name in {".", ".."}:
+            raise ProfileNameError("配置档案名称不能为空或仅包含空白")
+        if len(name) > 200 or any(not (c.isalnum() or c in "._- ") for c in name):
+            raise ProfileNameError("配置档案名称仅支持文字、数字、空格及 ._-，且不能超过 200 字符")
+        reserved = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+        reserved.update(f"{prefix}{i}" for prefix in ("COM", "LPT") for i in "123456789¹²³")
+        if name.split(".", 1)[0].rstrip().upper() in reserved:
+            raise ProfileNameError("配置档案名称不能使用 Windows 保留设备名称")
+        path = self.config_dir / f"{name}.json"
+        if path.is_symlink():
+            raise ProfileNameError("配置档案不能是符号链接")
+        # Windows is case-insensitive. Reject case aliases rather than overwriting
+        # a differently named profile (also reproducible on other platforms).
+        for existing in self.config_dir.glob("*.json"):
+            if existing.stem != name and existing.stem.casefold() == name.casefold():
+                raise ProfileNameError(f"配置档案名称与已有档案 '{existing.stem}' 冲突")
+        return path
 
     def list_profiles(self) -> list[dict]:
-        """列出所有配置档案"""
         profiles = []
-        if self.config_dir.exists():
-            for f in sorted(self.config_dir.glob("*.json")):
+        with self._lock:
+            for path in sorted(self.config_dir.glob("*.json")):
                 try:
-                    with open(f, "r", encoding="utf-8") as fp:
-                        data = json.load(fp)
+                    self._profile_path(path.stem)
+                    data = json.loads(path.read_text(encoding="utf-8"))
                     profiles.append({
-                        "name": data.get("name", f.stem),
+                        "name": path.stem,
                         "model": os.path.basename(data.get("model_path", "")),
                         "mmproj": os.path.basename(data.get("mmproj_path", "")),
                         "context_size": data.get("context_size", 0),
                         "updated_at": data.get("updated_at", ""),
                     })
-                except Exception:
-                    pass
+                except (OSError, ValueError, TypeError, AttributeError) as exc:
+                    # Do not include file contents or config secrets in diagnostics.
+                    logger.warning("无法列出配置档案 %s (%s)", path.name, type(exc).__name__)
         return profiles
 
     def save(self, name: str, config: ServerConfig) -> bool:
-        """保存配置档案（不存在则新建，存在则覆盖）"""
-        try:
-            profile_path = self._profile_path(name)
-            data = {
-                "name": name,
-                "server_path": config.server_path,
-                "model_path": config.model_path,
-                "mmproj_path": config.mmproj_path,
-                "n_gpu_layers": config.n_gpu_layers,
-                "context_size": config.context_size,
-                "batch_size": config.batch_size,
-                "ubatch_size": config.ubatch_size,
-                "threads": config.threads,
-                "flash_attn": config.flash_attn,
-                "cache_type_k": config.cache_type_k,
-                "cache_type_v": config.cache_type_v,
-                "host": config.host,
-                "port": config.port,
-                "api_key": config.api_key,
-                "slots": config.slots,
-                "embeddings": config.embeddings,
-                "rope_freq_base": config.rope_freq_base,
-                "rope_freq_scale": config.rope_freq_scale,
-                "yarn_ext_factor": config.yarn_ext_factor,
-                "yarn_attn_factor": config.yarn_attn_factor,
-                "no_kv_offload": config.no_kv_offload,
-                "cont_batching": config.cont_batching,
-                "ml_lock": config.ml_lock,
-                "no_mmap": config.no_mmap,
-                "extra_args": config.extra_args,
-                "updated_at": datetime.now().isoformat(),
-            }
-
-            # 如果是新建，添加创建时间
-            if not profile_path.exists():
-                data["created_at"] = datetime.now().isoformat()
-            else:
-                existing = json.loads(profile_path.read_text("utf-8"))
-                data["created_at"] = existing.get("created_at", data["updated_at"])
-
-            profile_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        """Replace atomically; callers receive validation, read and write failures."""
+        with self._lock:
+            path = self._profile_path(name)
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            now = datetime.now().isoformat()
+            data = {**asdict(config), "name": name, "created_at": now, "updated_at": now}
+            if path.exists():
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                data["created_at"] = existing.get("created_at", now)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=self.config_dir,
+                    prefix=".profile-", suffix=".tmp", delete=False,
+                ) as handle:
+                    temporary = Path(handle.name)
+                    json.dump(data, handle, ensure_ascii=False, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            finally:
+                if temporary is not None and temporary.exists():
+                    temporary.unlink()
             return True
-        except Exception as e:
-            print(f"[ERROR] 保存配置失败: {e}")
-            return False
 
     def load(self, name: str) -> Optional[ServerConfig]:
-        """加载配置档案"""
-        profile_path = self._profile_path(name)
-        if not profile_path.exists():
-            return None
-
-        try:
-            with open(profile_path, "r", encoding="utf-8") as fp:
-                data = json.load(fp)
-
-            config = ServerConfig()
-            for key in [
-                "server_path", "model_path", "mmproj_path",
-                "n_gpu_layers", "context_size", "batch_size", "ubatch_size",
-                "threads", "flash_attn", "cache_type_k", "cache_type_v",
-                "host", "port", "api_key", "slots", "embeddings",
-                "rope_freq_base", "rope_freq_scale",
-                "yarn_ext_factor", "yarn_attn_factor",
-                "no_kv_offload", "cont_batching", "ml_lock", "no_mmap",
-                "extra_args",
-            ]:
-                if key in data:
-                    setattr(config, key, data[key])
-            return config
-        except Exception as e:
-            print(f"[ERROR] 加载配置失败: {e}")
-            return None
+        with self._lock:
+            path = self._profile_path(name)
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return None
+            if not isinstance(data, dict):
+                raise ValueError("配置档案必须是 JSON 对象")
+            names = {field.name for field in fields(ServerConfig)}
+            return ServerConfig(**{key: value for key, value in data.items() if key in names})
 
     def delete(self, name: str) -> bool:
-        """删除配置档案"""
-        profile_path = self._profile_path(name)
-        if profile_path.exists():
-            profile_path.unlink()
+        with self._lock:
+            path = self._profile_path(name)
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return False
             return True
-        return False
 
     def get_default_config(self) -> ServerConfig:
-        """返回默认配置"""
-        return ServerConfig(
-            n_gpu_layers=99,
-            context_size=128000,
-            batch_size=2048,
-            ubatch_size=512,
-            threads=0,
-            flash_attn=True,
-            cache_type_k="q8_0",
-            cache_type_v="q8_0",
-            host="127.0.0.1",
-            port=8080,
-            slots=1,
-        )
+        return ServerConfig()
 
 
-# 全局实例
 config_manager = ConfigManager()

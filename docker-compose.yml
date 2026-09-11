@@ -13,7 +13,7 @@ services:
     volumes:
       - backend-data:/app/data
     environment:
-      - ADMIN_PASSWORD=admin123456
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env before starting}
       - PORT=3000
       - NODE_ENV=production
     healthcheck:

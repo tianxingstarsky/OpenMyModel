@@ -1,24 +1,32 @@
-import "dart:io";
-import "dart:convert";
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
-void main() async {
-  print("Dart WebSocket test...");
+Future<void> main() async {
+  final password = Platform.environment['ADMIN_PASSWORD'];
+  if (password == null || password.isEmpty) {
+    stderr.writeln('Set ADMIN_PASSWORD before running the WebSocket smoke test.');
+    exitCode = 1;
+    return;
+  }
+  WebSocket? socket;
   try {
-    var ws = await WebSocket.connect("ws://localhost/ws/node");
-    print("1. Connected!");
-    ws.add(jsonEncode({"type":"auth","password":"admin123456","nodeId":"test","nodeName":"dart-test","modelName":""}));
-    ws.listen((d) {
-      var msg = jsonDecode(d);
-      print("2. Received: type=${msg["type"]}");
-      if (msg["type"] == "auth_ok") {
-        print("3. AUTH OK! nodeId=${msg["nodeId"]}");
-        ws.close();
-      }
-    }, onError: (e) { print("ERROR: $e"); }, onDone: () { print("DONE"); });
-    await Future.delayed(Duration(seconds: 5));
-    print("TIMEOUT");
-    ws.close();
-  } catch (e) {
-    print("FAIL: $e");
+    socket = await WebSocket.connect(
+      Platform.environment['CLOUD_WS_URL'] ?? 'ws://127.0.0.1:3000/ws/node',
+    ).timeout(const Duration(seconds: 10));
+    socket.add(jsonEncode({
+      'type': 'auth', 'password': password,
+      'nodeName': 'dart-smoke', 'serverRunning': false, 'protocolVersion': 2,
+    }));
+    final message = jsonDecode(await socket.first.timeout(const Duration(seconds: 10)) as String);
+    if (message['type'] != 'auth_ok') {
+      throw StateError(message['message']?.toString() ?? 'Authentication failed');
+    }
+    stdout.writeln('WebSocket authentication succeeded.');
+  } catch (error) {
+    stderr.writeln('WebSocket test failed: $error');
+    exitCode = 1;
+  } finally {
+    await socket?.close();
   }
 }

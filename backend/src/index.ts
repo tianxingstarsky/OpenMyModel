@@ -1,102 +1,94 @@
-import Fastify from "fastify";
+import Fastify, { FastifyServerOptions } from "fastify";
 import cors from "@fastify/cors";
 import fastifyWebsocket from "@fastify/websocket";
-import { loadConfig } from "./config";
-import { initDatabase } from "./db/schema";
+import { ConfigStore } from "./config";
+import { createDatabase, nodes } from "./db/schema";
 import { registerOpenAIRoutes } from "./routes/openai";
 import { registerAdminRoutes } from "./routes/admin";
-import { wsTunnel, startHeartbeat } from "./services/websocket";
+import { TunnelOptions, WebSocketTunnel } from "./services/websocket";
+import { AdminAuthenticator } from "./services/auth";
 
-/**
- * OpenMyModel 云后端入口
- */
+export interface AppOptions {
+  dataDir?: string;
+  env?: NodeJS.ProcessEnv;
+  configStore?: ConfigStore;
+  logger?: FastifyServerOptions["logger"];
+  tunnelOptions?: Omit<TunnelOptions, "authenticate" | "onNodeChange">;
+  tunnel?: WebSocketTunnel;
+  authLimit?: number;
+  heartbeat?: boolean;
+}
 
-async function main() {
-  // 初始化数据库
-  initDatabase();
-
-  // 加载配置
-  const config = loadConfig();
-
-  if (!config.setupComplete) {
-    // 自动初始化：生成随机密码，打印到日志
-    const { createHash, randomBytes } = require("crypto");
-    const autoPassword = randomBytes(8).toString("hex");
-    const salt = randomBytes(16).toString("hex");
-    const hash = createHash("sha256").update(salt + autoPassword).digest("hex");
-    config.passwordHash = salt + ":" + hash;
-    config.setupComplete = true;
-    const { saveConfig } = require("./config");
-    saveConfig(config);
-    console.log("");
-    console.log("╔══════════════════════════════════════════════╗");
-    console.log("║  OpenMyModel - 首次启动，已自动初始化          ║");
-    console.log("╚══════════════════════════════════════════════╝");
-    console.log("");
-    console.log("  ⚠ 自动生成的管理员密码（请妥善保存）：");
-    console.log(`     ${autoPassword}`);
-    console.log("");
-    console.log("  修改密码：npm run setup → 选择「重置密码」");
-    console.log("");
+export async function buildApp(options: AppOptions = {}) {
+  const store = options.configStore ?? new ConfigStore(options.dataDir, options.env);
+  const config = await store.initialize();
+  if (!config.setupComplete || !config.passwordHash) {
+    throw new Error("Set ADMIN_PASSWORD or run npm run setup before starting the backend");
   }
-
-  // 创建 Fastify 实例
+  const database = createDatabase(store.directory);
+  const auth = new AdminAuthenticator(store, options.authLimit);
+  const tunnel = options.tunnel ?? new WebSocketTunnel({
+    ...options.tunnelOptions,
+    authenticate: (password, address) => auth.authenticate(password, address),
+    onNodeChange: node => {
+      const now = new Date().toISOString();
+      const record = { id: node.id, name: node.name, modelName: node.modelName, modelConfig: node.modelConfig,
+        isOnline: node.isOnline, lastHeartbeat: now, connectedAt: now };
+      const { connectedAt, ...update } = record;
+      database.db.insert(nodes).values(record).onConflictDoUpdate({ target: nodes.id, set: update }).run();
+    },
+  });
   const app = Fastify({
-    logger: {
+    bodyLimit: 32 * 1024 * 1024,
+    logger: options.logger ?? {
       level: "info",
-      transport: {
-        target: "pino-pretty",
-        options: { colorize: true },
-      },
+      redact: ["req.headers.authorization", "req.headers['x-admin-password']", "password", "body.password"],
     },
   });
-
-  // 注册 CORS
-  await app.register(cors, {
-    origin: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "x-admin-password"],
-  });
-
-  // 注册 WebSocket
-  await app.register(fastifyWebsocket);
-
-  // 注册路由
-  registerOpenAIRoutes(app);
-  registerAdminRoutes(app);
-
-  // 注册 WebSocket 隧道
-  wsTunnel.registerRoutes(app);
-
-  // 启动心跳
-  startHeartbeat(wsTunnel);
-
-  // 健康检查
-  app.get("/", async (request) => ({
-    name: "OpenMyModel Cloud API",
-    version: "1.0.0",
-    domain: request.hostname || 'localhost',
-    endpoints: {
-      models: "/v1/models",
-      chat: "/v1/chat/completions",
-      admin: "/admin/*",
-      websocket: "/ws/node",
-    },
-  }));
-
-  // 启动服务
+  app.decorate("tunnel", tunnel);
+  // Close the tunnel before the websocket plugin waits for active sockets.
+  app.addHook("preClose", async () => { tunnel.close(); });
+  app.addHook("onClose", async () => { database.close(); });
   try {
-    await app.listen({ port: config.port, host: "0.0.0.0" });
-    console.log("");
-    console.log("╔══════════════════════════════════════════════╗");
-    console.log(`║  OpenMyModel 云服务已启动                      ║`);
-    console.log(`║  地址: http://0.0.0.0:${config.port}                  ║`);
-    console.log("╚══════════════════════════════════════════════╝");
-    console.log("");
-  } catch (err) {
-    app.log.error(err);
-    process.exit(1);
+    await app.register(cors, {
+      origin: true,
+      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization", "x-admin-password"],
+    });
+    app.addContentTypeParser(/^application\/[\w.+-]+\+json(?:;.*)?$/, { parseAs: "string" }, app.getDefaultJsonParser("error", "error"));
+    await app.register(fastifyWebsocket, { options: { maxPayload: 40 * 1024 * 1024 } });
+    registerOpenAIRoutes(app, tunnel);
+    registerAdminRoutes(app, tunnel, auth);
+    tunnel.registerRoutes(app);
+    if (options.heartbeat !== false) tunnel.startHeartbeat();
+    app.get("/", async request => ({
+      name: "OpenMyModel Cloud API", version: "1.0.0", domain: request.hostname || "localhost",
+      endpoints: { models: "/v1/models", chat: "/v1/chat/completions", admin: "/admin/*", websocket: "/ws/node" },
+    }));
+    return app;
+  } catch (error) {
+    await app.close();
+    throw error;
   }
 }
 
-main();
+async function main(): Promise<void> {
+  const store = new ConfigStore();
+  const app = await buildApp({ configStore: store });
+  const stop = async () => { await app.close(); };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  try {
+    await app.listen({ port: store.load().port, host: "0.0.0.0" });
+  } catch (error) {
+    await app.close();
+    throw error;
+  }
+}
+
+if (require.main === module) {
+  main().catch(error => {
+    console.error(error instanceof Error ? error.message : "Backend startup failed");
+    process.exitCode = 1;
+  });
+}

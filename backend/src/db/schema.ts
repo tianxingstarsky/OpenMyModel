@@ -1,10 +1,10 @@
 import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { drizzle, BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { getConfigDir } from "../config";
 import { join } from "path";
 
-const DB_PATH = join(getConfigDir(), "openmymodel.db");
+import { mkdirSync } from "fs";
 
 // ==================== 数据表定义 ====================
 
@@ -50,11 +50,18 @@ export const nodes = sqliteTable("nodes", {
 
 // ==================== 数据库初始化 ====================
 
-const sqlite = new Database(DB_PATH);
-sqlite.pragma("journal_mode = WAL");
-export const db = drizzle(sqlite);
+export let db: BetterSQLite3Database;
+let defaultDatabase: ReturnType<typeof createDatabase> | undefined;
 
 export function initDatabase(): void {
+  defaultDatabase ??= createDatabase(getConfigDir());
+  db = defaultDatabase.db;
+}
+
+export function createDatabase(directory: string): { db: BetterSQLite3Database; close: () => void } {
+  mkdirSync(directory, { recursive: true });
+  const sqlite = new Database(join(directory, "openmymodel.db"));
+  sqlite.pragma("journal_mode = WAL");
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS api_keys (
       id TEXT PRIMARY KEY,
@@ -96,4 +103,5 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_usage_api_key ON usage_logs(api_key_id);
     CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_logs(timestamp);
   `);
+  return { db: drizzle(sqlite), close: () => sqlite.close() };
 }

@@ -12,7 +12,7 @@
 > 免费在线大模型虽触手可及，却几乎都经过过度量化——提供给你的是智力"降级版"。我实测对比：一台消费级显卡上跑 **Qwen 3.5 9B INT8**，在逻辑推理和数学推导上明显优于所谓"旗舰级"的免费在线服务。免费 API 为了成本极致压缩，你拿到的其实只是同名模型的一张影子。而当你自己掌控精度和参数，每一轮推理都在真实权重上完成，体验的差距会超出你的预期。
 >
 > #### 不止自用，更可共享与变现
-> OpenMyModel 的设计初衷不止于"自己用"——它同时为算力共享而生。你可以为团队成员、朋友甚至社区用户分发 API Key，按需管理配额与用量。闲置 GPU 不再是沉没成本：从零开始的算力变现，从一枚 `sk-` 密钥开始。
+> OpenMyModel 的设计初衷不止于"自己用"——它同时为算力共享而生。你可以为团队成员、朋友或社区用户分发 API Key，并在本机启用、停用或删除。当前版本不实现 Token 配额、计费或用量统计，不应将其用于需要精确计量的收费服务。
 
 **将本地 llama.cpp 算力通过 WebSocket 隧道暴露到云端，以 OpenAI 兼容 API 供外部调用。**
 
@@ -27,11 +27,12 @@ flowchart LR
     subgraph 本地机器
         A[Flutter 桌面端] --> B[Python Bridge]
         B --> C[llama-server<br/>本地 GPU 推理]
-        A <-->|WebSocket| D[云后端<br/>TypeScript]
+        A --> N[Node Bridge<br/>本地密钥校验]
+        N --> C
     end
 
     subgraph 云端服务器
-        D --> E[OpenAI 兼容 API<br/>管理员 / 用户]
+        D[云后端<br/>Fastify + WebSocket] --> E[OpenAI 兼容 API<br/>管理员 / 用户]
     end
 
     subgraph 外部调用者
@@ -40,15 +41,16 @@ flowchart LR
         E --> H[任意 OpenAI SDK]
     end
 
-    D <== WebSocket 隧道 ==> A
+    D <== WebSocket 隧道 ==> N
 ```
 
-### 三组件职责
+### 组件职责
 
 | 组件 | 技术栈 | 角色 |
 |------|--------|------|
 | **Flutter 桌面端** | Flutter + Dart | UI 界面 / llama-server 管理 / API Key 管理（本地存储+本地验证）/ 模型对话 |
-| **Python Bridge** | Python | 进程管理 / llama-server 启动停止 / WebSocket 隧道客户端 |
+| **Python Bridge** | Python + FastAPI | 本地 HTTP API / llama-server 进程管理 / 本地对话代理 |
+| **Node Bridge** | Node.js + ws | Flutter stdin/stdout 控制 / 本地 Key 验证 / WebSocket HTTP 隧道 |
 | **云后端** | TypeScript + Node.js | WebSocket 服务端 / 请求透明转发到 llama-server / CLI 管理工具 |
 
 ---
@@ -57,7 +59,7 @@ flowchart LR
 
 - **🖥 本地 GPU 推理**：llama.cpp 全参数控制，Q8 缓存、GPU 加速
 - **🌐 WebSocket 隧道**：无需公网 IP，家庭主机也能上云
-- **🔑 纯本地密钥管理**：API Key 仅存储在前端本地，云端零存储，杜绝泄漏
+- **🔑 本地密钥管理**：API Key 持久化在本机，云端不持久化；验证时仍经过云后端和隧道，生产环境必须使用 HTTPS/WSS，并保护本机用户数据。
 - **🔄 OpenAI 兼容 API**：`/v1/chat/completions`、`/v1/models`，支持流式 (SSE)
 - **🖼 多模态支持**：mmproj 视觉投影，图片识别能力
 - **💬 内置对话界面**：多图上传 + 文字，流式响应
@@ -98,7 +100,7 @@ output_my_model/
 │   └── requirements.txt
 ├── backend/                  # TypeScript 云后端
 │   ├── src/
-│   │   ├── index.ts          # Express + WebSocket 入口
+│   │   ├── index.ts          # Fastify + WebSocket 入口
 │   │   ├── cli.ts            # 中文 CLI 交互
 │   │   ├── config.ts         # 配置文件管理
 │   │   ├── db/               # 数据库层 (SQLite)
@@ -128,19 +130,23 @@ output_my_model/
 
 - **Flutter** 3.x+（Windows/macOS/Linux）
 - **Python** 3.10+，conda 虚拟环境推荐
-- **Node.js** 18+ (云后端)
+- **Node.js** 22+（云后端和本地桥接）
 - **llama.cpp** 编译好的 `llama-server` 可执行文件
 - **模型文件**（GGUF 格式，如 Qwen 3.5 9B Q8）+ 可选 mmproj 文件
 
 ### 1. 前端 (Windows)
 
+先在仓库根目录准备 Python 依赖和 Node 桥接依赖。桌面端会启动并管理自己的本地 Python Bridge，不必另开一份占用 8765 端口。
+
 ```bash
+python -m pip install -r python/requirements.txt
+npm --prefix scripts ci
 cd frontend
 flutter pub get
 flutter run -d windows
 ```
 
-### 2. Python 业务层
+### 2. Python 业务层（单独调试时）
 
 ```bash
 cd python
@@ -153,7 +159,8 @@ python bridge_server.py
 
 ```bash
 cd backend
-npm install
+npm ci
+npm run setup                      # 首次配置管理员密码
 npm run dev                        # 默认端口 3000
 ```
 
@@ -161,7 +168,7 @@ npm run dev                        # 默认端口 3000
 
 ```bash
 cd backend
-npx ts-node src/cli.ts
+npm run setup
 ```
 
 向导式设置域名、密码、查看节点状态。
@@ -214,9 +221,9 @@ npm run build
 
 **关键**：Node版本选择栏里选你安装的 **v22.x**（不是系统默认的旧版本）。
 
-启动后点击「日志」查看自动生成的管理员密码。
+首次启动前设置项目环境变量 `ADMIN_PASSWORD`，或在 `backend/` 运行 `npm run setup` 创建管理员密码。服务不会把密码打印到日志。
 
-> 首次启动自动初始化，无需手动配置域名或运行 `npm run setup`。
+> 已存在的 `data/config.json` 会保留；修改环境变量不会覆盖原密码。重置密码请使用 `npm run setup`，不要删除数据库。
 
 ---
 
@@ -275,7 +282,9 @@ git pull && npm install && npm run build
 | `NODE_MODULE_VERSION` | 本机带了 node_modules | 服务器上 `rm -rf node_modules && npm install` |
 | WebSocket 闪断 | Nginx 缺 Upgrade 头 | 加上 `proxy_set_header Upgrade $http_upgrade;` |
 | 域名不通 | 反向代理目标 IP 错误 | 确保是 `http://127.0.0.1:3000` 不是 `172.0.0.1` |
-| API Key 401 | 重连后密钥未同步 | 新建一个 Key 再测试 |
+| API Key 401 | 密钥未启用或不属于在线节点 | 检查密钥所属桌面节点在线且已启用该 Key，无需盲目重建 |
+| 首次启动拒绝运行 | 尚未配置管理员密码 | 设置 `ADMIN_PASSWORD` 或运行 `npm run setup` |
+| 桥接协议错误 | 桌面与云端版本不匹配 | 同时更新云后端和桌面的 Node 桥接 |
 
 
 ---
@@ -287,7 +296,7 @@ API Key 验证流程:
   用户请求 → 云后端 → 提取 API Key
                       → 查找对应 WebSocket 节点
                       → 发送 { action: "validate_key", key: "sk-xxx" }
-                      → Flutter 前端 本地检查密钥
+                      → 本机 Node Bridge 检查 Flutter 同步的密钥
                       → 返回验证结果
                       → 通过后透明转发请求到 llama-server
 
@@ -315,6 +324,22 @@ curl https://你的域名/v1/chat/completions \
 ```
 
 ---
+
+## 开发验证与发布
+
+请参阅 [开发、测试与发布说明](docs/DEVELOPMENT.md)，包括中继协议、故障排查、自动化测试和 Windows 可追溯打包。更新时应同时部署后端和桌面桥接，旧桥接不会提供正确的上游状态码。
+
+```bash
+npm --prefix scripts ci
+npm --prefix scripts test
+npm --prefix scripts run check:release
+npm --prefix backend ci
+npm --prefix backend run build
+npm --prefix backend test
+python -m unittest discover -s python/tests -v
+```
+
+Docker 首次启动前将 `.env.example` 复制为 `.env` 并填写强密码，再运行 `docker compose up -d --build`。公网部署请在反向代理终止 TLS，并使用 `https://` 地址连接桌面端；仓库内 nginx 示例本身不提供证书。
 
 ## 📝 许可证
 

@@ -1,29 +1,12 @@
-import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { verifyAdminPassword } from "../services/auth";
-import { wsTunnel } from "../services/websocket";
+import { FastifyInstance } from "fastify";
+import { AdminAuthenticator } from "../services/auth";
+import { WebSocketTunnel } from "../services/websocket";
 
-/**
- * 管理 API 路由
- * 所有管理接口需要 x-admin-password header 认证
- * API Key 由 Flutter 本地管理，服务器不存储
- */
-
-function requireAdmin(request: FastifyRequest, reply: FastifyReply): boolean {
-  const password = request.headers["x-admin-password"] as string;
-  if (!password || !verifyAdminPassword(password)) {
-    reply.status(401).send({ error: "管理员密码错误" });
-    return false;
-  }
-  return true;
-}
-
-export function registerAdminRoutes(app: FastifyInstance): void {
-  // 节点管理
-  app.get("/admin/nodes", async (request: FastifyRequest, reply: FastifyReply) => {
-    if (!requireAdmin(request, reply)) return;
-    return wsTunnel.getOnlineNodes();
+export function registerAdminRoutes(app: FastifyInstance, tunnel: WebSocketTunnel, auth: AdminAuthenticator): void {
+  app.get("/admin/nodes", async (request, reply) => {
+    const result = await auth.authenticate(request.headers["x-admin-password"], request.ip);
+    if (result === "limited") return reply.header("Retry-After", "60").status(429).send({ error: "Too many authentication attempts" });
+    if (result !== "ok") return reply.status(401).send({ error: "Invalid administrator password" });
+    return tunnel.getOnlineNodes();
   });
-
-  // Key 由 Flutter 本地管理，云端无 Key 相关接口
-  // 外部用户验证通过 /v1/* 的 Bearer token → WebSocket validate_key 流程
 }

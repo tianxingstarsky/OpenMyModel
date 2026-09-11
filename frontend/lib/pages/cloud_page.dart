@@ -1,464 +1,661 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'dart:async';
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/cloud_url.dart';
+import '../services/python_bridge.dart';
 import '../services/websocket_service.dart';
-
-/// OpenMyModel to Internet - cloud connection + API Key management
 
 class CloudPage extends StatefulWidget {
   final String llamaUrl;
+  final String llamaApiKey;
   final String modelName;
   final bool serverRunning;
-  const CloudPage({super.key, this.llamaUrl = "http://127.0.0.1:8080", this.modelName = "", this.serverRunning = false});
+  final bool serverReady;
+  const CloudPage({
+    super.key,
+    this.llamaUrl = 'http://127.0.0.1:8080',
+    this.llamaApiKey = '',
+    this.modelName = '',
+    this.serverRunning = false,
+    this.serverReady = false,
+  });
   @override
-  State<CloudPage> createState() => _CloudPageState();
+  State<CloudPage> createState() => CloudPageState();
 }
 
-class _CloudPageState extends State<CloudPage> {
-  final WebSocketService _wsService = WebSocketService();
-  final tcUrl = TextEditingController();
-  final tcPwd = TextEditingController();
-  final tcKeyName = TextEditingController();
-  final tcKeyLimit = TextEditingController();
-
-  final List<String> _visibleKeys = [];
-  bool _connected = false;
-  String _connStatus = "未连接";
-  List<dynamic> _apiKeys = [];
-  String _testResult = "";
-  bool _testing = false;
-  String _testApiKey = "";
-  List<dynamic> _backendNodes = [];
-  Timer? _nodesPollTimer;
-  Timer? _autoConnectTimer;
+class CloudPageState extends State<CloudPage> {
+  final WebSocketService _service = WebSocketService();
+  final _url = TextEditingController();
+  final _password = TextEditingController();
+  final _keyName = TextEditingController();
+  final _visibleKeys = <String>{};
+  final _clients = <http.Client>{};
+  List<Map<String, dynamic>> _keys = [];
+  List<Map<String, dynamic>> _nodes = [];
+  StreamSubscription<Map<String, dynamic>>? _subscription;
+  Timer? _poll;
+  bool _connected = false,
+      _connecting = false,
+      _loaded = false,
+      _testing = false,
+      _polling = false,
+      _closing = false;
+  bool _autoConnect = false;
+  String _status = '未连接';
+  String _testResult = '';
+  String? _connectedUrl, _connectedPassword;
 
   @override
   void initState() {
     super.initState();
-        // Auto-detect bridge script relative to exe location
-    final exeDir = Directory(Platform.resolvedExecutable).parent.path;
-    final releaseBridge = exeDir + "/scripts/cloud_bridge.js";
-    final devBridge = "scripts/cloud_bridge.js";
-    final bridgePath = File(releaseBridge).existsSync() ? releaseBridge : devBridge;
-    _wsService.setBridgePath(bridgePath);
-    _loadPrefs();
-    _ensureKeysLoaded();
-    _wsService.setLlamaUrl(widget.llamaUrl);
-    _wsService.setModelName(widget.modelName);
-    _wsService.messages.listen((msg) {
-      final type = msg["type"] as String?;
-      if (type == "connected") {
-        setState(() { _connected = true; _connStatus = "已连接 - 节点已注册"; });
-        _wsService.setLocalKeys(List<Map<String, dynamic>>.from(_apiKeys));
-        _startNodesPolling();
-      }
-      if (type == "keys_synced") {
-        final keys = msg["keys"] as List?;
-        if (keys != null) setState(() => _apiKeys = keys);
-      }
-      if (type == "disconnected") {
-        setState(() { _connected = false; _connStatus = "已断开，可重新连接"; });
-        _nodesPollTimer?.cancel();
+    _subscription = _service.messages.listen((message) {
+      if (!mounted || _closing) return;
+      if (message['type'] == 'connected') {
+        setState(() {
+          _connected = true;
+          _status = '已连接，节点在线';
+        });
+      } else if (message['type'] == 'disconnected' ||
+          message['type'] == 'error') {
+        setState(() {
+          _connected = false;
+          _status = message['message']?.toString() ?? '已断开';
+          _nodes = [];
+        });
+        _poll?.cancel();
       }
     });
+    unawaited(_load());
   }
 
-  Future<void> _loadPrefs() async {
+  Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
-    final url = prefs.getString("cloud_url");
-    final pwd = prefs.getString("cloud_password");
-    if (mounted && url != null) {
-      tcUrl.text = url;
-      if (pwd != null) tcPwd.text = pwd;
-      // Auto-connect after a short delay (wait for bridge + server)
-      _autoConnectTimer = Timer(const Duration(seconds: 2), () {
-        if (widget.serverRunning) _connect();
+    if (!mounted || _closing) return;
+    _url.text = prefs.getString('cloud_url') ?? '';
+    _password.text = prefs.getString('cloud_password') ?? '';
+    _autoConnect = prefs.getBool('cloud_auto_connect') ?? false;
+    final raw = prefs.getString('api_keys');
+    var corrupt = false;
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final data = jsonDecode(raw);
+        if (data is! List) throw const FormatException('密钥列表格式错误');
+        _keys = data
+            .whereType<Map>()
+            .where(
+              (key) =>
+                  key['id'] is String &&
+                  key['key'] is String &&
+                  (key['key'] as String).isNotEmpty,
+            )
+            .map((key) => Map<String, dynamic>.from(key))
+            .toList();
+        corrupt = _keys.length != data.length;
+      } catch (_) {
+        corrupt = true;
+      }
+    }
+    _service.setLocalKeys(_keys);
+    setState(() {
+      _loaded = true;
+      if (corrupt) _status = '部分本地密钥数据无法读取，原始数据尚未覆盖';
+    });
+    if (_autoConnect &&
+        widget.serverReady &&
+        _url.text.isNotEmpty &&
+        _password.text.isNotEmpty)
+      unawaited(_connect());
+  }
+
+  @override
+  void didUpdateWidget(covariant CloudPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.llamaUrl != oldWidget.llamaUrl ||
+        widget.llamaApiKey != oldWidget.llamaApiKey)
+      _service.setLlamaUrl(widget.llamaUrl, apiKey: widget.llamaApiKey);
+    if (widget.modelName != oldWidget.modelName ||
+        widget.serverReady != oldWidget.serverReady) {
+      _service.setModelName(widget.modelName);
+      _service.sendStatusUpdate(
+        widget.modelName,
+        serverRunning: widget.serverReady,
+      );
+    }
+    if (_loaded &&
+        _autoConnect &&
+        widget.serverReady &&
+        !oldWidget.serverReady &&
+        !_connected &&
+        !_connecting)
+      unawaited(_connect());
+  }
+
+  Future<void> _connect() async {
+    if (_closing || !_loaded || _connecting || _connected) return;
+    if (!widget.serverReady) {
+      _message('请先在首页启动模型并等待加载完成');
+      return;
+    }
+    try {
+      final url = normalizeCloudUri(_url.text).toString();
+      if (_password.text.isEmpty) throw const FormatException('请输入管理员密码');
+      final password = _password.text;
+      setState(() {
+        _connecting = true;
+        _status = '正在连接…';
       });
+      _service.setLlamaUrl(widget.llamaUrl, apiKey: widget.llamaApiKey);
+      _service.setModelName(widget.modelName);
+      _service.setLocalKeys(_keys);
+      final connected = await _service.connect(
+        url,
+        password,
+        nodeName: 'OpenMyModel-本地节点',
+        serverRunning: widget.serverReady,
+      );
+      if (!mounted || _closing) return;
+      setState(() {
+        _connected = connected;
+        _status = connected ? '已连接，节点在线' : (_service.lastError ?? '连接失败');
+      });
+      if (connected) {
+        _connectedUrl = url;
+        _connectedPassword = password;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('cloud_url', url);
+        await prefs.setString('cloud_password', password);
+        if (!mounted || _closing) return;
+        _poll?.cancel();
+        _poll = Timer.periodic(
+          const Duration(seconds: 5),
+          (_) => _fetchNodes(),
+        );
+        unawaited(_fetchNodes());
+      }
+    } catch (error) {
+      if (mounted && !_closing) setState(() => _status = error.toString());
+    } finally {
+      if (mounted && !_closing) setState(() => _connecting = false);
     }
   }
 
-  Future<void> _savePrefs() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString("cloud_url", tcUrl.text.trim());
-    await prefs.setString("cloud_password", tcPwd.text);
+  void disconnectForShutdown() {
+    _closing = true;
+    _poll?.cancel();
+    _service.disconnect();
+    for (final client in _clients) {
+      client.close();
+    }
+    _clients.clear();
   }
 
-  /// Poll backend for real node status
-  void _startNodesPolling() {
-    _nodesPollTimer?.cancel();
-    _nodesPollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _fetchNodes());
-    _fetchNodes();
+  void resumeAfterCancelledShutdown() {
+    if (!mounted) return;
+    setState(() {
+      _closing = false;
+      _connected = false;
+      _connecting = false;
+      _testing = false;
+      _status = '关闭未完成，云端已安全断开';
+      _nodes = [];
+    });
+  }
+
+  void _disconnect() {
+    _autoConnect = false;
+    _poll?.cancel();
+    _service.disconnect();
+    for (final client in _clients) {
+      client.close();
+    }
+    if (mounted)
+      setState(() {
+        _connected = false;
+        _connecting = false;
+        _status = '已断开';
+        _nodes = [];
+      });
+    unawaited(
+      SharedPreferences.getInstance().then(
+        (prefs) => prefs.setBool('cloud_auto_connect', false),
+      ),
+    );
   }
 
   Future<void> _fetchNodes() async {
+    if (!_connected || _polling || _connectedUrl == null || _closing) return;
+    _polling = true;
+    final client = http.Client();
+    _clients.add(client);
     try {
-      final d = tcUrl.text.trim();
-      final resp = await http.get(
-        Uri.parse("http://$d/admin/nodes"),
-        headers: {"x-admin-password": tcPwd.text},
-      ).timeout(const Duration(seconds: 5));
-      if (resp.statusCode == 200) {
-        final nodes = jsonDecode(resp.body) as List;
-        if (mounted) setState(() => _backendNodes = nodes);
-      }
-    } catch (_) {}
-  }
-
-  @override
-  void didUpdateWidget(CloudPage old) {
-    super.didUpdateWidget(old);
-    _wsService.setLlamaUrl(widget.llamaUrl);
-    _wsService.setModelName(widget.modelName);
-    if (_connected) _wsService.sendStatusUpdate(widget.modelName);
-    // Auto-connect when server comes online
-    if (!_connected && widget.serverRunning && !old.serverRunning && tcUrl.text.isNotEmpty) {
-      _connect();
+      final response = await client
+          .get(
+            cloudEndpoint(_connectedUrl!, '/admin/nodes'),
+            headers: {'x-admin-password': _connectedPassword!},
+          )
+          .timeout(const Duration(seconds: 5));
+      if (response.statusCode != 200)
+        throw StateError('节点状态 HTTP ${response.statusCode}');
+      final data = jsonDecode(utf8.decode(response.bodyBytes));
+      if (data is! List) throw const FormatException('节点列表格式错误');
+      if (mounted && !_closing && _connected)
+        setState(
+          () => _nodes = data
+              .whereType<Map>()
+              .map((node) => Map<String, dynamic>.from(node))
+              .toList(),
+        );
+    } catch (error) {
+      if (mounted && !_closing && _connected)
+        setState(() => _status = '隧道已连接，节点状态获取失败: $error');
+    } finally {
+      client.close();
+      _clients.remove(client);
+      _polling = false;
     }
   }
 
-  Future _connect() async {
-    if (!widget.serverRunning) {
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text("提示"),
-          content: const Text("请先在首页启动 llama-server 后再连接云端。"),
-          actions: [TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text("知道了"))],
-        ),
-      );
+  Future<void> _saveKeys() async {
+    _service.setLocalKeys(_keys);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('api_keys', jsonEncode(_keys));
+  }
+
+  Future<void> _createKey() async {
+    final name = _keyName.text.trim();
+    if (!_loaded || name.isEmpty) {
+      _message('请输入密钥名称');
       return;
     }
-    if (tcUrl.text.trim().isEmpty || tcPwd.text.isEmpty) {
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text("提示"),
-          content: const Text("请先填写服务器地址和密码。"),
-          actions: [TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text("知道了"))],
-        ),
-      );
-      return;
-    }
-    setState(() => _connStatus = "正在启动 Node.js 桥接...");
-    _savePrefs();
-    final ok = await _wsService.connect(tcUrl.text.trim(), tcPwd.text, nodeName: "OpenMyModel-本地节点");
-    setState(() { _connected = ok; _connStatus = ok ? "已连接 - 节点在线" : "连接超时，请检查地址、密码和llama-server"; });
-    if (ok) {
-      if (!_keysLoaded) await _ensureKeysLoaded();
-      _loadKeys();
-      _wsService.setLocalKeys(List<Map<String, dynamic>>.from(_apiKeys));
-    }
-  }
-
-  void _disconnect() { _wsService.disconnect(); _nodesPollTimer?.cancel(); setState(() { _connected = false; _connStatus = "已断开"; }); }
-
-  Future _loadKeys() async {
-    if (_apiKeys.isNotEmpty) {
-      _wsService.setLocalKeys(List<Map<String, dynamic>>.from(_apiKeys));
-    }
-  }
-
-  String _genKey() {
     final random = Random.secure();
-    final chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-    final id = List.generate(32, (i) => chars[random.nextInt(chars.length)]).join();
-    return "sk-oom-$id";
-  }
-
-  Future _createKey() async {
-    final n = tcKeyName.text.trim(); final l = int.tryParse(tcKeyLimit.text) ?? 0;
-    if (n.isEmpty) return;
-    final newKey = {
-      "id": DateTime.now().millisecondsSinceEpoch.toRadixString(36),
-      "name": n,
-      "key": _genKey(),
-      "createdAt": DateTime.now().toIso8601String(),
-      "isActive": true,
-      "totalTokens": 0, "totalRequests": 0,
-      "monthlyTokens": 0, "monthlyRequests": 0,
-      "tokenLimit": l,
-    };
+    final value = List.generate(
+      32,
+      (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
     setState(() {
-      _apiKeys = [..._apiKeys, newKey];
-      if (_testApiKey.isEmpty) _testApiKey = newKey["key"] as String;
+      _keys.add({
+        'id': value.substring(0, 16),
+        'name': name,
+        'key': 'sk-oom-$value',
+        'createdAt': DateTime.now().toIso8601String(),
+        'isActive': true,
+      });
+      _keyName.clear();
     });
-    tcKeyName.clear(); tcKeyLimit.clear();
-    _wsService.setLocalKeys(List<Map<String, dynamic>>.from(_apiKeys));
-    _saveKeysLocal();
-    if (mounted) ft.displayInfoBar(context, builder: (c, cl) => ft.InfoBar(title: Text("Key generated: $n"), severity: ft.InfoBarSeverity.success));
-  }
-
-  Future _deleteKey(String id) async {
-    setState(() {
-      _apiKeys = _apiKeys.where((k) => k["id"] != id).toList();
-      _visibleKeys.remove(id);
-    });
-    _wsService.setLocalKeys(List<Map<String, dynamic>>.from(_apiKeys));
-    _saveKeysLocal();
-  }
-
-  Future _testConnection() async {
-    if (!_connected) { setState(() => _testResult = "请先连接云端"); return; }
-    if (_testApiKey.isEmpty) { setState(() => _testResult = "请先生成 API Key"); return; }
-    setState(() { _testing = true; _testResult = "发送多模态测试..."; });
     try {
-      final d = tcUrl.text.trim();
-      final body = {
-        "model": widget.modelName.isNotEmpty ? widget.modelName : "local-model",
-        "messages": [
-          {
-            "role": "user",
-            "content": [
-              {"type": "text", "text": "请用一句话描述这张图片"},
-              {"type": "image_url", "image_url": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison.jpg/640px-Gfp-wisconsin-madison.jpg"}},
-            ],
-          },
-        ],
-        "stream": true,
-      };
-      final resp = await http.post(
-        Uri.parse("http://$d/v1/chat/completions"),
-        headers: {"Content-Type": "application/json", "Authorization": "Bearer $_testApiKey"},
-        body: jsonEncode(body),
-      ).timeout(const Duration(seconds: 30));
-      if (resp.statusCode == 200 && resp.headers["content-type"]?.contains("text/event-stream") == true) {
-        final buf = await resp.bodyBytes;
-        final text = utf8.decode(buf);
-        final lines = text.split("\n");
-        var content = "";
-        for (final line in lines) {
-          if (line.startsWith("data:") && !line.contains("[DONE]")) {
-            try {
-              final c = jsonDecode(line.substring(5).trim());
-              final d = c["choices"]?[0]?["delta"]?["content"];
-              if (d != null) content += d;
-            } catch (_) {}
-          }
-        }
-        setState(() => _testResult = content.isNotEmpty ? "success: $content" : "success: (流式响应已接收)");
-      } else {
-        setState(() => _testResult = "HTTP ${resp.statusCode}: ${utf8.decode(resp.bodyBytes).length > 200 ? utf8.decode(resp.bodyBytes).substring(0, 200) + "..." : utf8.decode(resp.bodyBytes)}");
-      }
-    } catch (e) {
-      setState(() => _testResult = "error: $e");
+      await _saveKeys();
+      _message('密钥已生成并同步到本地桥接', success: true);
+    } catch (error) {
+      _message('保存失败: $error');
     }
-    setState(() => _testing = false);
+  }
+
+  Future<void> _deleteKey(Map<String, dynamic> key) async {
+    final confirmed = await ft.showDialog<bool>(
+      context: context,
+      builder: (context) => ft.ContentDialog(
+        title: const Text('删除 API Key'),
+        content: Text('删除“${key['name']}”后不能恢复。已开始的请求不会被追溯取消。'),
+        actions: [
+          ft.Button(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          ft.FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() {
+      _keys.remove(key);
+      _visibleKeys.remove(key['id']);
+    });
+    try {
+      await _saveKeys();
+    } catch (error) {
+      _message('保存失败: $error');
+    }
+  }
+
+  Future<void> _toggleKey(Map<String, dynamic> key, bool active) async {
+    setState(() => key['isActive'] = active);
+    try {
+      await _saveKeys();
+    } catch (error) {
+      _message('保存失败: $error');
+    }
+  }
+
+  Future<void> _test() async {
+    if (_testing || !_connected || _connectedUrl == null) return;
+    final keys = _keys.where((key) => key['isActive'] == true).toList();
+    if (keys.isEmpty) {
+      _message('请先生成并启用一个 API Key');
+      return;
+    }
+    setState(() {
+      _testing = true;
+      _testResult = '正在发送短文本测试…';
+    });
+    final client = http.Client();
+    _clients.add(client);
+    final deadline = Timer(const Duration(seconds: 30), client.close);
+    try {
+      final request =
+          http.Request(
+              'POST',
+              cloudEndpoint(_connectedUrl!, '/v1/chat/completions'),
+            )
+            ..headers.addAll({
+              'Content-Type': 'application/json',
+              'Authorization': "Bearer ${keys.first['key']}",
+            })
+            ..body = jsonEncode({
+              'model': widget.modelName.isEmpty
+                  ? 'local-model'
+                  : widget.modelName,
+              'messages': [
+                {'role': 'user', 'content': '请只回复：连接成功'},
+              ],
+              'max_tokens': 32,
+              'stream': true,
+            });
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 30));
+      if (response.statusCode != 200) {
+        final text = await response.stream.bytesToString();
+        throw BridgeException(
+          text.length > 300 ? text.substring(0, 300) : text,
+          response.statusCode,
+        );
+      }
+      var output = '';
+      await for (final event in decodeSse(response.stream)) {
+        final data = jsonDecode(event);
+        if (data['error'] != null)
+          throw BridgeException(data['error'].toString());
+        final choices = data['choices'];
+        if (choices is List && choices.isNotEmpty) {
+          final delta = choices.first['delta'];
+          if (delta is Map)
+            output += (delta['content'] ?? delta['reasoning_content'] ?? '')
+                .toString();
+        }
+      }
+      if (mounted && !_closing)
+        setState(
+          () => _testResult = output.isEmpty ? '连接成功，已收到完整响应' : '连接成功：$output',
+        );
+    } catch (error) {
+      if (mounted && !_closing) setState(() => _testResult = '测试失败或超时：$error');
+    } finally {
+      deadline.cancel();
+      client.close();
+      _clients.remove(client);
+      if (mounted && !_closing) setState(() => _testing = false);
+    }
+  }
+
+  void _message(String text, {bool success = false}) {
+    if (!mounted || _closing) return;
+    ft.displayInfoBar(
+      context,
+      builder: (_, close) => ft.InfoBar(
+        title: Text(text),
+        onClose: close,
+        severity: success
+            ? ft.InfoBarSeverity.success
+            : ft.InfoBarSeverity.warning,
+      ),
+    );
   }
 
   @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(padding: const EdgeInsets.all(24), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Text("OpenMyModel / Internet", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-      Text("本地算力共享到云端", style: TextStyle(fontSize: 13, color: Colors.grey[500])),
-      const SizedBox(height: 16),
-
-      // llama-server status
-      _statusBar(),
-      const SizedBox(height: 16),
-
-      // Backend node status
-      _backendStatusBar(),
-      const SizedBox(height: 16),
-
-      // Connection
-      _sec("服务器地址"),
-      ft.TextBox(controller: tcUrl, placeholder: "your-server.com:3000"),
-      const SizedBox(height: 8),
-      _sec("管理员密码"),
-      ft.TextBox(controller: tcPwd, placeholder: "密码", obscureText: true),
-      const SizedBox(height: 12),
-      Row(children: [
-        ft.FilledButton(onPressed: _connected ? null : _connect, child: Text(_connected ? "已连接" : "连接")),
-        const SizedBox(width: 8),
-        ft.Button(onPressed: _connected ? _disconnect : null, child: const Text("断开")),
-        const SizedBox(width: 8),
-        ft.FilledButton(
-          onPressed: (_testing || !_connected) ? null : _testConnection,
-          child: Text(_testing ? "测试中..." : "测试连接"),
-          style: ft.ButtonStyle(backgroundColor: WidgetStateProperty.all(Colors.blue)),
+  Widget build(BuildContext context) => SingleChildScrollView(
+    padding: const EdgeInsets.all(24),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '云端连接',
+          style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
         ),
-        const SizedBox(width: 12),
-        Text(_connStatus, style: TextStyle(fontSize: 12, color: _connected ? Colors.green : Colors.grey)),
-      ]),
-      const SizedBox(height: 16),
-
-      // Test result
-      if (_testResult.isNotEmpty)
-        ft.Card(padding: const EdgeInsets.all(12), margin: const EdgeInsets.only(bottom: 16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text("测试结果", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-          const SizedBox(height: 8),
-          Text(_testResult, style: const TextStyle(fontSize: 12)),
-        ])),
-
-      // API Key management
-      _sec("API Key 管理"), const SizedBox(height: 8),
-      Row(children: [
-        Expanded(child: ft.TextBox(controller: tcKeyName, placeholder: "密钥名称")),
-        const SizedBox(width: 8),
-        SizedBox(width: 100, child: ft.TextBox(controller: tcKeyLimit, placeholder: "Token限制")),
-        const SizedBox(width: 8),
-        ft.FilledButton(onPressed: _createKey, child: const Text("生成")),
-      ]),
-      const SizedBox(height: 8),
-      ft.Button(onPressed: _loadKeys, child: const Text("刷新列表")),
-      const SizedBox(height: 12),
-
-      if (_apiKeys.isNotEmpty)
-        ...(_apiKeys.map((k) => ft.Card(
-          padding: const EdgeInsets.all(10),
-          margin: const EdgeInsets.only(bottom: 6),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              Text(k["name"] ?? "", style: const TextStyle(fontWeight: FontWeight.w600)),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: (k["isActive"] == true ? Colors.green : Colors.red).withAlpha(30),
-                  borderRadius: BorderRadius.circular(4)),
-                child: Text(k["isActive"] == true ? "有效" : "吊销",
-                  style: TextStyle(fontSize: 11, color: k["isActive"] == true ? Colors.green : Colors.red)),
+        const SizedBox(height: 6),
+        const Text(
+          '通过你自己的云服务器共享本地模型。公网地址请使用 HTTPS。',
+          style: TextStyle(color: Colors.grey),
+        ),
+        const SizedBox(height: 16),
+        ft.InfoBar(
+          title: Text(
+            widget.serverReady
+                ? '本地模型已就绪'
+                : widget.serverRunning
+                ? '本地模型加载中'
+                : '本地模型未启动',
+          ),
+          content: Text(
+            widget.modelName.isEmpty ? '在首页选择模型并启动' : widget.modelName,
+          ),
+          severity: widget.serverReady
+              ? ft.InfoBarSeverity.success
+              : ft.InfoBarSeverity.info,
+        ),
+        const SizedBox(height: 16),
+        const Text('服务器地址'),
+        const SizedBox(height: 6),
+        ft.TextBox(
+          controller: _url,
+          enabled: !_connected && !_connecting,
+          placeholder: 'https://api.example.com 或 127.0.0.1:3000',
+        ),
+        const SizedBox(height: 12),
+        const Text('管理员密码'),
+        const SizedBox(height: 6),
+        ft.TextBox(
+          controller: _password,
+          obscureText: true,
+          enabled: !_connected && !_connecting,
+        ),
+        const SizedBox(height: 8),
+        ft.Checkbox(
+          checked: _autoConnect,
+          content: const Text('模型就绪后自动连接（默认关闭）'),
+          onChanged: (value) async {
+            setState(() => _autoConnect = value ?? false);
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setBool('cloud_auto_connect', _autoConnect);
+          },
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            ft.FilledButton(
+              onPressed: _connected || _connecting || !_loaded
+                  ? null
+                  : _connect,
+              child: Text(
+                _connecting
+                    ? '连接中…'
+                    : _connected
+                    ? '已连接'
+                    : '连接',
               ),
-              const Spacer(),
-              ft.HyperlinkButton(
-                onPressed: () => _deleteKey(k["id"]),
-                child: const Text("删除", style: TextStyle(color: Colors.red))),
-            ]),
-            Row(children: [
-              Expanded(child: Text(
-                _visibleKeys.contains(k["id"]) ? (k["key"] ?? "") : "sk-" + "•" * 18,
-                style: TextStyle(fontSize: 10, color: Colors.grey[400], fontFamily: "monospace"),
-              )),
-              GestureDetector(
-                onTap: () {
-                  setState(() {
-                    if (_visibleKeys.contains(k["id"])) {
-                      _visibleKeys.remove(k["id"]);
-                    } else {
-                      _visibleKeys.add(k["id"] as String);
-                    }
-                  });
-                },
-                child: Icon(
-                  _visibleKeys.contains(k["id"]) ? Icons.visibility_off : Icons.visibility,
-                  size: 14, color: Colors.grey,
-                ),
-              ),
-              const SizedBox(width: 6),
-              GestureDetector(
-                onTap: () {
-                  Clipboard.setData(ClipboardData(text: k["key"] ?? ""));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text("API Key copied"), duration: const Duration(seconds: 1)),
-                  );
-                },
-                child: const Icon(Icons.copy, size: 14, color: Colors.grey),
-              ),
-            ]),
-            Text("月: ${k["monthlyTokens"]} tokens / ${k["totalTokens"]} 累计",
-              style: TextStyle(fontSize: 11, color: Colors.grey[500])),
-          ]))).toList()),
-    ]));
-  }
-
-  Widget _statusBar() {
-    return ft.Card(
-      padding: const EdgeInsets.all(12),
-      child: Row(children: [
-        Container(width: 8, height: 8,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: widget.serverRunning ? Colors.green : Colors.red)),
-        const SizedBox(width: 8),
-        Text(widget.serverRunning ? "llama-server 运行中" : "llama-server 未启动",
-          style: TextStyle(fontSize: 13, color: widget.serverRunning ? Colors.green : Colors.red)),
-        const SizedBox(width: 16),
-        if (widget.modelName.isNotEmpty)
-          Text("模型: ${widget.modelName}", style: TextStyle(fontSize: 12, color: Colors.grey[600])),
-      ]),
-    );
-  }
-
-  Widget _backendStatusBar() {
-    return ft.Card(
-      padding: const EdgeInsets.all(12),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Container(width: 8, height: 8,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: _connected ? Colors.green : Colors.orange)),
-          const SizedBox(width: 8),
-          Text(_connected ? "云端后端已连接" : "云端后端未连接",
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _connected ? Colors.green : Colors.orange)),
-          const Spacer(),
-          if (_connected)
-            GestureDetector(
-              onTap: _fetchNodes,
-              child: const Icon(Icons.refresh, size: 16, color: Colors.grey),
             ),
-        ]),
-        if (_backendNodes.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          const Divider(),
-          const SizedBox(height: 4),
-          Text("后端节点: ${_backendNodes.length} 个在线", style: TextStyle(fontSize: 12, color: Colors.grey[600])),
-          ...(_backendNodes.map((n) => Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Row(children: [
-              Container(width: 6, height: 6,
-                decoration: BoxDecoration(shape: BoxShape.circle, color: (n["isOnline"] == true) ? Colors.green : Colors.grey)),
-              const SizedBox(width: 6),
-              Text(n["name"] ?? "??", style: const TextStyle(fontSize: 12)),
-              const SizedBox(width: 8),
-              Text(n["modelName"] ?? "", style: TextStyle(fontSize: 11, color: Colors.grey[500])),
-            ]),
-          ))),
-        ],
-      ]),
-    );
-  }
-
-  Widget _sec(String t) => Padding(padding: const EdgeInsets.only(bottom: 4), child: Text(t, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)));
-
-  Future<void> _saveKeysLocal() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString("api_keys", jsonEncode(_apiKeys));
-  }
-
-  bool _keysLoaded = false;
-
-  Future<void> _ensureKeysLoaded() async {
-    await _loadKeysLocal();
-    _keysLoaded = true;
-  }
-
-  Future<void> _loadKeysLocal() async {
-    final prefs = await SharedPreferences.getInstance();
-    final keysStr = prefs.getString("api_keys");
-    if (keysStr != null && keysStr.isNotEmpty) {
-      try {
-        final keys = jsonDecode(keysStr) as List;
-        if (mounted) setState(() => _apiKeys = keys);
-      } catch (_) {}
-    }
-    if (_apiKeys.isNotEmpty && _testApiKey.isEmpty) {
-      _testApiKey = (_apiKeys.first as Map)["key"] ?? "";
-    }
-  }
+            ft.Button(
+              onPressed: _connected || _connecting ? _disconnect : null,
+              child: const Text('断开'),
+            ),
+            ft.Button(
+              onPressed: _connected && !_testing ? _test : null,
+              child: Text(_testing ? '测试中…' : '测试连接'),
+            ),
+            Text(
+              _status,
+              style: TextStyle(color: _connected ? Colors.green : Colors.grey),
+            ),
+          ],
+        ),
+        if (_connectedUrl != null && _connected)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: SelectableText(
+                    'API 地址：${cloudEndpoint(_connectedUrl!, '/v1')}',
+                  ),
+                ),
+                ft.Button(
+                  onPressed: () async {
+                    await Clipboard.setData(
+                      ClipboardData(
+                        text: cloudEndpoint(_connectedUrl!, '/v1').toString(),
+                      ),
+                    );
+                    _message('API 地址已复制', success: true);
+                  },
+                  child: const Text('复制地址'),
+                ),
+              ],
+            ),
+          ),
+        if (_testResult.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: SelectableText(_testResult),
+          ),
+        if (_nodes.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: ft.Card(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('在线节点 ${_nodes.length}'),
+                  for (final node in _nodes)
+                    Text(
+                      '${node['name']} · ${node['modelName']} · ${node['serverRunning'] == false ? '未就绪' : '可用'}',
+                    ),
+                ],
+              ),
+            ),
+          ),
+        const SizedBox(height: 24),
+        const Text(
+          'API Key 管理',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          '密钥仅在本机持久化。当前不提供 Token 配额、计费或用量统计。',
+          style: TextStyle(color: Colors.grey),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: ft.TextBox(controller: _keyName, placeholder: '密钥名称'),
+            ),
+            const SizedBox(width: 8),
+            ft.FilledButton(
+              onPressed: _loaded ? _createKey : null,
+              child: const Text('生成密钥'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (_keys.isEmpty) const Text('暂无密钥。创建后可复制到 OpenAI 兼容客户端。'),
+        for (final key in _keys)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: ft.Card(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          key['name']?.toString() ?? '未命名密钥',
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      ft.ToggleSwitch(
+                        checked: key['isActive'] == true,
+                        content: Text(key['isActive'] == true ? '启用' : '停用'),
+                        onChanged: (active) => _toggleKey(key, active),
+                      ),
+                      ft.HyperlinkButton(
+                        onPressed: () => _deleteKey(key),
+                        child: const Text('删除'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: SelectableText(
+                          _visibleKeys.contains(key['id'])
+                              ? key['key'].toString()
+                              : 'sk-oom-••••••••••••••••••••',
+                          style: const TextStyle(
+                            fontFamily: 'Consolas',
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      ft.IconButton(
+                        icon: Icon(
+                          _visibleKeys.contains(key['id'])
+                              ? Icons.visibility_off
+                              : Icons.visibility,
+                        ),
+                        onPressed: () => setState(() {
+                          if (!_visibleKeys.add(key['id']))
+                            _visibleKeys.remove(key['id']);
+                        }),
+                      ),
+                      ft.IconButton(
+                        icon: const Icon(Icons.copy),
+                        onPressed: () async {
+                          await Clipboard.setData(
+                            ClipboardData(text: key['key'].toString()),
+                          );
+                          _message('密钥已复制', success: true);
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
 
   @override
   void dispose() {
-    tcUrl.dispose(); tcPwd.dispose(); tcKeyName.dispose(); tcKeyLimit.dispose();
-    _wsService.dispose();
-    _nodesPollTimer?.cancel();
-    _autoConnectTimer?.cancel();
+    disconnectForShutdown();
+    unawaited(_subscription?.cancel());
+    _service.dispose();
+    _url.dispose();
+    _password.dispose();
+    _keyName.dispose();
     super.dispose();
   }
 }

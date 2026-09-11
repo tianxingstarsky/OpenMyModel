@@ -1,0 +1,8 @@
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.py text eol=lf
+*.dart text eol=lf

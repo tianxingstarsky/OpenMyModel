@@ -9,6 +9,7 @@ frontend/*.iml
 python/__pycache__/
 python/*.pyc
 python/venv/
+python/.venv/
 python/.env
 
 # Node / TypeScript
@@ -25,9 +26,8 @@ backend/data/
 
 # Temp scripts
 scripts/*.py
+!scripts/package_windows.py
 scripts/node_modules/
-scripts/package-lock.json
-scripts/package.json
 
 # OS
 .DS_Store
@@ -48,3 +48,17 @@ deploy/
 
 # Release zips
 OpenMyModel-win-x64-*.zip
+
+# Local tooling and user artifacts (not part of the application)
+/node_modules/
+/scripts/node/
+/scripts/node.exe
+*.rar
+/build_log*.txt
+/frontend/version
+/.zcode/
+/该文件夹用于临时修改/
+/.env
+/artifacts/
+**/__pycache__/
+**/*.pyc

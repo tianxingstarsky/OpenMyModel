@@ -48,12 +48,12 @@ async function resetPassword() {
   const cfg = loadConfig();
   console.log("重置管理员密码");
   const old = await q("当前密码 (验证身份): ");
-  if (!verifyAdminPassword(old)) { console.log("密码错误"); return; }
+  if (!await verifyAdminPassword(old)) { console.log("密码错误"); return; }
   let pw = "";
   while (pw.length < 6) { pw = await q("新密码 (至少6字符): "); if (pw.length < 6) console.log("太短"); }
   const pw2 = await q("确认新密码: ");
   if (pw !== pw2) { console.log("两次不一致"); return; }
-  cfg.passwordHash = hashPassword(pw);
+  cfg.passwordHash = await hashPassword(pw);
   saveConfig(cfg);
   console.log("密码已重置");
 }
@@ -80,7 +80,7 @@ async function setupWizard() {
   const ps = await q(`端口 [${cfg.port || 3000}]: `);
   const port = parseInt(ps) || cfg.port || 3000;
 
-  cfg.passwordHash = hashPassword(password);
+  cfg.passwordHash = await hashPassword(password);
   cfg.port = port;
   cfg.setupComplete = true;
   saveConfig(cfg);

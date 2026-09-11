@@ -1,136 +1,234 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/server_config.dart';
 
-/// Python 桥接服务 HTTP 客户端
-/// 与本地 Python bridge_server.py 通信
+class BridgeException implements Exception {
+  final String message;
+  final int? statusCode;
+  BridgeException(this.message, [this.statusCode]);
+  @override
+  String toString() =>
+      statusCode == null ? message : 'HTTP $statusCode: $message';
+}
+
+Stream<String> decodeSse(Stream<List<int>> bytes) async* {
+  final data = <String>[];
+  await for (final line
+      in bytes.transform(utf8.decoder).transform(const LineSplitter())) {
+    if (line.isEmpty) {
+      if (data.isNotEmpty) {
+        final event = data.join('\n');
+        data.clear();
+        if (event.trim() == '[DONE]') return;
+        yield event;
+      }
+    } else if (line.startsWith('data:')) {
+      final value = line.substring(5);
+      data.add(value.startsWith(' ') ? value.substring(1) : value);
+    }
+  }
+  if (data.isNotEmpty && data.join('\n').trim() != '[DONE]')
+    yield data.join('\n');
+}
 
 class PythonBridge {
-  static const String _baseUrl = "http://127.0.0.1:8765";
-  http.Client? _client;
+  final String baseUrl;
+  final http.Client Function() _clientFactory;
+  final _clients = <http.Client>{};
+  http.Client? _chatClient;
+  bool _disposed = false;
+  PythonBridge({
+    this.baseUrl = 'http://127.0.0.1:8765',
+    http.Client Function()? clientFactory,
+  }) : _clientFactory = clientFactory ?? http.Client.new;
 
-  http.Client get _http {
-    _client ??= http.Client();
-    return _client!;
+  Future<dynamic> _request(
+    String method,
+    String path, {
+    Map<String, String>? query,
+    Map<String, String>? headers,
+    Object? body,
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    if (_disposed) throw StateError('桥接客户端已关闭');
+    final client = _clientFactory();
+    _clients.add(client);
+    try {
+      final request = http.Request(method, _uri(path, query));
+      if (headers != null) request.headers.addAll(headers);
+      if (body != null) {
+        request.headers['Content-Type'] = 'application/json';
+        request.body = jsonEncode(body);
+      }
+      final response = await (() async => http.Response.fromStream(
+        await client.send(request),
+      ))().timeout(timeout);
+      return _decode(response);
+    } finally {
+      client.close();
+      _clients.remove(client);
+    }
   }
 
-  void dispose() {
-    _client?.close();
-    _client = null;
+  Uri _uri(String path, [Map<String, String>? query]) =>
+      Uri.parse('$baseUrl$path').replace(queryParameters: query);
+  dynamic _decode(http.Response response) {
+    dynamic data;
+    final text = utf8.decode(response.bodyBytes, allowMalformed: true);
+    try {
+      data = jsonDecode(text);
+    } catch (_) {
+      data = text;
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final error = data is Map
+          ? data['detail'] ?? data['error'] ?? data
+          : data;
+      final message = error is Map ? error['message'] ?? error : error;
+      throw BridgeException(message.toString(), response.statusCode);
+    }
+    return data;
   }
 
-  // ==================== 服务管理 ====================
-
-  Future<Map<String, dynamic>> getStatus() async {
-    final resp = await _http.get(Uri.parse("$_baseUrl/api/status"))
-        .timeout(const Duration(seconds: 5));
-    return jsonDecode(resp.body);
-  }
+  Future<Map<String, dynamic>> getStatus() async =>
+      Map<String, dynamic>.from(await _request('GET', '/api/status'));
 
   Future<bool> startServer(ServerConfig config) async {
-    final resp = await _http.post(
-      Uri.parse("$_baseUrl/api/server/start"),
-      headers: {"Content-Type": "application/json"},
-      body: jsonEncode(config.toJson()),
-    ).timeout(const Duration(seconds: 10));
-    return resp.statusCode == 200;
+    final data = await _request(
+      'POST',
+      '/api/server/start',
+      body: config.toJson(),
+      timeout: const Duration(seconds: 15),
+    );
+    if (data is! Map || data['ok'] != true) throw BridgeException('启动未成功');
+    return true;
   }
 
   Future<void> stopServer() async {
-    try {
-      await _http.post(Uri.parse("$_baseUrl/api/server/stop"))
-          .timeout(const Duration(seconds: 5));
-    } catch (_) {}
+    await _request(
+      'POST',
+      '/api/server/stop',
+      timeout: const Duration(seconds: 15),
+    );
+  }
+
+  Future<bool> shutdownBridge(
+    String token, {
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    final data = await _request(
+      'POST',
+      '/api/shutdown',
+      headers: {'X-Bridge-Token': token},
+      timeout: timeout,
+    );
+    return data is Map && data['ok'] == true;
   }
 
   Future<bool> checkHealth() async {
-    try {
-      final resp = await _http.get(Uri.parse("$_baseUrl/api/server/check"))
-          .timeout(const Duration(seconds: 5));
-      final data = jsonDecode(resp.body);
-      return data["healthy"] == true;
-    } catch (_) {
-      return false;
-    }
+    final data = await _request('GET', '/api/server/check');
+    return data is Map && data['healthy'] == true;
   }
 
-  // ==================== 配置档案 ====================
-
-  Future<List<dynamic>> listProfiles() async {
-    final resp = await _http.get(Uri.parse("$_baseUrl/api/profiles"))
-        .timeout(const Duration(seconds: 5));
-    return jsonDecode(resp.body);
-  }
+  Future<List<dynamic>> listProfiles() async =>
+      List<dynamic>.from(await _request('GET', '/api/profiles'));
 
   Future<bool> saveProfile(String name, ServerConfig config) async {
-    final resp = await _http.post(
-      Uri.parse("$_baseUrl/api/profiles/save"),
-      headers: {"Content-Type": "application/json"},
-      body: jsonEncode({"name": name, "config": config.toJson()}),
-    ).timeout(const Duration(seconds: 5));
-    return resp.statusCode == 200;
+    final data = await _request(
+      'POST',
+      '/api/profiles/save',
+      body: {'name': name, 'config': config.toJson()},
+    );
+    return data is Map && data['ok'] == true;
   }
 
   Future<ServerConfig?> loadProfile(String name) async {
-    try {
-      final resp = await _http.post(
-        Uri.parse("$_baseUrl/api/profiles/load"),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({"name": name}),
-      ).timeout(const Duration(seconds: 5));
-      if (resp.statusCode == 200) {
-        return ServerConfig.fromJson(jsonDecode(resp.body));
-      }
-    } catch (_) {}
-    return null;
+    dynamic data = await _request(
+      'POST',
+      '/api/profiles/load',
+      body: {'name': name},
+    );
+    if (data is String) data = jsonDecode(data);
+    return ServerConfig.fromJson(Map<String, dynamic>.from(data));
   }
 
   Future<bool> deleteProfile(String name) async {
-    final resp = await _http.delete(
-      Uri.parse("$_baseUrl/api/profiles/delete?name=$name"),
-    ).timeout(const Duration(seconds: 5));
-    return resp.statusCode == 200;
+    final data = await _request(
+      'DELETE',
+      '/api/profiles/delete',
+      query: {'name': name},
+    );
+    return data is Map && data['ok'] == true;
   }
 
-  // ==================== 文件浏览 ====================
-
-  Future<Map<String, dynamic>> listFiles(String path, {String pattern = "*.gguf"}) async {
-    final resp = await _http.get(
-      Uri.parse("$_baseUrl/api/files/list?path=${Uri.encodeComponent(path)}&pattern=$pattern"),
-    ).timeout(const Duration(seconds: 10));
-    return jsonDecode(resp.body);
-  }
+  Future<Map<String, dynamic>> listFiles(
+    String path, {
+    String pattern = '*.gguf',
+  }) async => Map<String, dynamic>.from(
+    await _request(
+      'GET',
+      '/api/files/list',
+      query: {'path': path, 'pattern': pattern},
+      timeout: const Duration(seconds: 10),
+    ),
+  );
 
   Future<List<String>> listDrives() async {
-    final resp = await _http.get(Uri.parse("$_baseUrl/api/files/drives"))
-        .timeout(const Duration(seconds: 5));
-    final data = jsonDecode(resp.body);
-    return List<String>.from(data["drives"] ?? []);
+    final data = await _request('GET', '/api/files/drives');
+    return List<String>.from(data['drives'] ?? []);
   }
 
-  // ==================== 流式聊天 ====================
-
-  Stream<String> chatStream(List<Map<String, dynamic>> messages, {double temp = 0.7}) async* {
-    var streamClient = http.Client();
+  Stream<String> chatStream(
+    List<Map<String, dynamic>> messages, {
+    double temp = 0.7,
+  }) async* {
+    if (_disposed) throw StateError('桥接客户端已关闭');
+    if (_chatClient != null) throw StateError('已有对话请求正在生成');
+    final client = _clientFactory();
+    _chatClient = client;
     try {
-      final request = http.Request("POST", Uri.parse("$_baseUrl/api/chat"));
-      request.headers["Content-Type"] = "application/json";
-      request.body = jsonEncode({
-        "messages": messages,
-        "temperature": temp,
-        "stream": true,
-      });
-
-      final response = await streamClient.send(request);
-      await for (final chunk in response.stream.transform(utf8.decoder)) {
-        for (final line in chunk.split("\n")) {
-          if (line.startsWith("data: ") && line != "data: [DONE]") {
-            yield line.substring(6);
-          }
-        }
+      final request = http.Request('POST', _uri('/api/chat'))
+        ..headers['Content-Type'] = 'application/json'
+        ..body = jsonEncode({
+          'messages': messages,
+          'temperature': temp,
+          'stream': true,
+        });
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 120));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        _decode(
+          await http.Response.fromStream(
+            response,
+          ).timeout(const Duration(seconds: 10)),
+        );
+      }
+      if (!(response.headers['content-type'] ?? '').contains(
+        'text/event-stream',
+      )) {
+        throw BridgeException('服务未返回 SSE 流式响应', response.statusCode);
+      }
+      await for (final event in decodeSse(
+        response.stream.timeout(const Duration(seconds: 120)),
+      )) {
+        yield event;
       }
     } finally {
-      streamClient.close();
+      client.close();
+      if (identical(_chatClient, client)) _chatClient = null;
     }
+  }
+
+  void cancelChat() => _chatClient?.close();
+
+  void dispose() {
+    _disposed = true;
+    cancelChat();
+    for (final client in _clients) {
+      client.close();
+    }
+    _clients.clear();
   }
 }

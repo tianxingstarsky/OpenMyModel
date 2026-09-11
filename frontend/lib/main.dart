@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
 import 'package:window_manager/window_manager.dart';
 import 'pages/home_page.dart';
@@ -25,7 +24,7 @@ class OpenMyModelApp extends StatelessWidget {
       themeMode: ThemeMode.light,
       theme: ft.FluentThemeData(
         brightness: Brightness.light,
-        fontFamily: "SimSun",
+        fontFamily: "Microsoft YaHei UI",
         scaffoldBackgroundColor: const Color(0xFFF5F5F5),
         navigationPaneTheme: ft.NavigationPaneThemeData(
           backgroundColor: const Color(0xFFFAFAFA),
