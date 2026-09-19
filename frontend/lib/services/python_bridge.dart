@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/server_config.dart';
+import 'sse.dart';
 
 class BridgeException implements Exception {
   final String message;
@@ -10,26 +11,6 @@ class BridgeException implements Exception {
   @override
   String toString() =>
       statusCode == null ? message : 'HTTP $statusCode: $message';
-}
-
-Stream<String> decodeSse(Stream<List<int>> bytes) async* {
-  final data = <String>[];
-  await for (final line
-      in bytes.transform(utf8.decoder).transform(const LineSplitter())) {
-    if (line.isEmpty) {
-      if (data.isNotEmpty) {
-        final event = data.join('\n');
-        data.clear();
-        if (event.trim() == '[DONE]') return;
-        yield event;
-      }
-    } else if (line.startsWith('data:')) {
-      final value = line.substring(5);
-      data.add(value.startsWith(' ') ? value.substring(1) : value);
-    }
-  }
-  if (data.isNotEmpty && data.join('\n').trim() != '[DONE]')
-    yield data.join('\n');
 }
 
 class PythonBridge {

@@ -25,8 +25,7 @@
 ```mermaid
 flowchart LR
     subgraph 本地机器
-        A[Flutter 桌面端] --> B[Python Bridge]
-        B --> C[llama-server<br/>本地 GPU 推理]
+        A[Flutter 桌面端<br/>InferenceService 直接管理进程] --> C[llama-server<br/>内置 llama.cpp b10909<br/>本地 GPU 推理]
         A --> N[Node Bridge<br/>本地密钥校验]
         N --> C
     end
@@ -48,24 +47,29 @@ flowchart LR
 
 | 组件 | 技术栈 | 角色 |
 |------|--------|------|
-| **Flutter 桌面端** | Flutter + Dart | UI 界面 / llama-server 管理 / API Key 管理（本地存储+本地验证）/ 模型对话 |
-| **Python Bridge** | Python + FastAPI | 本地 HTTP API / llama-server 进程管理 / 本地对话代理 |
+| **Flutter 桌面端** | Flutter + Dart | UI 界面 / 内置 llama-server 进程管理（启动、健康检查、停止）/ API Key 管理（本地存储+本地验证）/ 模型对话（直连引擎 OpenAI API） |
+| **内置引擎** | llama.cpp b10909（Git submodule 固定版本） | 官方 OpenAI 兼容 HTTP API；CPU / CUDA 后端由源码构建，无需安装 Python 或任何运行环境 |
 | **Node Bridge** | Node.js + ws | Flutter stdin/stdout 控制 / 本地 Key 验证 / WebSocket HTTP 隧道 |
 | **云后端** | TypeScript + Node.js | WebSocket 服务端 / 请求透明转发到 llama-server / CLI 管理工具 |
+
+> 历史说明：早期版本通过一个本地 Python HTTP 桥管理 llama-server；当前版本已由 Dart 的
+> `InferenceService` 直接管理引擎进程，桌面端默认不再需要 Python。`python/` 目录仅作为
+> 历史实现与兼容资料保留。
 
 ---
 
 ## ✨ 核心特性
 
-- **🖥 本地 GPU 推理**：llama.cpp 全参数控制，Q8 缓存、GPU 加速
-- **🌐 WebSocket 隧道**：无需公网 IP，家庭主机也能上云
+- **📦 内置推理引擎**：llama.cpp b10909 随应用分发（CPU 与 CUDA 源码构建），启动即用，无需安装 Python；引擎版本与后端在界面真实显示
+- **🖥 本地 GPU 推理**：完整 llama.cpp 参数（GPU 层数 auto/all、`--fit` 显存自适应、KV 量化、Flash Attention 三态开关）
+- **🌐 WebSocket 隧道**：无需公网 IP，家庭主机也能上云；断线自动有界退避重连，主动断开不重连
 - **🔑 本地密钥管理**：API Key 持久化在本机，云端不持久化；验证时仍经过云后端和隧道，生产环境必须使用 HTTPS/WSS，并保护本机用户数据。
-- **🔄 OpenAI 兼容 API**：`/v1/chat/completions`、`/v1/models`，支持流式 (SSE)
+- **🔄 OpenAI 兼容 API**：`/v1/chat/completions`、`/v1/models`，支持流式 (SSE)；思考型模型的 `reasoning_content` 在对话界面单独展示
 - **🖼 多模态支持**：mmproj 视觉投影，图片识别能力
-- **💬 内置对话界面**：多图上传 + 文字，流式响应
-- **📦 参数档案**：预置多份 llama 推理配置，一键切换
+- **💬 内置对话界面**：多图上传 + 文字，流式响应，停止生成即断开底层连接
+- **📦 参数档案**：配置档案本地保存（兼容旧版 Python Bridge 档案文件），一键切换
 - **🛠 中文 CLI**：云后端通过向导式命令行完成初始化和管理
-- **⚡ 实时状态**：llama-server 状态、云端连接状态实时跟踪
+- **⚡ 实时状态**：引擎启动/加载/就绪/错误状态、云端连接状态实时跟踪
 
 
 ## 📸 界面截图
@@ -85,19 +89,15 @@ output_my_model/
 │   ├── lib/
 │   │   ├── main.dart         # 入口
 │   │   ├── models/           # 数据模型
-│   │   ├── pages/            # 页面（首页/配置/对话/云端/插件）
-│   │   ├── plugins/          # 联网插件
-│   │   ├── services/         # WebSocket / API 服务
+│   │   ├── pages/            # 页面（首页/配置/对话/云端）
+│   │   ├── services/         # InferenceService / WebSocket / 配置档案
 │   │   └── widgets/          # UI 组件
 │   ├── windows/              # Windows 平台文件
 │   ├── pubspec.yaml
 │   └── pubspec.lock
-├── python/                   # Python 业务层
-│   ├── bridge_server.py      # WebSocket 桥梁 + HTTP API
-│   ├── server_manager.py     # llama-server 进程管理
-│   ├── config_manager.py     # 配置档案管理
-│   ├── chat_handler.py       # 对话处理
-│   └── requirements.txt
+├── third_party/llama.cpp/    # llama.cpp b10909（Git submodule，固定版本）
+├── third_party/llama.cpp.lock.json  # 版本锁定与官方预编译包 SHA-256
+├── python/                   # 历史 Python Bridge（当前版本桌面端不再使用，仅保留资料）
 ├── backend/                  # TypeScript 云后端
 │   ├── src/
 │   │   ├── index.ts          # Fastify + WebSocket 入口
@@ -113,7 +113,10 @@ output_my_model/
 │   ├── data/                 # 运行时数据（不提交）
 │   ├── package.json
 │   └── tsconfig.json
-├── scripts/                  # 工具脚本
+├── scripts/                  # 工具脚本（引擎构建 / 打包 / 云端桥接）
+│   ├── build_llama_windows.py
+│   ├── package_windows.py
+│   ├── cloud_bridge.js
 │   └── mock_node.js          # 模拟节点（测试用）
 ├── docs/                     # 文档与截图
 ├── OpenMyModel.png                 # README 头图
@@ -128,34 +131,27 @@ output_my_model/
 
 ### 环境要求
 
-- **Flutter** 3.x+（Windows/macOS/Linux）
-- **Python** 3.10+，conda 虚拟环境推荐
-- **Node.js** 22+（云后端和本地桥接）
-- **llama.cpp** 编译好的 `llama-server` 可执行文件
+- **桌面端（发布包）**：Windows 10+，无需安装 Python；CPU 引擎开箱即用，CUDA 引擎随包内置
+- **从源码构建桌面端**：Flutter 3.x+、CMake 3.28+、Visual Studio 2022 C++ 工具集（CUDA 后端另需 CUDA toolkit；Vulkan 后端另需 Vulkan SDK）
+- **Node.js** 22+（云后端与本地云端桥接）
 - **模型文件**（GGUF 格式，如 Qwen 3.5 9B Q8）+ 可选 mmproj 文件
 
-### 1. 前端 (Windows)
-
-先在仓库根目录准备 Python 依赖和 Node 桥接依赖。桌面端会启动并管理自己的本地 Python Bridge，不必另开一份占用 8765 端口。
+### 1. 桌面端 (Windows)
 
 ```bash
-python -m pip install -r python/requirements.txt
-npm --prefix scripts ci
+npm --prefix scripts ci            # 云端 Node 桥接依赖
 cd frontend
 flutter pub get
 flutter run -d windows
 ```
 
-### 2. Python 业务层（单独调试时）
+引擎可从源码构建并放置到 `artifacts/engine/`（打包脚本会自动收集）：
 
 ```bash
-cd python
-conda activate myenv              # 或创建新环境
-pip install -r requirements.txt
-python bridge_server.py
+python scripts/build_llama_windows.py --backends cpu,cuda
 ```
 
-### 3. 云后端
+### 2. 云后端
 
 ```bash
 cd backend
@@ -164,7 +160,7 @@ npm run setup                      # 首次配置管理员密码
 npm run dev                        # 默认端口 3000
 ```
 
-### 4. CLI 管理（云后端）
+### 3. CLI 管理（云后端）
 
 ```bash
 cd backend
@@ -327,7 +323,7 @@ curl https://你的域名/v1/chat/completions \
 
 ## 开发验证与发布
 
-请参阅 [开发、测试与发布说明](docs/DEVELOPMENT.md)，包括中继协议、故障排查、自动化测试和 Windows 可追溯打包。更新时应同时部署后端和桌面桥接，旧桥接不会提供正确的上游状态码。
+请参阅 [开发、测试与发布说明](docs/DEVELOPMENT.md)，包括中继协议、内置引擎构建、故障排查、自动化测试和 Windows 可追溯打包。更新时应同时部署后端和桌面桥接，旧桥接不会提供正确的上游状态码。
 
 ```bash
 npm --prefix scripts ci
@@ -336,7 +332,10 @@ npm --prefix scripts run check:release
 npm --prefix backend ci
 npm --prefix backend run build
 npm --prefix backend test
-python -m unittest discover -s python/tests -v
+python -m unittest discover -s python/tests -v   # 历史 Python Bridge 兼容测试
+cd frontend && flutter analyze && flutter test && flutter build windows --release
+python scripts/build_llama_windows.py --backends cpu,cuda   # 内置引擎源码构建
+python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-<rev>
 ```
 
 Docker 首次启动前将 `.env.example` 复制为 `.env` 并填写强密码，再运行 `docker compose up -d --build`。公网部署请在反向代理终止 TLS，并使用 `https://` 地址连接桌面端；仓库内 nginx 示例本身不提供证书。

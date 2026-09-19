@@ -7,7 +7,8 @@ import 'package:fluent_ui/fluent_ui.dart' as ft;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/cloud_url.dart';
-import '../services/python_bridge.dart';
+import '../services/inference_service.dart';
+import '../services/sse.dart';
 import '../services/websocket_service.dart';
 
 class CloudPage extends StatefulWidget {
@@ -39,6 +40,10 @@ class CloudPageState extends State<CloudPage> {
   List<Map<String, dynamic>> _nodes = [];
   StreamSubscription<Map<String, dynamic>>? _subscription;
   Timer? _poll;
+  Timer? _reconnectTimer;
+  int _reconnectAttempts = 0;
+  bool _expectingDisconnect = false;
+  bool _userDisconnected = false;
   bool _connected = false,
       _connecting = false,
       _loaded = false,
@@ -50,27 +55,65 @@ class CloudPageState extends State<CloudPage> {
   String _testResult = '';
   String? _connectedUrl, _connectedPassword;
 
+  static const _maxReconnectAttempts = 5;
+
   @override
   void initState() {
     super.initState();
     _subscription = _service.messages.listen((message) {
       if (!mounted || _closing) return;
       if (message['type'] == 'connected') {
+        _reconnectTimer?.cancel();
+        _reconnectAttempts = 0;
+        _expectingDisconnect = false;
         setState(() {
           _connected = true;
           _status = '已连接，节点在线';
         });
       } else if (message['type'] == 'disconnected' ||
           message['type'] == 'error') {
+        final wasConnected = _connected;
+        _poll?.cancel();
         setState(() {
           _connected = false;
-          _status = message['message']?.toString() ?? '已断开';
           _nodes = [];
+          if (message['type'] == 'error') {
+            _status = message['message']?.toString() ?? '连接出错';
+          } else if (_status.startsWith('连接中断')) {
+            // 保持退避提示，避免被空消息覆盖。
+          }
         });
-        _poll?.cancel();
+        if (message['type'] == 'disconnected' &&
+            wasConnected &&
+            !_expectingDisconnect &&
+            !_userDisconnected) {
+          _scheduleReconnect();
+        }
       }
     });
     unawaited(_load());
+  }
+
+  /// 有界指数退避：2s、4s、8s、16s、32s；用户主动断开后不再自动重连。
+  void _scheduleReconnect() {
+    if (_closing || _userDisconnected || _connecting || _connected) return;
+    if (_reconnectAttempts >= _maxReconnectAttempts) {
+      setState(() {
+        _status = '自动重连 $_maxReconnectAttempts 次失败，请检查网络后手动重连';
+      });
+      return;
+    }
+    final delay = Duration(seconds: 2 << _reconnectAttempts);
+    _reconnectAttempts++;
+    setState(() {
+      _status = '连接中断，${delay.inSeconds} 秒后自动重连（第 $_reconnectAttempts/$_maxReconnectAttempts 次）';
+    });
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(delay, () {
+      if (!_closing && !_userDisconnected && !_connected) {
+        unawaited(_connect());
+      }
+    });
   }
 
   Future<void> _load() async {
@@ -164,6 +207,9 @@ class CloudPageState extends State<CloudPage> {
         _status = connected ? '已连接，节点在线' : (_service.lastError ?? '连接失败');
       });
       if (connected) {
+        _reconnectAttempts = 0;
+        _userDisconnected = false;
+        _expectingDisconnect = false;
         _connectedUrl = url;
         _connectedPassword = password;
         final prefs = await SharedPreferences.getInstance();
@@ -186,6 +232,8 @@ class CloudPageState extends State<CloudPage> {
 
   void disconnectForShutdown() {
     _closing = true;
+    _expectingDisconnect = true;
+    _reconnectTimer?.cancel();
     _poll?.cancel();
     _service.disconnect();
     for (final client in _clients) {
@@ -207,12 +255,17 @@ class CloudPageState extends State<CloudPage> {
   }
 
   void _disconnect() {
+    _userDisconnected = true;
+    _expectingDisconnect = true;
     _autoConnect = false;
+    _reconnectTimer?.cancel();
+    _reconnectAttempts = 0;
     _poll?.cancel();
     _service.disconnect();
     for (final client in _clients) {
       client.close();
     }
+    scheduleMicrotask(() => _expectingDisconnect = false);
     if (mounted)
       setState(() {
         _connected = false;
@@ -373,7 +426,7 @@ class CloudPageState extends State<CloudPage> {
           .timeout(const Duration(seconds: 30));
       if (response.statusCode != 200) {
         final text = await response.stream.bytesToString();
-        throw BridgeException(
+        throw EngineException(
           text.length > 300 ? text.substring(0, 300) : text,
           response.statusCode,
         );
@@ -382,7 +435,7 @@ class CloudPageState extends State<CloudPage> {
       await for (final event in decodeSse(response.stream)) {
         final data = jsonDecode(event);
         if (data['error'] != null)
-          throw BridgeException(data['error'].toString());
+          throw EngineException(data['error'].toString());
         final choices = data['choices'];
         if (choices is List && choices.isNotEmpty) {
           final delta = choices.first['delta'];
@@ -651,6 +704,7 @@ class CloudPageState extends State<CloudPage> {
   @override
   void dispose() {
     disconnectForShutdown();
+    _reconnectTimer?.cancel();
     unawaited(_subscription?.cancel());
     _service.dispose();
     _url.dispose();

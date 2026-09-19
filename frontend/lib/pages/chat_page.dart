@@ -1,14 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
 import 'package:file_picker/file_picker.dart';
-import '../services/python_bridge.dart';
+import '../services/inference_service.dart';
 
 class ChatPage extends StatefulWidget {
-  final PythonBridge bridge;
-  const ChatPage({super.key, required this.bridge});
+  final InferenceService inference;
+  const ChatPage({super.key, required this.inference});
   @override
   State<ChatPage> createState() => ChatPageState();
 }
@@ -30,11 +31,24 @@ class ChatPageState extends State<ChatPage> {
   bool _scrollScheduled = false;
   String? _error;
   List<_ImageAttachment> _pendingImages = [];
+  StreamSubscription<EngineRuntime>? _engineSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _engineSub = widget.inference.onChange.listen((_) {
+      if (mounted) setState(() {});
+    });
+  }
 
   Future<void> _send() async {
     final text = _inputCtrl.text.trim();
     if (_isGenerating || _picking || (text.isEmpty && _pendingImages.isEmpty))
       return;
+    if (!widget.inference.isReady) {
+      setState(() => _error = '模型尚未就绪，请先在首页启动模型并等待加载完成');
+      return;
+    }
     final images = List<_ImageAttachment>.from(_pendingImages);
     final content = <Map<String, dynamic>>[
       for (final image in images)
@@ -79,13 +93,11 @@ class ChatPageState extends State<ChatPage> {
         )
         .toList();
     try {
-      await for (final chunk in widget.bridge.chatStream(history)) {
+      await for (final data in widget.inference.chatStream(history)) {
         if (!mounted || _stopping) break;
-        final data = jsonDecode(chunk);
-        if (data is! Map) throw BridgeException('无效的模型响应');
         if (data['error'] != null) {
           final error = data['error'];
-          throw BridgeException(
+          throw EngineException(
             (error is Map ? error['message'] ?? error : error).toString(),
           );
         }
@@ -123,7 +135,7 @@ class ChatPageState extends State<ChatPage> {
   void _stop() {
     if (!_isGenerating || _stopping) return;
     setState(() => _stopping = true);
-    widget.bridge.cancelChat();
+    widget.inference.cancelChat();
   }
 
   Future<void> _pickImages() async {
@@ -138,16 +150,16 @@ class ChatPageState extends State<ChatPage> {
       );
       if (!mounted || result == null) return;
       if (_pendingImages.length + result.files.length > 4)
-        throw BridgeException('每条消息最多添加 4 张图片');
+        throw EngineException('每条消息最多添加 4 张图片');
       final attachments = <_ImageAttachment>[];
       for (final file in result.files) {
         if (file.size > 5 * 1024 * 1024)
-          throw BridgeException('${file.name} 超过 5 MB');
+          throw EngineException('${file.name} 超过 5 MB');
         final bytes =
             file.bytes ??
             (file.path == null ? null : await File(file.path!).readAsBytes());
         if (bytes == null || bytes.length > 5 * 1024 * 1024)
-          throw BridgeException('无法读取图片或图片超过 5 MB');
+          throw EngineException('无法读取图片或图片超过 5 MB');
         final extension = file.extension?.toLowerCase();
         final mime = extension == 'jpg' || extension == 'jpeg'
             ? 'image/jpeg'
@@ -227,9 +239,11 @@ class ChatPageState extends State<ChatPage> {
         ),
         Expanded(
           child: _messages.isEmpty
-              ? const Center(
+              ? Center(
                   child: Text(
-                    '先在首页启动模型，再输入消息开始对话。\n聊天记录在本次应用会话内保留。',
+                    widget.inference.isReady
+                        ? '模型已就绪，输入消息开始对话。\n聊天记录在本次应用会话内保留。'
+                        : '先在首页启动模型并等待加载完成，再开始对话。',
                     textAlign: TextAlign.center,
                   ),
                 )
@@ -395,7 +409,8 @@ class ChatPageState extends State<ChatPage> {
                 )
               else
                 ft.FilledButton(
-                  onPressed: _picking ? null : _send,
+                  onPressed:
+                      _picking || !widget.inference.isReady ? null : _send,
                   child: const Text('发送'),
                 ),
             ],
@@ -408,7 +423,8 @@ class ChatPageState extends State<ChatPage> {
   @override
   void dispose() {
     _stopping = true;
-    widget.bridge.cancelChat();
+    _engineSub?.cancel();
+    widget.inference.cancelChat();
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();

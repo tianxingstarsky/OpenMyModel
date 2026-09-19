@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:openmymodel/services/python_bridge.dart';
 import 'package:openmymodel/services/cloud_url.dart';
+import 'package:openmymodel/services/sse.dart';
 
 void main() {
   test(

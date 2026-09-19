@@ -1,7 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
@@ -11,26 +9,34 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../models/server_config.dart';
+import '../services/inference_service.dart';
 import '../services/local_file_service.dart';
-import '../services/python_bridge.dart';
+import '../services/profile_store.dart';
 import 'chat_page.dart';
 import 'cloud_page.dart';
 
 class HomePage extends StatefulWidget {
-  final PythonBridge? bridge;
+  final InferenceService? inference;
+  final ProfileStore? profiles;
   final bool manageRuntime;
-  const HomePage({super.key, this.bridge, this.manageRuntime = true});
+  const HomePage({
+    super.key,
+    this.inference,
+    this.profiles,
+    this.manageRuntime = true,
+  });
 
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> with WindowListener {
-  late final PythonBridge _bridge = widget.bridge ?? PythonBridge();
+  late final InferenceService _inference = widget.inference ?? InferenceService();
+  late final bool _ownsInference = widget.inference == null;
+  late final ProfileStore _profileStore = widget.profiles ?? ProfileStore();
   final GlobalKey<ChatPageState> _chatKey = GlobalKey<ChatPageState>();
   final GlobalKey<CloudPageState> _cloudKey = GlobalKey<CloudPageState>();
   final ScrollController _scrollCtrl = ScrollController();
-  final TextEditingController tcServer = TextEditingController();
   final TextEditingController tcFolder = TextEditingController();
   final TextEditingController tcModel = TextEditingController();
   final TextEditingController tcMmproj = TextEditingController();
@@ -40,33 +46,21 @@ class _HomePageState extends State<HomePage> with WindowListener {
   final Map<String, FocusNode> _numFocus = {};
   final Map<String, String> _numErrors = {};
 
-  Timer? _pollTimer;
-  Process? _bridgeProcess;
-  Future<void>? _checkInFlight;
-  Future<void>? _restartInFlight;
+  StreamSubscription<EngineRuntime>? _engineSub;
   List<Map<String, dynamic>> _files = [];
-  List<dynamic> _profiles = [];
+  List<Map<String, dynamic>> _profiles = [];
   ServerConfig _cfg = ServerConfig();
-  bool _running = false;
-  bool _ready = false;
   bool _starting = false;
-  bool _bridgeReady = false;
   bool _closing = false;
   int _currentIndex = 0;
   int _scanGeneration = 0;
-  int _bridgeFailCount = 0;
-  int _runtimePort = 0;
-  String _runtimeModel = '';
-  String _runtimeApiKey = '';
-  String _status = '检查中...';
-  String _logs = '';
-  String _runtimeHost = '127.0.0.1';
-  String _bridgeToken = '';
-  String _bridgeId = '';
 
   @override
   void initState() {
     super.initState();
+    _engineSub = _inference.onChange.listen((_) {
+      if (mounted && !_closing) setState(() {});
+    });
     if (widget.manageRuntime) {
       windowManager.addListener(this);
       windowManager.setPreventClose(true);
@@ -77,280 +71,38 @@ class _HomePageState extends State<HomePage> with WindowListener {
   Future<void> _initialize() async {
     await _loadPrefs();
     if (!mounted || _closing) return;
+    await _inference.discoverEngines();
     await _refresh();
     if (!mounted || _closing) return;
-    await _startBridge();
-    if (!mounted || _closing) return;
-    await _check();
     await _loadP();
-    if (!mounted || _closing) return;
-    _startPolling();
   }
 
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted || _closing) return;
     setState(() {
-      tcServer.text = prefs.getString('server_path') ?? '';
       tcFolder.text = prefs.getString('model_folder') ?? '';
     });
   }
 
   Future<void> _savePrefs() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('server_path', tcServer.text.trim());
     await prefs.setString('model_folder', tcFolder.text.trim());
+    await prefs.setString('engine_dir', _inference.selectedEngine?.directory ?? '');
   }
 
-  String _newId(int length) {
-    final random = Random.secure();
-    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-    return List.generate(
-      length,
-      (_) => chars[random.nextInt(chars.length)],
-    ).join();
-  }
-
-  Iterable<String> _ancestorPaths(String path) sync* {
-    var directory = Directory(path).absolute;
-    for (var i = 0; i < 8; i++) {
-      yield directory.path;
-      final parent = directory.parent;
-      if (parent.path == directory.path) break;
-      directory = parent;
-    }
-  }
-
-  String? _firstFile(Iterable<String> paths) {
-    for (final path in paths) {
-      if (File(path).existsSync()) return File(path).absolute.path;
-    }
-    return null;
-  }
-
-  Future<String?> _findPython() async {
-    final executableDir = File(Platform.resolvedExecutable).parent.path;
-    final roots = <String>{
-      ..._ancestorPaths(executableDir),
-      ..._ancestorPaths(Directory.current.path),
-    };
-    final bundled = _firstFile([
-      '$executableDir/python/python.exe',
-      for (final root in roots) '$root/python/python.exe',
-      for (final root in roots) '$root/python/.venv/Scripts/python.exe',
-      for (final root in roots) '$root/python/venv/Scripts/python.exe',
-    ]);
-    if (bundled != null) return bundled;
-    for (final candidate in ['python', 'python3']) {
-      try {
-        final result = await Process.run(candidate, ['--version']);
-        if (result.exitCode == 0) return candidate;
-      } catch (_) {}
-    }
-    return null;
-  }
-
-  String? _findBridgeScript() {
-    final executableDir = File(Platform.resolvedExecutable).parent.path;
-    final roots = <String>{
-      ..._ancestorPaths(executableDir),
-      ..._ancestorPaths(Directory.current.path),
-    };
-    return _firstFile([
-      '$executableDir/bridge_server.py',
-      for (final root in roots) '$root/bridge_server.py',
-      for (final root in roots) '$root/python/bridge_server.py',
-    ]);
-  }
-
-  Future<void> _startBridge() async {
-    if (_closing || _bridgeProcess != null) return;
-    final python = await _findPython();
-    final script = _findBridgeScript();
-    if (_closing) return;
-    if (python == null || script == null) {
-      if (mounted) {
-        setState(() {
-          _bridgeReady = false;
-          _status = '找不到 Python 或 bridge_server.py';
-        });
-      }
-      return;
-    }
-    try {
-      await _bridge.getStatus();
-      if (mounted && !_closing)
-        setState(() => _status = '8765 已被其他桥接占用，请先关闭另一份应用');
-      return;
-    } catch (_) {}
-    if (!mounted || _closing) return;
-    _bridgeToken = _newId(48);
-    _bridgeId = _newId(24);
-    try {
-      final environment = Map<String, String>.from(Platform.environment)
-        ..['OPENMYMODEL_BRIDGE_TOKEN'] = _bridgeToken
-        ..['OPENMYMODEL_BRIDGE_ID'] = _bridgeId;
-      final process = await Process.start(
-        python,
-        ['-u', script],
-        workingDirectory: File(script).parent.path,
-        environment: environment,
-        runInShell: false,
-      );
-      if (_closing) {
-        process.kill();
-        return;
-      }
-      _bridgeProcess = process;
-      process.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) => _recordBridgeOutput(line, false));
-      process.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) => _recordBridgeOutput(line, true));
-      unawaited(
-        process.exitCode.then((code) {
-          if (!identical(_bridgeProcess, process)) return;
-          _bridgeProcess = null;
-          if (mounted && !_closing) {
-            setState(() {
-              _bridgeReady = false;
-              _status = '桥接服务已退出，等待重连 ($code)';
-            });
-          }
-        }),
-      );
-      if (mounted) setState(() => _status = '桥接启动中...');
-    } catch (error) {
-      if (mounted) {
-        setState(() {
-          _bridgeReady = false;
-          _status = '桥接启动失败: $error';
-        });
-      }
-    }
-  }
-
-  void _recordBridgeOutput(String line, bool stderr) {
-    if (!mounted || _closing) return;
-    _logs = '$_logs$line\n';
-    if (_logs.length > 12000) _logs = _logs.substring(_logs.length - 12000);
-    if (!stderr) return;
-    if (line.contains('Traceback') || line.contains('ModuleNotFoundError')) {
-      setState(() => _status = '桥接错误: $line');
-    }
-  }
-
-  Future<void> _check() {
-    if (_closing || _starting) return Future<void>.value();
-    final current = _checkInFlight;
-    if (current != null) return current;
-    final operation = _performCheck();
-    _checkInFlight = operation;
-    unawaited(
-      operation.whenComplete(() {
-        if (identical(_checkInFlight, operation)) _checkInFlight = null;
-      }),
+  Future<void> _pickEngineDir() async {
+    final path = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: '选择包含 llama-server.exe 的目录',
     );
-    return operation;
-  }
-
-  Future<void> _performCheck() async {
+    if (!mounted || path == null || _inference.runtime.isRunning) return;
     try {
-      final status = await _bridge.getStatus();
-      if (!mounted || _closing) return;
-      final statusId = status['bridge_id']?.toString();
-      final statusPid = int.tryParse(status['bridge_pid']?.toString() ?? '');
-      final process = _bridgeProcess;
-      final owned =
-          statusId == _bridgeId &&
-          statusPid != null &&
-          process != null &&
-          (statusPid == process.pid ||
-              status['bridge_parent_pid'] == process.pid);
-      if (!owned) {
-        setState(() {
-          _bridgeReady = false;
-          _ready = false;
-          _running = false;
-          _status = process == null ? '已有未归属的桥接服务，未接管' : '桥接身份不匹配，未接管';
-        });
-        return;
-      }
-      _bridgeFailCount = 0;
-      final running = status['running'] == true;
-      final ready = status['ready'] == true;
-      final port = int.tryParse(status['port']?.toString() ?? '') ?? 0;
-      final model = status['model']?.toString() ?? '';
-      final becameReady = !_bridgeReady;
-      setState(() {
-        _bridgeReady = true;
-        if (status['log_tail'] is List &&
-            (status['log_tail'] as List).isNotEmpty)
-          _logs = (status['log_tail'] as List).join('\n');
-        _running = running;
-        _ready = ready;
-        if (running) {
-          _runtimePort = port;
-          _runtimeModel = model;
-          _runtimeHost = status['host']?.toString() ?? '127.0.0.1';
-          if (_runtimeHost == '0.0.0.0' || _runtimeHost.isEmpty)
-            _runtimeHost = '127.0.0.1';
-          if (_runtimeHost == '::') _runtimeHost = '::1';
-          _status = ready ? '运行中 - $model' : '模型加载中...';
-        } else {
-          _runtimePort = 0;
-          _runtimeModel = '';
-          _runtimeApiKey = '';
-          _status = status['last_error']?.toString().isNotEmpty == true
-              ? status['last_error'].toString()
-              : '已就绪，选择模型后启动';
-        }
-      });
-      if (becameReady) await _loadP();
-    } catch (_) {
-      if (!mounted || _closing) return;
-      _bridgeFailCount++;
-      setState(() {
-        _bridgeReady = false;
-        _running = false;
-        _ready = false;
-        _status = '桥接未就绪，自动重连中...';
-      });
-      if (_bridgeFailCount >= 3 && _restartInFlight == null) {
-        _restartInFlight = _restartBridge();
-        try {
-          await _restartInFlight;
-        } finally {
-          _restartInFlight = null;
-        }
-      }
-    }
-  }
-
-  Future<void> _restartBridge() async {
-    if (_closing || !mounted) return;
-    if (_bridgeProcess != null) {
-      setState(() => _status = '桥接暂时不可达，请重试；为保护运行中的模型不会强制结束进程');
-      return;
-    }
-    _bridgeFailCount = 0;
-    await _startBridge();
-  }
-
-  void _startPolling() {
-    _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) => _check());
-  }
-
-  Future<void> _loadP() async {
-    if (!_bridgeReady) return;
-    try {
-      final profiles = await _bridge.listProfiles();
-      if (mounted && !_closing) setState(() => _profiles = profiles);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('engine_dir', path);
     } catch (_) {}
+    _inference.selectEngineByDirectory(path);
+    await _inference.discoverEngines();
+    if (mounted) setState(() {});
   }
 
   Future<void> _refresh() async {
@@ -359,17 +111,6 @@ class _HomePageState extends State<HomePage> with WindowListener {
     if (mounted && !_closing && generation == _scanGeneration) {
       setState(() => _files = files);
     }
-  }
-
-  Future<void> _pickS() async {
-    final result = await FilePicker.platform.pickFiles(
-      dialogTitle: 'llama-server.exe',
-      allowedExtensions: ['exe'],
-      type: FileType.custom,
-    );
-    if (!mounted || result?.files.single.path == null) return;
-    setState(() => tcServer.text = result!.files.single.path!);
-    await _savePrefs();
   }
 
   Future<void> _pickF() async {
@@ -384,7 +125,6 @@ class _HomePageState extends State<HomePage> with WindowListener {
 
   void _setConfig(ServerConfig config) {
     _cfg = config;
-    tcServer.text = config.serverPath;
     _numErrors.clear();
     tcModel.text = config.modelPath;
     tcMmproj.text = config.mmprojPath;
@@ -424,53 +164,47 @@ class _HomePageState extends State<HomePage> with WindowListener {
   }
 
   Future<void> _start() async {
-    if (_starting) return;
-    if (tcServer.text.trim().isEmpty) return _msg('请设置 llama-server.exe 路径');
-    if (tcModel.text.trim().isEmpty) return _msg('请选模型');
-    if (!_bridgeReady) return _msg('桥接服务未就绪，请稍候');
+    if (_starting || _closing) return;
+    if (_inference.selectedEngine == null) {
+      return _msg('未发现 llama-server 引擎，请检查安装目录');
+    }
+    if (tcModel.text.trim().isEmpty) return _msg('请选择模型');
     if (_numErrors.values.any((error) => error.isNotEmpty))
       return _msg('请先修正无效参数');
     setState(() => _starting = true);
     try {
       _cfg
-        ..serverPath = tcServer.text.trim()
         ..modelPath = tcModel.text.trim()
         ..mmprojPath = tcMmproj.text.trim()
         ..extraArgs = tcExtraArgs.text.trim();
-      final identity = await _bridge.getStatus();
-      if (identity['bridge_id'] != _bridgeId ||
-          (identity['bridge_pid'] != _bridgeProcess?.pid &&
-              identity['bridge_parent_pid'] != _bridgeProcess?.pid))
-        throw StateError('桥接身份不匹配');
-      await _bridge.startServer(_cfg);
-      _runtimeApiKey = _cfg.apiKey;
+      await _inference.start(_cfg);
       await _savePrefs();
-      await _performCheck();
-      if (mounted && _ready) _msg('已启动', ok: true);
+      if (mounted && _inference.isReady) _msg('模型已就绪', ok: true);
     } catch (error) {
       if (mounted) _msg('启动失败: $error');
     } finally {
-      if (mounted) setState(() => _starting = false);
+      if (mounted && !_closing) setState(() => _starting = false);
     }
   }
 
   Future<void> _stop() async {
-    if (!_running || _starting) return;
+    if (_starting || _closing) return;
+    if (!_inference.runtime.isRunning) return;
     setState(() => _starting = true);
     try {
-      final identity = await _bridge.getStatus();
-      if (identity['bridge_id'] != _bridgeId ||
-          (identity['bridge_pid'] != _bridgeProcess?.pid &&
-              identity['bridge_parent_pid'] != _bridgeProcess?.pid))
-        throw StateError('桥接身份不匹配');
-      _bridge.cancelChat();
-      await _bridge.stopServer();
-      await _performCheck();
+      await _inference.stop();
     } catch (error) {
       if (mounted) _msg('停止失败: $error');
     } finally {
       if (mounted && !_closing) setState(() => _starting = false);
     }
+  }
+
+  Future<void> _loadP() async {
+    try {
+      final profiles = await _profileStore.list();
+      if (mounted && !_closing) setState(() => _profiles = profiles);
+    } catch (_) {}
   }
 
   Future<void> _savePf() async {
@@ -498,15 +232,16 @@ class _HomePageState extends State<HomePage> with WindowListener {
       if (confirmed != true || !mounted) return;
     }
     _cfg
-      ..serverPath = tcServer.text.trim()
       ..modelPath = tcModel.text.trim()
       ..mmprojPath = tcMmproj.text.trim()
       ..extraArgs = tcExtraArgs.text.trim();
     try {
-      if (!await _bridge.saveProfile(name, _cfg)) throw StateError('保存失败');
+      await _profileStore.save(name, _cfg);
       tcProfile.clear();
       await _loadP();
       if (mounted) _msg('档案已保存', ok: true);
+    } on ProfileNameException catch (error) {
+      if (mounted) _msg(error.message);
     } catch (error) {
       if (mounted) _msg('保存档案失败: $error');
     }
@@ -514,11 +249,13 @@ class _HomePageState extends State<HomePage> with WindowListener {
 
   Future<void> _loadPf(String name) async {
     try {
-      final config = await _bridge.loadProfile(name);
+      final config = await _profileStore.load(name);
       if (config == null) throw StateError('档案不存在或格式无效');
       if (!mounted) return;
       setState(() => _setConfig(config));
       _msg('档案已加载', ok: true);
+    } on ProfileNameException catch (error) {
+      if (mounted) _msg(error.message);
     } catch (error) {
       if (mounted) _msg('加载档案失败: $error');
     }
@@ -544,7 +281,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
     );
     if (confirmed != true || _closing) return;
     try {
-      if (!await _bridge.deleteProfile(name)) throw StateError('删除失败');
+      if (!await _profileStore.delete(name)) throw StateError('删除失败');
       await _loadP();
       if (mounted) _msg('档案已删除', ok: true);
     } catch (error) {
@@ -564,8 +301,57 @@ class _HomePageState extends State<HomePage> with WindowListener {
     );
   }
 
+  String _modelName(EngineRuntime runtime) {
+    final path = _inference.runningConfig?.modelPath ?? runtime.modelPath;
+    if (path.isEmpty) return '';
+    return path.split(Platform.pathSeparator).last;
+  }
+
+  String get _status {
+    final runtime = _inference.runtime;
+    switch (runtime.state) {
+      case EngineState.notFound:
+        return '未发现 llama-server 引擎；请检查安装目录 runtime/llama，或在下方手动选择';
+      case EngineState.idle:
+        return runtime.lastError.isNotEmpty
+            ? runtime.lastError
+            : (_inference.selectedEngine == null
+                ? '选择模型后启动'
+                : '引擎就绪：${_inference.selectedEngine!.label}');
+      case EngineState.starting:
+        return '正在启动 llama-server...';
+      case EngineState.loading:
+        return '模型加载中...';
+      case EngineState.ready:
+        final model = _modelName(runtime);
+        return '运行中${model.isEmpty ? '' : ' - $model'}（端口 ${runtime.port}）';
+      case EngineState.stopping:
+        return '正在停止...';
+      case EngineState.error:
+        return runtime.lastError.isEmpty ? '引擎错误' : runtime.lastError;
+    }
+  }
+
+  Color _statusColor(EngineRuntime runtime) {
+    switch (runtime.state) {
+      case EngineState.ready:
+        return Colors.green;
+      case EngineState.loading:
+      case EngineState.starting:
+      case EngineState.stopping:
+        return Colors.orange;
+      case EngineState.idle:
+        return Colors.blue;
+      case EngineState.error:
+        return Colors.red;
+      case EngineState.notFound:
+        return Colors.grey;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final runtime = _inference.runtime;
     final models = _files
         .where(
           (file) => !file['name'].toString().toLowerCase().startsWith('mmproj'),
@@ -576,6 +362,12 @@ class _HomePageState extends State<HomePage> with WindowListener {
           (file) => file['name'].toString().toLowerCase().startsWith('mmproj'),
         )
         .toList();
+    final host = (runtime.host.isEmpty || runtime.host == '0.0.0.0')
+        ? '127.0.0.1'
+        : runtime.host;
+    final port = runtime.isRunning && runtime.port > 0
+        ? runtime.port
+        : _cfg.port;
     return ft.NavigationView(
       pane: ft.NavigationPane(
         selected: _currentIndex,
@@ -602,19 +394,15 @@ class _HomePageState extends State<HomePage> with WindowListener {
       paneBodyBuilder: (_, __) => IndexedStack(
         index: _currentIndex,
         children: [
-          _page(models, mmprojs),
-          ChatPage(key: _chatKey, bridge: _bridge),
+          _page(models, mmprojs, runtime),
+          ChatPage(key: _chatKey, inference: _inference),
           CloudPage(
             key: _cloudKey,
-            llamaUrl: Uri(
-              scheme: 'http',
-              host: _runtimeHost,
-              port: _runtimePort > 0 ? _runtimePort : _cfg.port,
-            ).toString(),
-            llamaApiKey: _runtimeApiKey,
-            modelName: _runtimeModel,
-            serverRunning: _running,
-            serverReady: _ready,
+            llamaUrl: Uri(scheme: 'http', host: host, port: port).toString(),
+            llamaApiKey: _inference.runningConfig?.apiKey ?? '',
+            modelName: _modelName(runtime),
+            serverRunning: runtime.isRunning,
+            serverReady: runtime.state == EngineState.ready,
           ),
         ],
       ),
@@ -624,6 +412,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
   Widget _page(
     List<Map<String, dynamic>> models,
     List<Map<String, dynamic>> mmprojs,
+    EngineRuntime runtime,
   ) {
     return SingleChildScrollView(
       controller: _scrollCtrl,
@@ -636,7 +425,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
             style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
           ),
           Text(
-            '本地算力 / 云端共享',
+            '本地算力 / 云端共享 · 内置 llama.cpp ${runtime.engine?.tag ?? ''}',
             style: TextStyle(fontSize: 14, color: Colors.grey[600]),
           ),
           const SizedBox(height: 20),
@@ -646,13 +435,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
                 width: 12,
                 height: 12,
                 decoration: BoxDecoration(
-                  color: _ready
-                      ? Colors.green
-                      : _running
-                      ? Colors.orange
-                      : _bridgeReady
-                      ? Colors.blue
-                      : Colors.grey,
+                  color: _statusColor(runtime),
                   shape: BoxShape.circle,
                 ),
               ),
@@ -662,11 +445,15 @@ class _HomePageState extends State<HomePage> with WindowListener {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      _ready
-                          ? '运行中'
-                          : _running
-                          ? '加载中'
-                          : '未启动',
+                      switch (runtime.state) {
+                        EngineState.ready => '运行中',
+                        EngineState.loading => '加载中',
+                        EngineState.starting => '启动中',
+                        EngineState.stopping => '停止中',
+                        EngineState.error => '错误',
+                        EngineState.notFound => '未发现引擎',
+                        EngineState.idle => '未启动',
+                      },
                       style: const TextStyle(
                         fontSize: 15,
                         fontWeight: FontWeight.w600,
@@ -679,12 +466,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
                   ],
                 ),
               ),
-              if (!_bridgeReady)
-                ft.Button(
-                  onPressed: _closing ? null : _check,
-                  child: const Text('重试桥接'),
-                )
-              else if (_running)
+              if (runtime.isRunning || runtime.state == EngineState.stopping)
                 ft.Button(
                   onPressed: _starting || _closing ? null : _stop,
                   child: Text(_starting ? '停止中…' : '停止'),
@@ -692,21 +474,67 @@ class _HomePageState extends State<HomePage> with WindowListener {
               else
                 ft.FilledButton(
                   onPressed: _starting || _closing ? null : _start,
-                  child: Text(_starting ? '启动中...' : '启动 llama-server'),
+                  child: Text(_starting ? '启动中...' : '启动模型'),
                 ),
             ],
           ),
           const SizedBox(height: 20),
-          _lbl('llama-server.exe'),
+          _lbl('推理引擎'),
           Row(
             children: [
               Expanded(
-                child: ft.TextBox(controller: tcServer, placeholder: '选择 exe'),
+                child: _inference.engines.length > 1
+                    ? ft.ComboBox<String>(
+                        value: _inference.selectedEngine?.label,
+                        items: _inference.engines
+                            .map(
+                              (engine) => ft.ComboBoxItem(
+                                value: engine.label,
+                                child: Text(engine.label),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (label) {
+                          final match = _inference.engines
+                              .where((engine) => engine.label == label);
+                          if (match.isNotEmpty) {
+                            _inference.selectEngine(match.first);
+                            _savePrefs();
+                            setState(() {});
+                          }
+                        },
+                      )
+                    : Text(
+                        _inference.selectedEngine?.label ?? '未发现引擎',
+                        style: const TextStyle(fontSize: 13),
+                      ),
               ),
               const SizedBox(width: 8),
-              ft.Button(onPressed: _pickS, child: const Text('浏览')),
+              ft.Button(
+                onPressed: _starting || _inference.runtime.isRunning
+                    ? null
+                    : _pickEngineDir,
+                child: const Text('指定目录'),
+              ),
+              ft.Button(
+                onPressed: _starting || _inference.runtime.isRunning
+                    ? null
+                    : () async {
+                        await _inference.discoverEngines();
+                        if (mounted) setState(() {});
+                      },
+                child: const Text('重新扫描'),
+              ),
             ],
           ),
+          if ((_inference.selectedEngine?.versionSummary ?? '').isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                _inference.selectedEngine!.versionSummary,
+                style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+              ),
+            ),
           const SizedBox(height: 14),
           _lbl('模型文件夹'),
           Row(
@@ -728,7 +556,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
           const SizedBox(height: 8),
           Row(
             children: [
-              _lbl('mmproj (可选)'),
+              _lbl('mmproj (可选，多模态投影)'),
               ft.HyperlinkButton(
                 onPressed: () => setState(() => tcMmproj.clear()),
                 child: const Text('清除'),
@@ -755,13 +583,24 @@ class _HomePageState extends State<HomePage> with WindowListener {
           const SizedBox(height: 8),
           ft.Expander(
             header: const Text('运行日志'),
-            content: SelectableText(
-              _logs.isEmpty ? '暂无日志' : _logs,
-              style: const TextStyle(fontSize: 12),
-            ),
+            content: _logsView(),
           ),
           const SizedBox(height: 40),
         ],
+      ),
+    );
+  }
+
+  Widget _logsView() {
+    final logs = _inference.logs;
+    if (logs.isEmpty) {
+      return const SelectableText('暂无日志', style: TextStyle(fontSize: 12));
+    }
+    return SingleChildScrollView(
+      reverse: true,
+      child: SelectableText(
+        logs.join('\n'),
+        style: const TextStyle(fontSize: 12),
       ),
     );
   }
@@ -831,7 +670,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
         _num(
           '--n-gpu-layers',
           'GPU 层数',
-          '加载到 GPU 的模型层数，-1=全部加载到显存',
+          '加载到 GPU 的层数：-1=全部，0=自动（引擎按显存自适应）',
           _cfg.nGpuLayers,
           (value) => _cfg.nGpuLayers = value.toInt(),
           min: -1,
@@ -839,10 +678,10 @@ class _HomePageState extends State<HomePage> with WindowListener {
         _num(
           '--ctx-size',
           '上下文长度',
-          '模型最大上下文窗口，如 32768/128000',
+          '0=使用模型元数据默认值，或指定如 32768',
           _cfg.contextSize,
           (value) => _cfg.contextSize = value.toInt(),
-          min: 1,
+          min: 0,
         ),
         _num(
           '--batch-size',
@@ -871,10 +710,10 @@ class _HomePageState extends State<HomePage> with WindowListener {
         _num(
           '--parallel',
           '并行槽位',
-          '同时处理的最大并发请求数',
+          '同时处理的最大并发请求数，0=自动',
           _cfg.slots,
           (value) => _cfg.slots = value.toInt(),
-          min: 1,
+          min: 0,
         ),
         _num(
           '--port',
@@ -891,7 +730,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
         _choice(
           '--cache-type-k',
           'K 缓存量化',
-          'Key 缓存的量化精度，q8_0 推荐',
+          'Key 缓存的量化精度，引擎默认 f16',
           _cfg.cacheTypeK,
           {'f16', 'q8_0', 'q4_0', _cfg.cacheTypeK}.toList(),
           (value) => setState(() => _cfg.cacheTypeK = value),
@@ -899,7 +738,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
         _choice(
           '--cache-type-v',
           'V 缓存量化',
-          'Value 缓存的量化精度，q8_0 推荐',
+          'Value 缓存的量化精度，引擎默认 f16',
           _cfg.cacheTypeV,
           {'f16', 'q8_0', 'q4_0', _cfg.cacheTypeV}.toList(),
           (value) => setState(() => _cfg.cacheTypeV = value),
@@ -907,33 +746,49 @@ class _HomePageState extends State<HomePage> with WindowListener {
         const SizedBox(height: 16),
         _section('功能开关'),
         const SizedBox(height: 10),
-        _bool(
-          '--flash-attn',
+        _choice(
+          '-fa',
           'Flash Attention',
-          '启用 FA 加速推理，减少显存占用',
-          _cfg.flashAttn,
-          (value) => setState(() => _cfg.flashAttn = value),
+          'auto=按硬件能力自动决定；on/off=强制开关',
+          _cfg.flashAttnMode,
+          const ['auto', 'on', 'off'],
+          (value) => setState(() => _cfg.flashAttnMode = value),
         ),
-        _bool(
-          '--mlock',
-          '内存锁定',
-          '锁定模型到物理内存，防止 swap 影响性能',
-          _cfg.mlLock,
-          (value) => setState(() => _cfg.mlLock = value),
-        ),
-        _bool(
-          '--cont-batching',
+        _choice(
+          '-cb',
           '连续批处理',
-          '动态合并请求，提高吞吐量',
-          _cfg.contBatching,
-          (value) => setState(() => _cfg.contBatching = value),
+          'auto=引擎默认开启；off=关闭动态批处理',
+          _cfg.contBatchingMode,
+          const ['auto', 'on', 'off'],
+          (value) => setState(() => _cfg.contBatchingMode = value),
         ),
         _bool(
           '--embeddings',
           '嵌入模式',
-          '启用文本嵌入提取功能',
+          '仅用于嵌入模型：启用文本嵌入接口',
           _cfg.embeddings,
           (value) => setState(() => _cfg.embeddings = value),
+        ),
+        _bool(
+          '--rerank',
+          '重排模式',
+          '启用 /v1/rerank 重排接口（需重排模型）',
+          _cfg.reranking,
+          (value) => setState(() => _cfg.reranking = value),
+        ),
+        _bool(
+          '--metrics',
+          '指标端点',
+          '启用 Prometheus /metrics 监控端点',
+          _cfg.enableMetrics,
+          (value) => setState(() => _cfg.enableMetrics = value),
+        ),
+        _bool(
+          '--mlock',
+          '内存锁定（-lm mlock）',
+          '锁定模型到物理内存，防止 swap 影响性能',
+          _cfg.mlLock,
+          (value) => setState(() => _cfg.mlLock = value),
         ),
         const SizedBox(height: 8),
         ft.Expander(
@@ -984,13 +839,13 @@ class _HomePageState extends State<HomePage> with WindowListener {
               _bool(
                 '--no-kv-offload',
                 '禁用 KV 卸载',
-                '强制 KV 缓存留在显存',
+                'KV 缓存保留在内存而非显存',
                 _cfg.noKvOffload,
                 (value) => setState(() => _cfg.noKvOffload = value),
               ),
               _bool(
                 '--no-mmap',
-                '禁用 mmap',
+                '禁用 mmap（-lm none）',
                 '不使用内存映射加载模型',
                 _cfg.noMmap,
                 (value) => setState(() => _cfg.noMmap = value),
@@ -1279,54 +1134,29 @@ class _HomePageState extends State<HomePage> with WindowListener {
     if (_closing) return;
     setState(() {
       _closing = true;
-      _status = '正在关闭模型和桥接…';
     });
-    _pollTimer?.cancel();
-    _bridge.cancelChat();
     _cloudKey.currentState?.disconnectForShutdown();
-    final process = _bridgeProcess;
-    if (process != null) {
-      try {
-        final status = await _bridge.getStatus();
-        if (status['bridge_id'] == _bridgeId &&
-            (status['bridge_pid'] == process.pid ||
-                status['bridge_parent_pid'] == process.pid)) {
-          await _bridge.shutdownBridge(_bridgeToken);
-        }
-        await process.exitCode.timeout(const Duration(seconds: 15));
-      } catch (_) {
-        try {
-          await process.exitCode.timeout(const Duration(milliseconds: 100));
-        } catch (_) {
-          if (mounted)
-            setState(() {
-              _closing = false;
-              _status = '桥接未能安全关闭，请停止模型后重试。未强制结束运行中的进程。';
-            });
-          _cloudKey.currentState?.resumeAfterCancelledShutdown();
-          _startPolling();
-          return;
-        }
-      }
-    }
+    // 只终止本应用启动的引擎进程；未运行时 stop() 是快速无操作。
+    try {
+      await _inference.stop().timeout(const Duration(seconds: 10));
+    } catch (_) {}
     await windowManager.destroy();
   }
 
   @override
   void dispose() {
     _closing = true;
-    _pollTimer?.cancel();
+    _engineSub?.cancel();
     windowManager.removeListener(this);
     for (final focus in _numFocus.values) focus.dispose();
     for (final controller in _numCtrls.values) controller.dispose();
-    tcServer.dispose();
     tcFolder.dispose();
     tcModel.dispose();
     tcMmproj.dispose();
     tcProfile.dispose();
     tcExtraArgs.dispose();
     _scrollCtrl.dispose();
-    _bridge.dispose();
+    if (_ownsInference) _inference.dispose();
     super.dispose();
   }
 }

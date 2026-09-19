@@ -1,21 +1,55 @@
 import 'dart:async';
+import 'dart:io';
+
 import 'package:fluent_ui/fluent_ui.dart' as ft;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:openmymodel/models/server_config.dart';
 import 'package:openmymodel/pages/home_page.dart';
 import 'package:openmymodel/pages/chat_page.dart';
 import 'package:openmymodel/pages/cloud_page.dart';
-import 'package:openmymodel/services/python_bridge.dart';
+import 'package:openmymodel/services/inference_service.dart';
+import 'package:openmymodel/services/profile_store.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-class ChatFixture extends PythonBridge {
-  final chunks = StreamController<String>();
+/// 页面接线测试用的固定就绪引擎；真实网络行为由 inference_service_test 覆盖。
+class _ReadyEngineFixture extends InferenceService {
+  final chunks = StreamController<Map<String, dynamic>>();
   int cancellations = 0;
+  final engine = EngineInfo(
+    directory: 'test-engine',
+    executable: 'llama-server.exe',
+    tag: 'b10909',
+    backend: 'cpu',
+  );
+
   @override
-  Stream<String> chatStream(
+  bool get isReady => true;
+
+  @override
+  EngineRuntime get runtime => EngineRuntime(
+        state: EngineState.ready,
+        engine: engine,
+        modelPath: 'test-model.gguf',
+        port: 8080,
+      );
+
+  @override
+  ServerConfig? get runningConfig => ServerConfig(modelPath: 'test-model.gguf');
+
+  @override
+  List<String> get logs =>
+      const ['version: 0.4.0-dev (build 1, commit a2878d3)'];
+
+  @override
+  Stream<Map<String, dynamic>> chatStream(
     List<Map<String, dynamic>> messages, {
-    double temp = 0.7,
-  }) => chunks.stream;
+    double? temperature,
+    int? maxTokens,
+    Map<String, dynamic>? extra,
+  }) =>
+      chunks.stream;
+
   @override
   void cancelChat() {
     cancellations++;
@@ -32,9 +66,15 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    final fixture = ChatFixture();
+    final fixture = _ReadyEngineFixture();
     await tester.pumpWidget(
-      ft.FluentApp(home: HomePage(manageRuntime: false, bridge: fixture)),
+      ft.FluentApp(
+        home: HomePage(
+          manageRuntime: false,
+          inference: fixture,
+          profiles: ProfileStore(dir: Directory.systemTemp.path),
+        ),
+      ),
     );
     await tester.pumpAndSettle();
     final chatState = tester.state(find.byType(ChatPage, skipOffstage: false));
@@ -55,7 +95,11 @@ void main() {
     );
     await tester.tap(find.text('发送'));
     await tester.pump();
-    fixture.chunks.add('{"choices":[{"delta":{"content":"partial reply"}}]}');
+    fixture.chunks.add({
+      'choices': [
+        {'delta': {'content': 'partial reply'}}
+      ],
+    });
     await tester.pump();
     expect(find.text('partial reply'), findsOneWidget);
     tester

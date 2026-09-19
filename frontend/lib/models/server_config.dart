@@ -1,5 +1,7 @@
-/// llama-server 运行时配置数据模型
-
+/// llama-server 运行时配置数据模型（llama.cpp b10909）。
+///
+/// 兼容旧 Python Bridge 写入的 .openmymodel/profiles JSON：
+/// 旧字段全部保留读取；新增的三态字段优先于旧布尔字段。
 class ServerConfig {
   // 必需参数
   String serverPath;
@@ -9,12 +11,17 @@ class ServerConfig {
   String mmprojPath;
 
   // 模型加载
+  /// -1 = 全部层, 0 = auto（引擎默认，配合 --fit 自动适配显存）, >0 = 精确层数。
   int nGpuLayers;
+
+  /// 0 = 从模型元数据读取（引擎默认）。
   int contextSize;
   int batchSize;
   int ubatchSize;
   int threads;
-  bool flashAttn;
+
+  /// Flash Attention: auto / on / off（引擎默认 auto）。
+  String flashAttnMode;
   String cacheTypeK;
   String cacheTypeV;
 
@@ -24,45 +31,57 @@ class ServerConfig {
   String apiKey;
   int slots;
   bool embeddings;
+  bool reranking;
+  bool enableMetrics;
 
-  // 高级
+  /// 连续批处理: auto（引擎默认 enabled）/ on / off。
+  String contBatchingMode;
+
+  // 高级（对应 -lm 加载模式）
+  bool noKvOffload;
+  bool mlLock;
+  bool noMmap;
   double ropeFreqBase;
   double ropeFreqScale;
   double yarnExtFactor;
   double yarnAttnFactor;
-  bool noKvOffload;
-  bool contBatching;
-  bool mlLock;
-  bool noMmap;
   String extraArgs;
 
   ServerConfig({
     this.serverPath = "",
     this.modelPath = "",
     this.mmprojPath = "",
-    this.nGpuLayers = 99,
-    this.contextSize = 128000,
+    this.nGpuLayers = 0,
+    this.contextSize = 0,
     this.batchSize = 2048,
     this.ubatchSize = 512,
     this.threads = 0,
-    this.flashAttn = true,
-    this.cacheTypeK = "q8_0",
-    this.cacheTypeV = "q8_0",
+    this.flashAttnMode = "auto",
+    this.cacheTypeK = "f16",
+    this.cacheTypeV = "f16",
     this.host = "127.0.0.1",
     this.port = 8080,
     this.apiKey = "",
     this.slots = 1,
     this.embeddings = false,
+    this.reranking = false,
+    this.enableMetrics = false,
+    this.contBatchingMode = "auto",
+    this.noKvOffload = false,
+    this.mlLock = false,
+    this.noMmap = false,
     this.ropeFreqBase = 0.0,
     this.ropeFreqScale = 0.0,
     this.yarnExtFactor = 0.0,
     this.yarnAttnFactor = 0.0,
-    this.noKvOffload = false,
-    this.contBatching = false,
-    this.mlLock = false,
-    this.noMmap = false,
     this.extraArgs = "",
   });
+
+  static String _triState(dynamic value, bool? legacy, String fallback) {
+    if (value is String && ["auto", "on", "off"].contains(value)) return value;
+    if (legacy != null) return legacy ? "on" : "off";
+    return fallback;
+  }
 
   Map<String, dynamic> toJson() => {
     "server_path": serverPath,
@@ -73,7 +92,8 @@ class ServerConfig {
     "batch_size": batchSize,
     "ubatch_size": ubatchSize,
     "threads": threads,
-    "flash_attn": flashAttn,
+    "flash_attn_mode": flashAttnMode,
+    "flash_attn": flashAttnMode == "on",
     "cache_type_k": cacheTypeK,
     "cache_type_v": cacheTypeV,
     "host": host,
@@ -81,14 +101,17 @@ class ServerConfig {
     "api_key": apiKey,
     "slots": slots,
     "embeddings": embeddings,
+    "reranking": reranking,
+    "enable_metrics": enableMetrics,
+    "cont_batching_mode": contBatchingMode,
+    "cont_batching": contBatchingMode == "on",
+    "no_kv_offload": noKvOffload,
+    "ml_lock": mlLock,
+    "no_mmap": noMmap,
     "rope_freq_base": ropeFreqBase,
     "rope_freq_scale": ropeFreqScale,
     "yarn_ext_factor": yarnExtFactor,
     "yarn_attn_factor": yarnAttnFactor,
-    "no_kv_offload": noKvOffload,
-    "cont_batching": contBatching,
-    "ml_lock": mlLock,
-    "no_mmap": noMmap,
     "extra_args": extraArgs,
   };
 
@@ -96,29 +119,41 @@ class ServerConfig {
     serverPath: json["server_path"] ?? "",
     modelPath: json["model_path"] ?? "",
     mmprojPath: json["mmproj_path"] ?? "",
-    nGpuLayers: json["n_gpu_layers"] ?? 99,
-    contextSize: json["context_size"] ?? 128000,
+    nGpuLayers: json["n_gpu_layers"] ?? 0,
+    contextSize: json["context_size"] ?? 0,
     batchSize: json["batch_size"] ?? 2048,
     ubatchSize: json["ubatch_size"] ?? 512,
     threads: json["threads"] ?? 0,
-    flashAttn: json["flash_attn"] ?? true,
-    cacheTypeK: json["cache_type_k"] ?? "q8_0",
-    cacheTypeV: json["cache_type_v"] ?? "q8_0",
+    flashAttnMode: _triState(
+      json["flash_attn_mode"],
+      json["flash_attn"] is bool ? json["flash_attn"] as bool : null,
+      "auto",
+    ),
+    cacheTypeK: json["cache_type_k"] ?? "f16",
+    cacheTypeV: json["cache_type_v"] ?? "f16",
     host: json["host"] ?? "127.0.0.1",
     port: json["port"] ?? 8080,
     apiKey: json["api_key"] ?? "",
     slots: json["slots"] ?? 1,
     embeddings: json["embeddings"] ?? false,
+    reranking: json["reranking"] ?? false,
+    enableMetrics: json["enable_metrics"] ?? false,
+    contBatchingMode: _triState(
+      json["cont_batching_mode"],
+      json["cont_batching"] is bool ? json["cont_batching"] as bool : null,
+      "auto",
+    ),
+    noKvOffload: json["no_kv_offload"] ?? false,
+    mlLock: json["ml_lock"] ?? false,
+    noMmap: json["no_mmap"] ?? false,
     ropeFreqBase: (json["rope_freq_base"] ?? 0.0).toDouble(),
     ropeFreqScale: (json["rope_freq_scale"] ?? 0.0).toDouble(),
     yarnExtFactor: (json["yarn_ext_factor"] ?? 0.0).toDouble(),
     yarnAttnFactor: (json["yarn_attn_factor"] ?? 0.0).toDouble(),
-    noKvOffload: json["no_kv_offload"] ?? false,
-    contBatching: json["cont_batching"] ?? false,
-    mlLock: json["ml_lock"] ?? false,
-    noMmap: json["no_mmap"] ?? false,
     extraArgs: json["extra_args"] ?? "",
   );
+
+  ServerConfig copy() => ServerConfig.fromJson(toJson());
 }
 
 /// 云端连接配置

@@ -27,6 +27,9 @@ backend/data/
 # Temp scripts
 scripts/*.py
 !scripts/package_windows.py
+!scripts/build_llama_windows.py
+!scripts/sync_bridge.py
+!scripts/package_windows.py
 scripts/node_modules/
 
 # OS
@@ -62,3 +65,6 @@ OpenMyModel-win-x64-*.zip
 /artifacts/
 **/__pycache__/
 **/*.pyc
+
+# Engine source-build output (root CMake build dirs)
+/build/

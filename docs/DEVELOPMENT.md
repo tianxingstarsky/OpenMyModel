@@ -2,12 +2,15 @@
 
 ## 架构与行为约定
 
-- Flutter 管理自己的 Python Bridge 子进程和 Node Bridge 子进程。切换首页、对话、云端页不会重建业务状态。
-- Python Bridge 只监听 `127.0.0.1:8765`，管理自己的 llama-server，并代理本地聊天。进程存在不代表模型已经加载完成；`running` 与 `ready` 是不同状态。
+- Flutter 通过 `InferenceService`（`frontend/lib/services/inference_service.dart`）直接管理内置 llama-server 子进程：启动、日志采集（有界、脱敏）、`/health` 轮询、`/props` 能力读取、崩溃检测和停止。只终止自己启动的进程，不按端口或进程名杀进程。
+- 引擎来源固定：`third_party/llama.cpp` Git submodule 锁定 b10909（提交 `a2878d30df0130dde503a7d9ba30d3d21bd71b9f`），元数据在 `third_party/llama.cpp.lock.json`（含官方预编译包 SHA-256 备选）。
+- 本地聊天由 Flutter 直连引擎官方 OpenAI 兼容 API（`/v1/chat/completions` SSE），不再经过任何本地 HTTP 代理；停止生成即关闭底层连接。
+- 配置档案由 Dart `ProfileStore` 直接读写 `%USERPROFILE%\.openmymodel\profiles`，与旧 Python Bridge 的档案文件双向兼容（旧布尔字段自动映射为三态 `auto/on/off`）。
 - Node Bridge 从 Flutter 接收配置和密钥，通过 WebSocket 连接云后端。云端不持久化 API Key，但认证请求中的 Key 会经过云端内存。
 - 云后端使用 Fastify，并按 Key 所属在线节点选择转发目标。不会把用户对话广播到其他节点。
-- 云端只承诺 `/v1/models` 和 `/v1/chat/completions`，不是完整 OpenAI API 实现。
+- 云端只承诺 `/v1/models` 和 `/v1/chat/completions`，不是完整 OpenAI API 实现。引擎本地的其他端点（`/props`、`/slots`、`/metrics` 等）属于引擎原生能力，未全部透出云端。
 - Token 配额、用量计费、持久聊天历史尚未实现。聊天记录只在当前应用会话中保留。
+- `python/` 目录是历史实现，保留用于兼容资料与回归测试；当前桌面运行链路不使用 Python。
 
 ## 中继协议 v2
 
@@ -22,28 +25,43 @@
 
 `http_chunk.data` 是连续 UTF-8 文本，不能按换行过滤空行，不能改写 `reasoning_content`，不能加入默认 `max_tokens`。Node 的 UTF-8 解码器会缓存多字节字符的半字节片段。上游请求使用 `Accept-Encoding: identity`；不接受未经解码的压缩响应。流式路径不累积完整生成文本；慢连接有有界缓冲保护。
 
+## 内置引擎构建
+
+```bash
+# 初始化 submodule（浅克隆足够构建）
+git submodule update --init third_party/llama.cpp
+
+# CPU 必建；CUDA 需要 nvcc；Vulkan 需要 Vulkan SDK（glslc），缺失会明确报错而不是静默跳过
+python scripts/build_llama_windows.py --backends cpu,cuda
+# 可选: --cuda-architectures native|all-major|86;89;120  --jobs N  --out artifacts/engine
+```
+
+- 构建使用 `GGML_BACKEND_DL=ON` + `GGML_CPU_ALL_VARIANTS=ON`（与官方发布一致的运行时选优布局），产物为 `artifacts/engine/llama-<tag>-<backend>-x64/`（llama-server.exe 与全部 ggml DLL 同目录）。
+- 每个引擎目录写入 `engine.json`：tag、commit、后端、CMake 配置、工具链版本、`--version` 输出与逐文件 SHA-256。桌面端启动时读取该文件显示真实引擎版本/后端。
+- 生成器优先使用 Visual Studio 2022（CMake VS 生成器，无需 vcvars）；找不到时退回 Ninja + vcvars64，并用净化过的 PATH 规避机器 PATH 中含括号条目导致的 cmd 批处理解析错误。
+- CUDA 构建静态链接 cudart/cublas，产物自包含，不需要额外复制 CUDA 运行时 DLL。
+- 打包也可使用官方预编译引擎备选：`third_party/llama.cpp.lock.json` 记录了 b10909 Windows x64 CPU/CUDA/Vulkan 包的 SHA-256；运行时不会自动下载或更新引擎。
+
 ## 本地开发
 
-要求 Node.js 22+、Python 3.11+，以及满足 `frontend/pubspec.yaml` 中 Dart SDK 范围的 Flutter stable。Windows 桌面构建另需 Visual Studio 的 Desktop development with C++。
+要求 Node.js 22+，以及满足 `frontend/pubspec.yaml` 中 Dart SDK 范围的 Flutter stable。Windows 桌面构建另需 Visual Studio 2022 的 Desktop development with C++；引擎源码构建另需 CMake 3.28+（CUDA/Vulkan 后端见上文）。
 
 ```bash
 npm --prefix scripts ci
 npm --prefix backend ci
-python -m venv python/venv
-# Windows:
-python/venv/Scripts/python -m pip install -r python/requirements.txt
-# Linux/macOS: 使用 python/venv/bin/python
 ```
 
 在 `backend/` 运行 `npm run setup` 初始化管理员密码，然后 `npm run dev`。也可以在第一次启动前设置 `ADMIN_PASSWORD`；已有配置不会被环境变量覆盖。数据目录默认是后端当前工作目录的 `data/`，可用 `OPENMYMODEL_DATA_DIR` 指向隔离测试目录。
 
-在 `frontend/` 运行 `flutter pub get` 和 `flutter run -d windows`。桌面使用便携 Python（如果存在）或 PATH 中的 Python；开发环境应将上述虚拟环境加入 PATH。不要同时运行另一份 Bridge 占用 8765。
+在 `frontend/` 运行 `flutter pub get` 和 `flutter run -d windows`。桌面端自动发现引擎：exe 旁 `runtime/llama/`（打包布局）、开发布局 `artifacts/engine/`，或用户在首页手动指定的目录。开发机上无需 Python；如需运行历史 Python 兼容测试，见下文自动化门禁。
 
 ### 生命周期与安全
 
-桌面启动 Bridge 时传入随机 `OPENMYMODEL_BRIDGE_ID` 和 `OPENMYMODEL_BRIDGE_TOKEN`。状态只返回标识、PID 和直接父进程 PID，不返回 Token。Windows 虚拟环境启动器会创建一个 Python 子进程，因此允许返回 PID 或直接父 PID 匹配启动进程，同时必须匹配随机标识。关闭自己的 Bridge 使用带 `X-Bridge-Token` 的 `/api/shutdown`，并核对启动标识；不得依据端口号杀掉其他用户进程。
-
-本地接口拒绝浏览器跨站请求；它不是面向公网的管理服务。不要把 8765 暴露到局域网或公网。密码和 API Key 仍属于本地敏感用户数据，不是操作系统密钥库加密存储；应保护 Windows 用户目录。
+- `InferenceService` 串行化启动/停止；相同配置重复启动幂等，不同配置需先停止。进程在启动或就绪后退出会进入 `error` 状态并保留日志尾部。
+- 引擎命令行在 Dart 侧构建（`InferenceService.buildArgs`）：`-ngl` 支持 `all/auto/精确层数`，`-lm` 承载 mlock/no-mmap，`extra_args` 禁止覆盖 `--host/--port/--api-key`。
+- 日志环形缓冲有界（500 行 × 2000 字符），API Key 在日志中脱敏。
+- 云端断线由桌面页执行有界指数退避重连（2/4/8/16/32 秒，最多 5 次）；用户主动断开后不自动重连。
+- 密码和 API Key 仍属于本地敏感用户数据，不是操作系统密钥库加密存储；应保护 Windows 用户目录。
 
 ## 自动化门禁
 
@@ -54,8 +72,8 @@ npm --prefix scripts test
 npm --prefix scripts run check:release
 npm --prefix backend run build
 npm --prefix backend test
+# 历史 Python Bridge 兼容（当前链路不再依赖，保留回归）：
 python/venv/Scripts/python -m unittest discover -s python/tests -v
-python/venv/Scripts/python -m compileall -q python
 ```
 
 从 `frontend/` 执行：
@@ -66,25 +84,26 @@ flutter test
 flutter build windows --release
 ```
 
-[CI 工作流模板](ci-workflow.example.yml) 可放入 `.github/workflows/verify.yml`，在 push/PR 上验证三层代码，并在 Windows runner 上编译桌面端。当前 GitHub OAuth 凭据缺少 `workflow` 权限，源码分支未包含激活的工作流；完整工作流保留在本地 `ci/full-stack-verification` 分支（提交 `47b3049`）。后端和 Bridge 测试使用临时端口及假上游，不需要真实模型/GPU，也不使用现有管理员密码或数据目录。
+Flutter 测试覆盖：`inference_service_test.dart`（命令行构建、状态机、健康轮询、日志脱敏、崩溃检测、停止、聊天 SSE/鉴权/取消、幂等启动）、`profile_store_test.dart`（新字段 round-trip、旧 Python 档案兼容、名称校验）、`navigation_test.dart`（页签保活、部分回复保留、停止生成断开连接）、`bridge_services_test.dart`（SSE 解码、云 URL 规范化、旧桥接回归）、`websocket_service_test.dart`。
 
-`npm --prefix scripts test` 覆盖：状态码、UTF-8 跨块、SSE 空行、响应头前取消、云断线清理、超时、Key 删除、压缩拒绝和重连竞争。后端包含自身路由/隧道回归和实际 Bridge 联调测试。
+[CI 工作流模板](ci-workflow.example.yml) 可放入 `.github/workflows/verify.yml`，在 push/PR 上验证三层代码，并在 Windows runner 上编译桌面端。当前 GitHub OAuth 凭据缺少 `workflow` 权限，源码分支未包含激活的工作流；完整工作流保留在本地 `ci/full-stack-verification` 分支（提交 `47b3049`）。后端和 Bridge 测试使用临时端口及假上游，不需要真实模型/GPU，也不使用现有管理员密码或数据目录。
 
 手工 WS 探针可以使用环境变量 `ADMIN_PASSWORD` 和 `CLOUD_WS_URL` 运行根目录 `test_ws.dart`。`scripts/mock_node.js` 使用生产桥接实现，要求 `ADMIN_PASSWORD`、`TEST_API_KEY`，可选 `CLOUD_URL`、`LLAMA_URL`、`LLAMA_API_KEY`、`MODEL_NAME`，不再内置任何可用密码。
 
 ## Windows 发布
 
 1. 完成所有测试，并确认 `flutter build windows --release` 以退出码 0 成功。旧 exe 存在不能证明本次构建成功，CMake INSTALL 失败也不能被忽略。
-2. 执行 `npm --prefix scripts run sync:release`，然后 `check:release`；勿手工只修改 release 下的 JS。
-3. 确保便携运行时来源目录（默认 `release/`）包含 `python/python.exe` 与 `scripts/node.exe`，Python 依赖与源码要求匹配。
-4. 创建一个全新输出目录：
+2. 构建/更新内置引擎：`python scripts/build_llama_windows.py --backends cpu,cuda`，确认 `artifacts/engine/llama-<tag>-<backend>-x64/engine.json` 中的版本与 SHA-256。
+3. 执行 `npm --prefix scripts run sync:release`，然后 `check:release`；勿手工只修改 release 下的 JS。
+4. 准备便携 `node.exe`（云端桥接用，默认 `release/scripts/node.exe`，可用 `--node` 覆盖）。新包**不再包含 Python 运行时**。
+5. 创建一个全新输出目录：
 
 ```bash
-python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-stability
-# Flutter 未在 PATH 时，加 --flutter "C:/path/to/flutter/bin/flutter.bat"
+python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-native
+# 可选: --engines cpu,cuda 按目录名筛选；--flutter/--node 指定路径
 ```
 
-打包器会先重新执行 Flutter Release 构建并检查退出码，随后只读取已有便携运行时，将**本次 Flutter 构建、当前 Python 源码、当前 Node Bridge 和 ws 依赖**放入新目录；拒绝覆盖任何现有输出，且不会修改用户的 release 树。它排除日志和缓存，并记录 `build-manifest.json`（Git revision、工作区是否有改动、逐文件 SHA-256）。打包后仍需启动该目录的 exe 验证。
+打包器会先重新执行 Flutter Release 构建并检查退出码，将**本次 Flutter 构建、指定引擎目录、Node Bridge 和 ws 依赖**放入新目录（引擎位于 `runtime/llama/`）；拒绝覆盖任何现有输出，且不会修改用户的 release 树。它排除日志、缓存和 PDB，并记录 `build-manifest.json`（Git revision、工作区是否有改动、引擎元数据、逐文件 SHA-256）。打包后仍需启动该目录的 exe 验证。
 
 ## 部署注意事项
 
@@ -99,9 +118,11 @@ python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-stabili
 
 | 现象 | 检查方向 |
 | --- | --- |
-| 模型正在加载但聊天不可用 | 等待 `ready`，查看界面返回的模型日志/错误；不要重复点击启动 |
+| 首页显示"未发现引擎" | 检查安装目录 `runtime/llama/` 是否存在引擎；或用首页"指定目录"选择包含 llama-server.exe 的目录 |
+| 模型正在加载但聊天不可用 | 等待 `ready`，查看运行日志；加载超时有明确报错，不要重复点击启动 |
+| CUDA 引擎启动失败 | 查看 `error` 状态的日志尾部；可在首页切换回 CPU 引擎再启动 |
 | 云端 401 | 检查 Key 启用状态及所属节点在线状态 |
 | 云端 502 / protocol error | 检查后端和 Node Bridge 是否同时升级 |
 | 云端 504 | 检查上游是否长时间没有响应，以及模型加载/推理状态 |
-| 本地桥接端口被占用 | 确认是否运行另一份 OpenMyModel/Bridge；应用不会杀掉未知进程 |
+| 云端反复自动重连 | 退避 2→32 秒共 5 次；主动"断开"后不会再自动重连 |
 | Windows 构建 CMake 失败 | 阅读失败步骤并修复，不能用历史 Release 目录冒充成功构建 |

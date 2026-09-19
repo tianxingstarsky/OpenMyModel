@@ -1,0 +1,38 @@
+{
+  "name": "llama.cpp",
+  "upstream": "https://github.com/ggml-org/llama.cpp",
+  "tag": "b10909",
+  "commit": "a2878d30df0130dde503a7d9ba30d3d21bd71b9f",
+  "releaseDate": "2026-09-11",
+  "license": "MIT",
+  "licenseFile": "third_party/llama.cpp/LICENSE",
+  "submodulePath": "third_party/llama.cpp",
+  "notes": [
+    "Pinned via git submodule; shallow clone is sufficient for building.",
+    "curl support was removed upstream at this revision; downloads use the vendored cpp-httplib.",
+    "Official Windows prebuilt archives below are the fallback when building from source is not possible.",
+    "Official CUDA archives target CUDA 12.4 / 13.3; a source build uses the locally installed toolkit instead."
+  ],
+  "officialWindowsX64Assets": {
+    "cpu": {
+      "asset": "llama-b10909-bin-win-cpu-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10909/llama-b10909-bin-win-cpu-x64.zip",
+      "sha256": "4d4e3341d94f729d343a8e67e4ab692032645122c99368b88e02868212e639a8"
+    },
+    "cuda-12.4": {
+      "asset": "llama-b10909-bin-win-cuda-12.4-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10909/llama-b10909-bin-win-cuda-12.4-x64.zip",
+      "sha256": "b180a69389a621a456d69b7e557e2cfc3de2c3668607f8f3f92638b76fe420e2"
+    },
+    "cuda-13.3": {
+      "asset": "llama-b10909-bin-win-cuda-13.3-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10909/llama-b10909-bin-win-cuda-13.3-x64.zip",
+      "sha256": "257fef963d0fb5d5f9786760b127bf92ddffc14034befe9c42282be97852cb8b"
+    },
+    "vulkan": {
+      "asset": "llama-b10909-bin-win-vulkan-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10909/llama-b10909-bin-win-vulkan-x64.zip",
+      "sha256": "96b2efab6e6b0498d5d4809a30b7981868be8a1ada9cd76b92f3b1f1fdba4772"
+    }
+  }
+}
