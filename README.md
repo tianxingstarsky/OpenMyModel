@@ -53,8 +53,8 @@ flowchart LR
 | **云后端** | TypeScript + Node.js | WebSocket 服务端 / 请求透明转发到 llama-server / CLI 管理工具 |
 
 > 历史说明：早期版本通过一个本地 Python HTTP 桥管理 llama-server；当前版本已由 Dart 的
-> `InferenceService` 直接管理引擎进程，桌面端默认不再需要 Python。`python/` 目录仅作为
-> 历史实现与兼容资料保留。
+> `InferenceService` 直接管理引擎进程，无需安装 Python，旧桥代码已从仓库移除
+> （需要查阅历史实现请翻看 Git 历史）。
 
 ---
 
@@ -67,7 +67,7 @@ flowchart LR
 - **🔄 OpenAI 兼容 API**：`/v1/chat/completions`、`/v1/models`，支持流式 (SSE)；思考型模型的 `reasoning_content` 在对话界面单独展示
 - **🖼 多模态支持**：mmproj 视觉投影，图片识别能力
 - **💬 内置对话界面**：多图上传 + 文字，流式响应，停止生成即断开底层连接
-- **📦 参数档案**：配置档案本地保存（兼容旧版 Python Bridge 档案文件），一键切换
+- **📦 参数档案**：配置档案本地保存（兼容旧版本导出的档案文件），一键切换
 - **🛠 中文 CLI**：云后端通过向导式命令行完成初始化和管理
 - **⚡ 实时状态**：引擎启动/加载/就绪/错误状态、云端连接状态实时跟踪
 
@@ -97,7 +97,6 @@ output_my_model/
 │   └── pubspec.lock
 ├── third_party/llama.cpp/    # llama.cpp b10909（Git submodule，固定版本）
 ├── third_party/llama.cpp.lock.json  # 版本锁定与官方预编译包 SHA-256
-├── python/                   # 历史 Python Bridge（当前版本桌面端不再使用，仅保留资料）
 ├── backend/                  # TypeScript 云后端
 │   ├── src/
 │   │   ├── index.ts          # Fastify + WebSocket 入口
@@ -333,7 +332,6 @@ npm --prefix scripts run check:release
 npm --prefix backend ci
 npm --prefix backend run build
 npm --prefix backend test
-python -m unittest discover -s python/tests -v   # 历史 Python Bridge 兼容测试
 cd frontend && flutter analyze && flutter test && flutter build windows --release
 python scripts/build_llama_windows.py --backends cpu,cuda   # 内置引擎源码构建
 python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-<rev>

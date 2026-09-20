@@ -5,12 +5,12 @@
 - Flutter 通过 `InferenceService`（`frontend/lib/services/inference_service.dart`）直接管理内置 llama-server 子进程：启动、日志采集（有界、脱敏）、`/health` 轮询、`/props` 能力读取、崩溃检测和停止。只终止自己启动的进程，不按端口或进程名杀进程。
 - 引擎来源固定：`third_party/llama.cpp` Git submodule 锁定 b10909（提交 `a2878d30df0130dde503a7d9ba30d3d21bd71b9f`），元数据在 `third_party/llama.cpp.lock.json`（含官方预编译包 SHA-256 备选）。
 - 本地聊天由 Flutter 直连引擎官方 OpenAI 兼容 API（`/v1/chat/completions` SSE），不再经过任何本地 HTTP 代理；停止生成即关闭底层连接。
-- 配置档案由 Dart `ProfileStore` 直接读写 `%USERPROFILE%\.openmymodel\profiles`，与旧 Python Bridge 的档案文件双向兼容（旧布尔字段自动映射为三态 `auto/on/off`）。
+- 配置档案由 Dart `ProfileStore` 直接读写 `%USERPROFILE%\.openmymodel\profiles`，兼容旧版本导出的档案文件（旧布尔字段自动映射为三态 `auto/on/off`）。
 - Node Bridge 从 Flutter 接收配置和密钥，通过 WebSocket 连接云后端。云端不持久化 API Key，但认证请求中的 Key 会经过云端内存。
 - 云后端使用 Fastify，并按 Key 所属在线节点选择转发目标。不会把用户对话广播到其他节点。
 - 云端只承诺 `/v1/models` 和 `/v1/chat/completions`，不是完整 OpenAI API 实现。引擎本地的其他端点（`/props`、`/slots`、`/metrics` 等）属于引擎原生能力，未全部透出云端。
 - Token 配额、用量计费、持久聊天历史尚未实现。聊天记录只在当前应用会话中保留。
-- `python/` 目录是历史实现，保留用于兼容资料与回归测试；当前桌面运行链路不使用 Python。
+- 旧 Python Bridge 代码已从仓库移除（历史实现见 Git 历史）；桌面运行链路不使用 Python。
 
 ## 中继协议 v2
 
@@ -81,8 +81,6 @@ npm --prefix scripts test
 npm --prefix scripts run check:release
 npm --prefix backend run build
 npm --prefix backend test
-# 历史 Python Bridge 兼容（当前链路不再依赖，保留回归）：
-python/venv/Scripts/python -m unittest discover -s python/tests -v
 ```
 
 从 `frontend/` 执行：

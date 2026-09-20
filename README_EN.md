@@ -54,8 +54,8 @@ flowchart LR
 
 > Historical note: earlier versions managed llama-server through a local Python HTTP
 > bridge. The desktop app now manages the engine process directly via Dart
-> (`InferenceService`) and no longer requires Python. The `python/` directory is kept
-> only as a historical implementation and compatibility reference.
+> (`InferenceService`) and requires no Python; the legacy bridge code has been
+> removed from the repository (see Git history for the old implementation).
 
 ---
 
@@ -68,7 +68,7 @@ flowchart LR
 - **OpenAI-Compatible API**: `/v1/chat/completions`, `/v1/models`, SSE streaming; `reasoning_content` from thinking models is displayed separately in the chat UI
 - **Multimodal Support**: mmproj vision projector, image understanding
 - **Built-in Chat**: Multi-image upload + text, streaming responses, stop-generation cuts the underlying connection
-- **Parameter Profiles**: Saved locally (compatible with legacy Python Bridge profile files), switch with one click
+- **Parameter Profiles**: Saved locally (compatible with profile files exported by older versions), switch with one click
 - **Chinese CLI**: Wizard-driven command-line setup for the cloud backend
 - **Real-Time Status**: Engine start/loading/ready/error states and cloud connection status tracked live
 
@@ -276,7 +276,6 @@ npm --prefix scripts run check:release
 npm --prefix backend ci
 npm --prefix backend run build
 npm --prefix backend test
-python -m unittest discover -s python/tests -v   # legacy Python Bridge compatibility tests
 cd frontend && flutter analyze && flutter test && flutter build windows --release
 python scripts/build_llama_windows.py --backends cpu,cuda   # bundled engine source build
 python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-<rev>

@@ -5,12 +5,6 @@ frontend/build/
 frontend/.flutter-plugins*
 frontend/*.iml
 
-# Python
-python/__pycache__/
-python/*.pyc
-python/venv/
-python/.venv/
-python/.env
 
 # Node / TypeScript
 backend/node_modules/

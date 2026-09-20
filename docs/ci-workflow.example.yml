@@ -26,19 +26,6 @@ jobs:
       - run: npm --prefix backend run build
       - run: npm --prefix backend test
 
-  python:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-          cache-dependency-path: python/requirements.txt
-      - run: python -m pip install -r python/requirements.txt
-      - run: python -m unittest discover -s python/tests -v
-      - run: python -m compileall -q python scripts/package_windows.py
-
   flutter:
     runs-on: windows-latest
     steps:
