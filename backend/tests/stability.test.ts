@@ -539,3 +539,38 @@ test("status_update carries slots and legacy nodes report unknown capacity", asy
   await until(() => tunnel.getOnlineNodes()[0].slots === null);
   assert.equal(tunnel.statusSnapshot().totals.capacitySlots, null);
 });
+
+test("requests beyond slot capacity surface as queued; loading nodes contribute no capacity", async t => {
+  const { app, tunnel, node, post } = await fixture(t);
+  const pendingRelays: Array<() => void> = [];
+  await node({ slots: 2, modelName: "queued-model" }, (msg, send) => {
+    keyOwner(msg, send);
+    if (msg.type === "http_relay") {
+      pendingRelays.push(() => {
+        send(headers(msg.requestId));
+        send({ type: "http_done", requestId: msg.requestId });
+      });
+    }
+  });
+  const flights = Array.from({ length: 5 }, () => post({ model: "queued-model", messages: [] }));
+  await until(() => tunnel.statusSnapshot().totals.activeRequests === 5);
+  let snapshot = tunnel.statusSnapshot();
+  assert.equal(snapshot.totals.capacitySlots, 2);
+  assert.equal(snapshot.totals.queuedRequests, 3, "5 in flight vs 2 slots -> 3 queued in the engine");
+  assert.equal(snapshot.models[0].queued, 3);
+  assert.equal(snapshot.models[0].readyNodes, 1);
+  for (const release of pendingRelays) release();
+  await Promise.all(flights.map(flight => flight.response.then(text)));
+  await until(() => tunnel.statusSnapshot().totals.activeRequests === 0);
+  snapshot = tunnel.statusSnapshot();
+  assert.equal(snapshot.totals.queuedRequests, 0);
+  assert.equal(snapshot.totals.totalRequests, 5);
+
+  // A node still loading (serverRunning=false) must not count towards capacity.
+  const loading = await node({ slots: 8, modelName: "loading-model", serverRunning: false, nodeId: "loading-node" }, keyOwner);
+  await until(() => tunnel.statusSnapshot().models.length === 2);
+  snapshot = tunnel.statusSnapshot();
+  assert.equal(snapshot.totals.capacitySlots, 2, "loading node slots excluded");
+  assert.equal(snapshot.models.find(m => m.model === "loading-model")?.slots, null);
+  loading.socket.terminate();
+});

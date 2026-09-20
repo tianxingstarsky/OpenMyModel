@@ -107,14 +107,19 @@ export function renderStatusPage(): string {
     var modelCount = (data.models || []).length;
     set("models-note", modelCount > 0 ? modelCount + " 个模型在线" : "暂无模型");
     if (t.capacitySlots === null || t.capacitySlots === undefined) {
-      set("concurrency", "未上报");
-      set("util-note", "桌面端升级后将显示并发容量");
+      set("concurrency", t.activeRequests !== undefined ? String(t.activeRequests) : "0");
+      set("util-note", "并发容量未上报（旧桌面端），升级后显示容量与排队");
       document.getElementById("util-fill").style.width = "0%";
     } else {
       setHtml("concurrency", int(t.activeRequests) + ' <small>/ ' + int(t.capacitySlots) + "</small>");
       var pct = t.capacitySlots > 0 ? Math.min(100, Math.round(t.activeRequests / t.capacitySlots * 100)) : 0;
-      document.getElementById("util-fill").style.width = pct + "%";
-      set("util-note", "使用率 " + pct + "%");
+      var queued = t.queuedRequests || 0;
+      var fill = document.getElementById("util-fill");
+      fill.style.width = pct + "%";
+      fill.style.background = queued > 0
+        ? "linear-gradient(90deg, var(--warn), var(--bad))"
+        : "linear-gradient(90deg, var(--ok), var(--warn) 75%, var(--bad))";
+      set("util-note", "使用率 " + pct + "%" + (queued > 0 ? " · 排队中 " + queued : ""));
     }
     set("speed", fmtBytesPerSec(t.throughputBytesPerSec));
     set("total", t.totalRequests !== undefined ? t.totalRequests : "—");
@@ -131,13 +136,22 @@ export function renderStatusPage(): string {
         var utilCell = util === null
           ? '<span style="color:var(--muted)">—</span>'
           : '<span class="mini-bar"><i style="width:' + util + '%"></i></span>' + util + "%";
+        var queuedCell;
+        if (m.slots === null || m.slots === undefined) {
+          queuedCell = '<span style="color:var(--muted)">—</span>';
+        } else if (m.queued > 0) {
+          queuedCell = '<span class="pill" style="color:var(--warn);background:rgba(232,163,61,.12)">' + m.queued + "</span>";
+        } else {
+          queuedCell = "0";
+        }
         var ready = '<span class="pill ' + (m.readyNodes > 0 ? "ok" : "idle") + '">' +
           (m.readyNodes > 0 ? m.readyNodes + "/" + m.nodes + " 就绪" : "加载中") + "</span>";
         return "<tr><td>" + String(m.model).replace(/&/g, "&amp;").replace(/</g, "&lt;") +
           "</td><td>" + ready + '</td><td class="num">' + slotsCell +
-          '</td><td class="num">' + utilCell + '</td><td class="num">' + (m.totalRequests || 0) + "</td></tr>";
+          '</td><td class="num">' + queuedCell + '</td><td class="num">' + utilCell +
+          '</td><td class="num">' + (m.totalRequests || 0) + "</td></tr>";
       }).join("");
-      host.innerHTML = "<table><thead><tr><th>模型</th><th>节点</th><th>并发 (使用/容量)</th><th>使用率</th><th>累计请求</th></tr></thead><tbody>" +
+      host.innerHTML = "<table><thead><tr><th>模型</th><th>节点</th><th>并发 (使用/容量)</th><th>排队</th><th>使用率</th><th>累计请求</th></tr></thead><tbody>" +
         rows + "</tbody></table>";
     }
     var now = new Date();

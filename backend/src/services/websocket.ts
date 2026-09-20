@@ -35,6 +35,8 @@ export interface StatusSnapshot {
     nodesOnline: number;
     capacitySlots: number | null;
     activeRequests: number;
+    /** Derived: in-flight requests beyond slot capacity wait in the engine's own queue. */
+    queuedRequests: number | null;
     totalRequests: number;
     totalBytes: number;
     throughputBytesPerSec: number;
@@ -43,8 +45,11 @@ export interface StatusSnapshot {
     model: string;
     nodes: number;
     readyNodes: number;
+    /** Sum of -np slots over READY nodes serving this model (null = unreported). */
     slots: number | null;
     activeRequests: number;
+    /** Derived queue: max(0, active - slots) once slots are known. */
+    queued: number | null;
     totalRequests: number;
   }>;
 }
@@ -399,9 +404,12 @@ export class WebSocketTunnel {
       const key = conn.node.modelName || "local-model";
       const entry = models.get(key) ?? { model: key, nodes: 0, readyNodes: 0, slots: null, activeRequests: 0, totalRequests: 0 };
       entry.nodes++;
-      if (conn.node.serverRunning) entry.readyNodes++;
-      if (conn.node.slots !== null && conn.node.slots !== undefined) {
-        entry.slots = (entry.slots ?? 0) + conn.node.slots;
+      // Capacity counts READY nodes only; a loading node cannot serve requests.
+      if (conn.node.serverRunning) {
+        entry.readyNodes++;
+        if (conn.node.slots !== null && conn.node.slots !== undefined) {
+          entry.slots = (entry.slots ?? 0) + conn.node.slots;
+        }
       }
       entry.activeRequests += conn.stats.activeRequests;
       entry.totalRequests += conn.stats.totalRequests;
@@ -409,20 +417,27 @@ export class WebSocketTunnel {
     }
     let capacitySlots: number | null = null;
     for (const conn of online) {
-      if (conn.node.slots !== null && conn.node.slots !== undefined) {
+      if (conn.node.serverRunning && conn.node.slots !== null && conn.node.slots !== undefined) {
         capacitySlots = (capacitySlots ?? 0) + conn.node.slots;
       }
     }
+    const active = this.globalStats.activeRequests;
+    // Beyond-capacity in-flight requests are waiting inside llama-server's own queue.
+    const queued = capacitySlots !== null ? Math.max(0, active - capacitySlots) : null;
     return {
       totals: {
         nodesOnline: online.length,
         capacitySlots,
-        activeRequests: this.globalStats.activeRequests,
+        activeRequests: active,
+        queuedRequests: queued,
         totalRequests: this.globalStats.totalRequests,
         totalBytes: this.globalStats.totalBytes,
         throughputBytesPerSec: this.globalStats.known ? this.globalStats.ewmaBytesPerSec : 0,
       },
-      models: [...models.values()],
+      models: [...models.values()].map(entry => ({
+        ...entry,
+        queued: entry.slots !== null ? Math.max(0, entry.activeRequests - entry.slots) : null,
+      })),
     };
   }
 
