@@ -112,7 +112,12 @@ python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-native
 
 打包器会先重新执行 Flutter Release 构建并检查退出码，将**本次 Flutter 构建、指定引擎目录、Node Bridge 和 ws 依赖**放入新目录（引擎位于 `runtime/llama/`）；拒绝覆盖任何现有输出，且不会修改用户的 release 树。它排除日志、缓存和 PDB，并记录 `build-manifest.json`（Git revision、工作区是否有改动、引擎元数据、逐文件 SHA-256）。打包后仍需启动该目录的 exe 验证。
 
-6. （可选）生成安装包（单文件 setup .exe，Inno Setup）：
+6. **发布**：GitHub Release 只发布签名安装包，不再上传便携 ZIP。生成后用 gh 发布：
+
+```bash
+python scripts/make_installer.py --payload artifacts/OpenMyModel-win-x64-<rev>   --sign-pfx artifacts/codesign/openmymodel-selfsign.pfx   --sign-password-file artifacts/codesign/pfx-password.txt
+gh release create v<版本> artifacts/OpenMyModel-Setup-1.0.0-<rev>.exe   --title "OpenMyModel v<版本>" --notes-file notes.md
+```
 
 ```bash
 python scripts/make_installer.py --payload artifacts/OpenMyModel-win-x64-<rev>
