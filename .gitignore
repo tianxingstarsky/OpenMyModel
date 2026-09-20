@@ -23,6 +23,7 @@ scripts/*.py
 !scripts/package_windows.py
 !scripts/build_llama_windows.py
 !scripts/fetch_official_engine.py
+!scripts/make_installer.py
 !scripts/sync_bridge.py
 !scripts/package_windows.py
 scripts/node_modules/

@@ -112,6 +112,15 @@ python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-native
 
 打包器会先重新执行 Flutter Release 构建并检查退出码，将**本次 Flutter 构建、指定引擎目录、Node Bridge 和 ws 依赖**放入新目录（引擎位于 `runtime/llama/`）；拒绝覆盖任何现有输出，且不会修改用户的 release 树。它排除日志、缓存和 PDB，并记录 `build-manifest.json`（Git revision、工作区是否有改动、引擎元数据、逐文件 SHA-256）。打包后仍需启动该目录的 exe 验证。
 
+6. （可选）生成安装包（单文件 setup .exe，Inno Setup）：
+
+```bash
+python scripts/make_installer.py --payload artifacts/OpenMyModel-win-x64-<rev>
+# 需要 ISCC.exe（winget install --id JRSoftware.InnoSetup -e），或 --iscc 指定路径
+```
+
+安装包按用户级安装（无需管理员），默认目录 `%LOCALAPPDATA%\Programs\OpenMyModel`，含开始菜单/桌面快捷方式与卸载器；卸载不触碰用户数据（配置档案在 `%USERPROFILE%\.openmymodel`，偏好在 `%APPDATA%`）。安装包未做代码签名，首次运行会有 SmartScreen 提示。
+
 ## 部署注意事项
 
 - Docker 从 `.env` 读取明确配置的 `ADMIN_PASSWORD`，不再内置通用默认密码。将 `.env.example` 复制后填写，不要提交 `.env`。

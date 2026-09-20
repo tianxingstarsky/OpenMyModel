@@ -335,6 +335,7 @@ npm --prefix backend test
 cd frontend && flutter analyze && flutter test && flutter build windows --release
 python scripts/build_llama_windows.py --backends cpu,cuda   # 内置引擎源码构建
 python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-<rev>
+python scripts/make_installer.py --payload artifacts/OpenMyModel-win-x64-<rev>   # 可选：生成安装包
 ```
 
 Docker 首次启动前将 `.env.example` 复制为 `.env` 并填写强密码，再运行 `docker compose up -d --build`。公网部署请在反向代理终止 TLS，并使用 `https://` 地址连接桌面端；仓库内 nginx 示例本身不提供证书。
