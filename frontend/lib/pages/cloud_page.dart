@@ -17,6 +17,9 @@ class CloudPage extends StatefulWidget {
   final String modelName;
   final bool serverRunning;
   final bool serverReady;
+
+  /// 运行中引擎的并发槽位（-np）；null = 未运行/未上报。
+  final int? slots;
   const CloudPage({
     super.key,
     this.llamaUrl = 'http://127.0.0.1:8080',
@@ -24,6 +27,7 @@ class CloudPage extends StatefulWidget {
     this.modelName = '',
     this.serverRunning = false,
     this.serverReady = false,
+    this.slots,
   });
   @override
   State<CloudPage> createState() => CloudPageState();
@@ -162,11 +166,13 @@ class CloudPageState extends State<CloudPage> {
         widget.llamaApiKey != oldWidget.llamaApiKey)
       _service.setLlamaUrl(widget.llamaUrl, apiKey: widget.llamaApiKey);
     if (widget.modelName != oldWidget.modelName ||
-        widget.serverReady != oldWidget.serverReady) {
+        widget.serverReady != oldWidget.serverReady ||
+        widget.slots != oldWidget.slots) {
       _service.setModelName(widget.modelName);
       _service.sendStatusUpdate(
         widget.modelName,
         serverRunning: widget.serverReady,
+        slots: widget.slots,
       );
     }
     if (_loaded &&
@@ -200,6 +206,7 @@ class CloudPageState extends State<CloudPage> {
         password,
         nodeName: 'OpenMyModel-本地节点',
         serverRunning: widget.serverReady,
+        slots: widget.slots,
       );
       if (!mounted || _closing) return;
       setState(() {

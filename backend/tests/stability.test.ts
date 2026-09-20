@@ -474,3 +474,68 @@ test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, aut
   pending.req.destroy();
   await until(() => upstreamClosed && bridge.activeRequests.size === 0 && tunnel.pendingRequestCount === 0);
 });
+
+test("public status page aggregates slots, concurrency and throughput without sensitive fields", async t => {
+  const { app, node, post } = await fixture(t);
+  const relay = (msg: Message, send: (m: Message) => void) => {
+    keyOwner(msg, send);
+    if (msg.type === "http_relay") {
+      send(headers(msg.requestId));
+      send({ type: "http_chunk", requestId: msg.requestId, data: "data: {\"t\":\"one\"}\n\n" });
+      send({ type: "http_chunk", requestId: msg.requestId, data: "data: {\"t\":\"two\"}\n\n" });
+      send({ type: "http_done", requestId: msg.requestId });
+    }
+  };
+  await node({ slots: 4 }, relay);
+  for (let i = 0; i < 2; i++) {
+    const response = await post().response;
+    assert.equal(await text(response), 'data: {"t":"one"}\n\ndata: {"t":"two"}\n\n');
+  }
+  const status = await app.inject({ method: "GET", url: "/status.json" });
+  assert.equal(status.statusCode, 200);
+  const data = status.json();
+  assert.equal(data.totals.nodesOnline, 1);
+  assert.equal(data.totals.capacitySlots, 4);
+  assert.equal(data.totals.activeRequests, 0);
+  assert.equal(data.totals.totalRequests, 2);
+  assert.ok(data.totals.totalBytes > 0, "relayed bytes counted");
+  assert.ok(data.totals.throughputBytesPerSec > 0, "EWMA throughput seeded");
+  assert.equal(data.models.length, 1);
+  assert.equal(data.models[0].model, "model-a");
+  assert.equal(data.models[0].slots, 4);
+  assert.equal(data.models[0].readyNodes, 1);
+  assert.equal(data.models[0].totalRequests, 2);
+  // No node identifiers in the public payload.
+  assert.ok(!status.body.includes("node-1"));
+
+  const page = await app.inject({ method: "GET", url: "/" });
+  assert.equal(page.statusCode, 200);
+  assert.ok(page.headers["content-type"].includes("text/html"));
+  assert.ok(page.body.includes("服务状态"));
+  assert.ok(page.body.includes("/status.json"));
+  const api = await app.inject({ method: "GET", url: "/api" });
+  assert.equal(api.json().endpoints.statusData, "/status.json");
+});
+
+test("status_update carries slots and legacy nodes report unknown capacity", async t => {
+  const { app, tunnel, node } = await fixture(t);
+  const handle = (msg: Message, send: (m: Message) => void) => {
+    keyOwner(msg, send);
+    if (msg.type === "http_relay") {
+      send(headers(msg.requestId));
+      send({ type: "http_done", requestId: msg.requestId });
+    }
+  };
+  const legacy = await node({ modelName: "legacy-model" }, handle); // no slots
+  let snapshot = tunnel.statusSnapshot();
+  assert.equal(snapshot.totals.capacitySlots, null);
+  assert.equal(snapshot.models[0].model, "legacy-model");
+  assert.equal(snapshot.models[0].slots, null);
+  legacy.send({ type: "status_update", modelName: "legacy-model", serverRunning: true, slots: 2 });
+  await until(() => tunnel.statusSnapshot().totals.capacitySlots === 2);
+  snapshot = tunnel.statusSnapshot();
+  assert.equal(snapshot.models[0].slots, 2);
+  legacy.send({ type: "status_update", modelName: "legacy-model", serverRunning: true, slots: "bogus" });
+  await until(() => tunnel.getOnlineNodes()[0].slots === null);
+  assert.equal(tunnel.statusSnapshot().totals.capacitySlots, null);
+});

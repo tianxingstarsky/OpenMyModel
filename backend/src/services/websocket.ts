@@ -14,6 +14,39 @@ export interface NodeInfo {
   modelConfig: string;
   isOnline: boolean;
   serverRunning: boolean;
+  /** Optional parallel-slot capacity (-np) reported by newer desktop builds. */
+  slots?: number | null;
+}
+
+export interface TunnelStats {
+  activeRequests: number;
+  totalRequests: number;
+  totalBytes: number;
+  /** Exponentially weighted mean of completed-relay output throughput, bytes/sec. */
+  ewmaBytesPerSec: number;
+}
+
+interface NodeStatState extends TunnelStats {
+  known: boolean;
+}
+
+export interface StatusSnapshot {
+  totals: {
+    nodesOnline: number;
+    capacitySlots: number | null;
+    activeRequests: number;
+    totalRequests: number;
+    totalBytes: number;
+    throughputBytesPerSec: number;
+  };
+  models: Array<{
+    model: string;
+    nodes: number;
+    readyNodes: number;
+    slots: number | null;
+    activeRequests: number;
+    totalRequests: number;
+  }>;
 }
 
 export interface TunnelOptions {
@@ -48,6 +81,9 @@ interface PendingRequest {
   chunks?: string[];
   onHeaders?: RelayOptions["onHeaders"];
   onChunk?: RelayOptions["onChunk"];
+  /** Output bytes relayed for this request (approximated by UTF-8 length). */
+  bytes: number;
+  startedAt: number;
 }
 
 interface TunnelConnection {
@@ -61,6 +97,11 @@ interface TunnelConnection {
   lastPing?: number;
   authTimeout?: NodeJS.Timeout;
   pending: Map<string, PendingRequest>;
+  stats: NodeStatState;
+}
+
+function freshStats(): NodeStatState {
+  return { activeRequests: 0, totalRequests: 0, totalBytes: 0, ewmaBytesPerSec: 0, known: false };
 }
 
 export class WebSocketTunnel {
@@ -68,15 +109,21 @@ export class WebSocketTunnel {
   private sockets = new Set<TunnelConnection>();
   private heartbeat?: NodeJS.Timeout;
   private selectionCursor = 0;
+  private readonly startedAt = Date.now();
+  private globalStats: NodeStatState = freshStats();
 
   constructor(private readonly options: TunnelOptions) {}
+
+  private static parseSlots(value: unknown): number | null {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 1024 ? value : null;
+  }
 
   registerRoutes(app: FastifyInstance): void {
     app.get("/ws/node", { websocket: true }, (socket, request) => {
       const conn: TunnelConnection = {
         ws: socket, connectionId: randomUUID(),
-        node: { id: "", name: "Unnamed node", modelName: "", modelConfig: "", isOnline: true, serverRunning: true },
-        authenticated: false, authenticating: false, retired: false, pending: new Map(),
+        node: { id: "", name: "Unnamed node", modelName: "", modelConfig: "", isOnline: true, serverRunning: true, slots: null },
+        authenticated: false, authenticating: false, retired: false, pending: new Map(), stats: freshStats(),
       };
       this.sockets.add(conn);
       conn.authTimeout = setTimeout(() => this.retire(conn, new RelayError("Node authentication timed out")), this.options.authTimeoutMs ?? 10000);
@@ -131,6 +178,7 @@ export class WebSocketTunnel {
         modelName: typeof msg.modelName === "string" ? msg.modelName : "",
         modelConfig: typeof msg.modelConfig === "string" ? msg.modelConfig : "",
         serverRunning: typeof msg.serverRunning === "boolean" ? msg.serverRunning : true,
+        slots: WebSocketTunnel.parseSlots(msg.slots),
         isOnline: true,
       };
       const previous = this.connections.get(conn.node.id);
@@ -150,6 +198,7 @@ export class WebSocketTunnel {
     if (msg.type === "status_update") {
       if (typeof msg.modelName === "string") conn.node.modelName = msg.modelName;
       if (typeof msg.serverRunning === "boolean") conn.node.serverRunning = msg.serverRunning;
+      if (msg.slots !== undefined) conn.node.slots = WebSocketTunnel.parseSlots(msg.slots);
       this.options.onNodeChange?.({ ...conn.node });
       return;
     }
@@ -177,6 +226,7 @@ export class WebSocketTunnel {
         if (!pending.headersReceived) { fail("Upstream omitted http_headers; update the compute node bridge"); return; }
         if (typeof msg.data !== "string") { fail("Invalid upstream chunk"); return; }
         try {
+          pending.bytes += (msg.data as string).length;
           if (pending.onChunk) pending.onChunk(msg.data);
           else pending.chunks!.push(msg.data);
           this.arm(conn, msg.requestId, pending);
@@ -253,6 +303,7 @@ export class WebSocketTunnel {
       const requestId = randomUUID();
       this.addPending(conn, requestId, {
         kind: "key", resolve: value => resolve(value === true), reject, cleanup: () => {}, headersReceived: false,
+        bytes: 0, startedAt: Date.now(),
       }, signal);
       if (conn.pending.has(requestId) && !this.send(conn, { type: "validate_key", requestId, key: apiKey })) {
         this.fail(conn, requestId, new RelayError("Compute node send failed"));
@@ -298,10 +349,31 @@ export class WebSocketTunnel {
     }
     return new Promise((resolve, reject) => {
       const requestId = options.requestId ?? randomUUID();
-      this.addPending(conn, requestId, {
-        kind: "http", resolve: value => resolve(value as string), reject, cleanup: () => {}, headersReceived: false,
+      let settled = false;
+      const pending: PendingRequest = {
+        kind: "http",
+        resolve: value => { recordSettle(); resolve(value as string); },
+        reject: error => { recordSettle(); reject(error); },
+        cleanup: () => {}, headersReceived: false,
         chunks: options.onChunk ? undefined : [], onHeaders: options.onHeaders, onChunk: options.onChunk,
-      }, options.signal);
+        bytes: 0, startedAt: Date.now(),
+      };
+      const recordSettle = () => {
+        if (settled) return;
+        settled = true;
+        const seconds = Math.max((Date.now() - pending.startedAt) / 1000, 0.001);
+        const instant = pending.bytes / seconds;
+        for (const stats of [conn.stats, this.globalStats]) {
+          stats.activeRequests--;
+          stats.totalRequests++;
+          stats.totalBytes += pending.bytes;
+          stats.ewmaBytesPerSec = stats.known ? 0.3 * instant + 0.7 * stats.ewmaBytesPerSec : instant;
+          stats.known = true;
+        }
+      };
+      conn.stats.activeRequests++;
+      this.globalStats.activeRequests++;
+      this.addPending(conn, requestId, pending, options.signal);
       if (conn.pending.has(requestId) && !this.send(conn, { type: "http_relay", requestId, path: request.path, body: request.body, method: "POST" })) {
         this.fail(conn, requestId, new RelayError("Compute node send failed"));
       }
@@ -315,6 +387,43 @@ export class WebSocketTunnel {
 
   getOnlineNodes(): NodeInfo[] {
     return [...this.connections.values()].map(conn => ({ ...conn.node }));
+  }
+
+  /** Public, non-sensitive aggregation for the status page: no node IDs,
+   * names, addresses or keys — only model-level rollups and totals. */
+  statusSnapshot(): StatusSnapshot {
+    const online = [...this.connections.values()].filter(conn => conn.authenticated && !conn.retired);
+    const models = new Map<string, { model: string; nodes: number; readyNodes: number; slots: number | null; activeRequests: number; totalRequests: number }>();
+    for (const conn of online) {
+      // Empty modelName serves as the routing default "local-model".
+      const key = conn.node.modelName || "local-model";
+      const entry = models.get(key) ?? { model: key, nodes: 0, readyNodes: 0, slots: null, activeRequests: 0, totalRequests: 0 };
+      entry.nodes++;
+      if (conn.node.serverRunning) entry.readyNodes++;
+      if (conn.node.slots !== null && conn.node.slots !== undefined) {
+        entry.slots = (entry.slots ?? 0) + conn.node.slots;
+      }
+      entry.activeRequests += conn.stats.activeRequests;
+      entry.totalRequests += conn.stats.totalRequests;
+      models.set(key, entry);
+    }
+    let capacitySlots: number | null = null;
+    for (const conn of online) {
+      if (conn.node.slots !== null && conn.node.slots !== undefined) {
+        capacitySlots = (capacitySlots ?? 0) + conn.node.slots;
+      }
+    }
+    return {
+      totals: {
+        nodesOnline: online.length,
+        capacitySlots,
+        activeRequests: this.globalStats.activeRequests,
+        totalRequests: this.globalStats.totalRequests,
+        totalBytes: this.globalStats.totalBytes,
+        throughputBytesPerSec: this.globalStats.known ? this.globalStats.ewmaBytesPerSec : 0,
+      },
+      models: [...models.values()],
+    };
   }
 
   get pendingRequestCount(): number {

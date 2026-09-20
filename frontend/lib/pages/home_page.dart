@@ -389,6 +389,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
             modelName: _modelName(runtime),
             serverRunning: runtime.isRunning,
             serverReady: runtime.state == EngineState.ready,
+            slots: _inference.runningConfig?.slots,
           ),
         ],
       ),

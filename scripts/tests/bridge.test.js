@@ -195,3 +195,55 @@ test("failed authentication emits an error and closes cleanly", async (t) => {
   assert.ok(f.events.some((m) => m.type === "error" && m.message === "wrong password"));
   assert.equal(f.bridge.activeRequests.size, 0);
 });
+
+test("slots capacity is forwarded in auth and status_update", async (t) => {
+  const { bridge, messages, send } = await fixture(t, () => {});
+  const auth = messages.find((message) => message.type === "auth");
+  assert.equal(auth.slots, undefined, "omitted when the desktop does not report slots");
+  bridge.command({ cmd: "status_update", modelName: "m", serverRunning: true, slots: 3 });
+  await until(() => {
+    const updates = messages.filter((message) => message.type === "status_update");
+    return updates.length > 0 && updates[updates.length - 1].slots === 3;
+  });
+  bridge.command({ cmd: "status_update", modelName: "m", serverRunning: true, slots: -2 });
+  await until(() => {
+    const updates = messages.filter((message) => message.type === "status_update");
+    return updates.length >= 2 && updates[updates.length - 1].slots === undefined;
+  });
+  send({ type: "ping" });
+});
+
+test("connect with slots reports capacity in the auth message", async (t) => {
+  const http = require("node:http");
+  const { once } = require("node:events");
+  const { WebSocketServer } = require("ws");
+  const upstream = http.createServer(() => {});
+  upstream.listen(0, "127.0.0.1");
+  await once(upstream, "listening");
+  const cloud = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await once(cloud, "listening");
+  const auths = [];
+  cloud.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw);
+      if (message.type === "auth") {
+        auths.push(message);
+        socket.send(JSON.stringify({ type: "auth_ok", nodeId: "n2" }));
+      }
+    });
+  });
+  const bridge = new CloudBridge(() => {});
+  bridge.command({
+    cmd: "connect", url: `http://127.0.0.1:${cloud.address().port}`, password: "p",
+    llamaUrl: `http://localhost:${upstream.address().port}/v1`, slots: 6,
+  });
+  await until(() => auths.length > 0);
+  assert.equal(auths[0].slots, 6);
+  t.after(async () => {
+    bridge.disconnect();
+    for (const client of cloud.clients) client.terminate();
+    await new Promise((resolve) => cloud.close(resolve));
+    upstream.closeAllConnections();
+    await new Promise((resolve) => upstream.close(resolve));
+  });
+});

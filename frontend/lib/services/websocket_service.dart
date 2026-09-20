@@ -96,10 +96,11 @@ class WebSocketService {
     String password, {
     String nodeName = 'local-node',
     bool serverRunning = true,
+    int? slots,
   }) {
     if (_disposed) return Future.value(false);
     if (_connecting != null) return _connecting!;
-    final attempt = _connect(serverUrl, password, nodeName, serverRunning);
+    final attempt = _connect(serverUrl, password, nodeName, serverRunning, slots);
     _connecting = attempt;
     unawaited(
       attempt.whenComplete(() {
@@ -114,6 +115,7 @@ class WebSocketService {
     String password,
     String nodeName,
     bool serverRunning,
+    int? slots,
   ) async {
     _cleanup();
     final generation = _generation;
@@ -195,6 +197,7 @@ class WebSocketService {
         'llamaApiKey': _llamaApiKey,
         'modelName': _modelName,
         'serverRunning': serverRunning,
+        if (slots != null) 'slots': slots,
       });
       final connected = await result.future.timeout(
         const Duration(seconds: 12),
@@ -215,12 +218,13 @@ class WebSocketService {
     }
   }
 
-  void sendStatusUpdate(String name, {bool serverRunning = true}) {
+  void sendStatusUpdate(String name, {bool serverRunning = true, int? slots}) {
     _modelName = name;
     _send({
       'cmd': 'status_update',
       'modelName': name,
       'serverRunning': serverRunning,
+      if (slots != null) 'slots': slots,
     });
   }
 

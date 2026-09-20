@@ -32,6 +32,7 @@ class CloudBridge {
     this.nodeId = "";
     this.modelName = "";
     this.serverRunning = true;
+    this.slots = null;
     this.llamaUrl = new URL("http://127.0.0.1:8080");
     this.llamaApiKey = "";
     this.localKeys = [];
@@ -61,6 +62,7 @@ class CloudBridge {
     this.disconnect();
     this.modelName = command.modelName || "";
     this.serverRunning = command.serverRunning !== false;
+    this.slots = Number.isInteger(command.slots) && command.slots >= 0 && command.slots <= 1024 ? command.slots : null;
     this.nodeId = command.nodeId || this.nodeId;
     const socket = new WebSocket(address, { handshakeTimeout: 10000, maxPayload: 70 * 1024 * 1024 });
     this.ws = socket;
@@ -70,6 +72,7 @@ class CloudBridge {
         type: "auth", password: command.password, nodeId: this.nodeId,
         nodeName: command.nodeName || "OpenMyModel-Node", modelName: this.modelName,
         serverRunning: this.serverRunning, protocolVersion: 2,
+        ...(this.slots !== null ? { slots: this.slots } : {}),
       });
     });
     socket.on("message", (raw) => {
@@ -227,7 +230,13 @@ class CloudBridge {
       case "status_update":
         this.modelName = command.modelName || "";
         if (typeof command.serverRunning === "boolean") this.serverRunning = command.serverRunning;
-        if (this.ws) this.send(this.ws, { type: "status_update", modelName: this.modelName, serverRunning: this.serverRunning });
+        if (command.slots !== undefined) {
+          this.slots = Number.isInteger(command.slots) && command.slots >= 0 && command.slots <= 1024 ? command.slots : null;
+        }
+        if (this.ws) this.send(this.ws, {
+          type: "status_update", modelName: this.modelName, serverRunning: this.serverRunning,
+          ...(this.slots !== null ? { slots: this.slots } : {}),
+        });
         break;
       case "status":
         this.emit({ type: "status", connected: this.connected, nodeId: this.nodeId, modelName: this.modelName, activeRequests: this.activeRequests.size });

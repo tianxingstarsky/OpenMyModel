@@ -69,6 +69,7 @@ flowchart LR
 - **Multimodal Support**: mmproj vision projector, image understanding
 - **Built-in Chat**: Multi-image upload + text, streaming responses, stop-generation cuts the underlying connection
 - **Parameter Profiles**: Saved locally (compatible with profile files exported by older versions), switch with one click
+- **Public Status Page**: the cloud backend's landing page shows online nodes, concurrency capacity/utilization, throughput and per-model concurrency — public aggregates only
 - **Chinese CLI**: Wizard-driven command-line setup for the cloud backend
 - **Real-Time Status**: Engine start/loading/ready/error states and cloud connection status tracked live
 
@@ -201,7 +202,7 @@ map $http_upgrade $connection_upgrade {
 
 ### Verify
 
-Visit `http://your-domain/` — should return JSON.
+Visit `http://your-domain/` — the OpenMyModel service status page should render (nodes online, concurrency, throughput).
 
 ---
 

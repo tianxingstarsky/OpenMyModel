@@ -7,6 +7,7 @@ import { registerOpenAIRoutes } from "./routes/openai";
 import { registerAdminRoutes } from "./routes/admin";
 import { TunnelOptions, WebSocketTunnel } from "./services/websocket";
 import { AdminAuthenticator } from "./services/auth";
+import { renderStatusPage } from "./statusPage";
 
 export interface AppOptions {
   dataDir?: string;
@@ -61,9 +62,14 @@ export async function buildApp(options: AppOptions = {}) {
     registerAdminRoutes(app, tunnel, auth);
     tunnel.registerRoutes(app);
     if (options.heartbeat !== false) tunnel.startHeartbeat();
-    app.get("/", async request => ({
+    // Public status page (non-sensitive aggregates only) + machine-readable data.
+    app.get("/", async (_request, reply) => {
+      reply.type("text/html; charset=utf-8").send(renderStatusPage());
+    });
+    app.get("/status.json", async () => tunnel.statusSnapshot());
+    app.get("/api", async request => ({
       name: "OpenMyModel Cloud API", version: "1.0.0", domain: request.hostname || "localhost",
-      endpoints: { models: "/v1/models", chat: "/v1/chat/completions", admin: "/admin/*", websocket: "/ws/node" },
+      endpoints: { status: "/", statusData: "/status.json", models: "/v1/models", chat: "/v1/chat/completions", admin: "/admin/*", websocket: "/ws/node" },
     }));
     return app;
   } catch (error) {

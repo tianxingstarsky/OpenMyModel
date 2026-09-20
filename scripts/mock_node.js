@@ -14,6 +14,7 @@ bridge.command({
   password, llamaUrl: process.env.LLAMA_URL || "http://127.0.0.1:8080",
   llamaApiKey: process.env.LLAMA_API_KEY || "", nodeName: "smoke-node",
   modelName: process.env.MODEL_NAME || "local-model",
+  ...(process.env.SLOTS ? { slots: Number(process.env.SLOTS) } : {}),
 });
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => { bridge.disconnect(); process.exit(0); });
