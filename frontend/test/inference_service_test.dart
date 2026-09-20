@@ -330,4 +330,88 @@ void main() {
     expect(health.loadingHits, 1);
     expect(service.isReady, true);
   });
+
+  group('引擎自动选择（真实设备探测）', () {
+    late Directory engineRoot;
+
+    setUp(() async {
+      engineRoot = await Directory.systemTemp.createTemp('omm-engines-test');
+      for (final backend in ['cuda', 'vulkan', 'cpu']) {
+        final dir = Directory(
+          '${engineRoot.path}${Platform.pathSeparator}llama-b10909-$backend-x64',
+        )..createSync();
+        File('${dir.path}${Platform.pathSeparator}llama-server.exe')
+            .writeAsStringSync('');
+        File('${dir.path}${Platform.pathSeparator}engine.json')
+            .writeAsStringSync('{"tag":"b10909","backend":"$backend"}');
+      }
+    });
+
+    tearDown(() async {
+      await engineRoot.delete(recursive: true);
+    });
+
+    String exeOf(String backend) =>
+        '${engineRoot.path}${Platform.pathSeparator}'
+        'llama-b10909-$backend-x64${Platform.pathSeparator}llama-server.exe';
+
+    Future<InferenceService> discoveredWith(
+      Future<String> Function(String exe) prober,
+    ) async {
+      final service = InferenceService(
+        engineDirOverride: () => engineRoot.path,
+        deviceProber: prober,
+      );
+      addTearDown(service.dispose);
+      await service.discoverEngines();
+      // 探测在后台异步完成；假探针无真实延迟，短等待即可稳定。
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      return service;
+    }
+
+    test('N 卡：CUDA 报告设备时优先于 Vulkan', () async {
+      final service = await discoveredWith(
+        (exe) async => exe == exeOf('cuda') ? '  CUDA0: NVIDIA RTX (16GB)' : '',
+      );
+      expect(service.selectedEngine!.backend, 'cuda');
+    });
+
+    test('A 卡/无 N 卡：CUDA 无设备时选 Vulkan', () async {
+      final service = await discoveredWith(
+        (exe) async => exe == exeOf('vulkan')
+            ? 'Available devices:\n  Vulkan0: AMD Radeon (16GB)'
+            : 'Available devices:\n',
+      );
+      expect(service.selectedEngine!.backend, 'vulkan');
+    });
+
+    test('无任何 GPU：保持 CPU 基准', () async {
+      final service = await discoveredWith((exe) async => '');
+      expect(service.selectedEngine!.backend, 'cpu');
+    });
+
+    test('探测异常按无设备处理，不阻塞其他引擎', () async {
+      final service = await discoveredWith(
+        (exe) async => exe == exeOf('vulkan')
+            ? throw StateError('driver load failed')
+            : '',
+      );
+      expect(service.selectedEngine!.backend, 'cpu');
+    });
+
+    test('用户手动选择后探测不再覆盖', () async {
+      final service = InferenceService(
+        engineDirOverride: () => engineRoot.path,
+        deviceProber: (exe) async => exe == exeOf('cuda') ? '  CUDA0: X' : '',
+      );
+      addTearDown(service.dispose);
+      await service.discoverEngines();
+      // 在异步探测完成前手动选择 Vulkan。
+      final vulkan = service.engines
+          .firstWhere((e) => e.backend == 'vulkan');
+      service.selectEngine(vulkan);
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(service.selectedEngine!.backend, 'vulkan');
+    });
+  });
 }

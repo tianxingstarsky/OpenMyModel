@@ -190,10 +190,27 @@ typedef EngineProcessFactory =
       String? workingDirectory,
     });
 
+/// 探测引擎可用的计算设备：返回 `--list-devices` 的原始输出。
+typedef DeviceProber = Future<String> Function(String executable);
+
+Future<String> _probeDevicesDefault(String executable) async {
+  final result = await Process.run(
+    executable,
+    ['--list-devices'],
+    workingDirectory: File(executable).parent.path,
+    stdoutEncoding: const Utf8Codec(allowMalformed: true),
+    stderrEncoding: const Utf8Codec(allowMalformed: true),
+  ).timeout(const Duration(seconds: 10));
+  return '${result.stdout ?? ''}\n${result.stderr ?? ''}';
+}
+
+final RegExp _gpuDeviceLine = RegExp(r'^\s*(CUDA|Vulkan)\d*\s*:', multiLine: true);
+
 class InferenceService {
   final http.Client Function() _clientFactory;
   final EngineProcessFactory _processFactory;
   final String? Function() _engineDirOverride;
+  final DeviceProber _deviceProber;
   final Duration healthInterval;
   final Duration healthTimeout;
 
@@ -207,6 +224,8 @@ class InferenceService {
   StreamSubscription? _stdoutSub;
   StreamSubscription? _stderrSub;
   final List<String> _logs = [];
+  final Map<String, Future<String>> _probeCache = {};
+  bool _autoSelectedEngine = false;
   ServerConfig? _runningConfig;
   bool _userStopping = false;
   Future<void>? _lifecycleLock;
@@ -220,6 +239,7 @@ class InferenceService {
     http.Client Function()? clientFactory,
     EngineProcessFactory? processFactory,
     String? Function()? engineDirOverride,
+    DeviceProber? deviceProber,
     this.healthInterval = const Duration(milliseconds: 400),
     this.healthTimeout = const Duration(minutes: 10),
   })  : _clientFactory = clientFactory ?? http.Client.new,
@@ -227,7 +247,8 @@ class InferenceService {
             ((exe, args, {workingDirectory}) async => RealEngineProcess(
                   await Process.start(exe, args, runInShell: false),
                 )),
-        _engineDirOverride = engineDirOverride ?? (() => null);
+        _engineDirOverride = engineDirOverride ?? (() => null),
+        _deviceProber = deviceProber ?? _probeDevicesDefault;
 
   EngineRuntime get runtime => _runtime;
 
@@ -277,12 +298,54 @@ class InferenceService {
     engines.sort(_backendPriority);
     if (selectedEngine == null ||
         !engines.any((e) => e.executable == selectedEngine!.executable)) {
-      selectedEngine = engines.isEmpty ? null : engines.first;
+      // 先落到 CPU 基准（任何机器都能启动），随后按真实设备探测升级到
+      // CUDA/Vulkan；没有对应硬件时不会误选（例如 A 卡机器不选 CUDA）。
+      final cpu = engines
+          .where((e) => e.backend.toLowerCase() == 'cpu')
+          .toList();
+      if (cpu.isNotEmpty || engines.isNotEmpty) {
+        selectedEngine = cpu.isNotEmpty ? cpu.first : engines.last;
+        _autoSelectedEngine = true;
+        unawaited(_upgradeSelectionByDevices());
+      } else {
+        selectedEngine = null;
+      }
     }
     _emit(_runtime.copyWith(
       engine: selectedEngine,
       state: selectedEngine == null ? EngineState.notFound : _runtime.state,
     ));
+  }
+
+  Future<void> _upgradeSelectionByDevices() async {
+    if (_disposed || !_autoSelectedEngine) return;
+    // 按优先级逐个探测非 CPU 引擎，命中第一个报告真实 GPU 的。
+    final candidates = engines
+        .where((e) => e.backend.toLowerCase() != 'cpu')
+        .toList()
+      ..sort(_backendPriority);
+    for (final engine in candidates) {
+      if (_disposed || !_autoSelectedEngine || _runtime.isRunning) return;
+      String output;
+      try {
+        output = await _probeCache.putIfAbsent(engine.executable, () {
+          return _deviceProber(engine.executable)
+              .catchError((Object _) => '')
+              .timeout(const Duration(seconds: 12), onTimeout: () => '');
+        });
+      } on Exception {
+        continue;
+      }
+      if (_disposed || !_autoSelectedEngine) return;
+      if (_gpuDeviceLine.hasMatch(output)) {
+        selectedEngine = engine;
+        _autoSelectedEngine = false;
+        _emit(_runtime.copyWith(engine: engine, lastError: ''));
+        return;
+      }
+    }
+    // 没有任何 GPU 后端可用：保持 CPU。
+    _autoSelectedEngine = false;
   }
 
   static int _backendPriority(EngineInfo a, EngineInfo b) {
@@ -330,6 +393,7 @@ class InferenceService {
       throw EngineException('引擎正在运行，请先停止模型后再切换');
     }
     selectedEngine = info;
+    _autoSelectedEngine = false; // 用户显式选择优先于自动探测。
     _emit(_runtime.copyWith(engine: info, lastError: ''));
   }
 

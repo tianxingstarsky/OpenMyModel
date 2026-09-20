@@ -42,6 +42,15 @@ python scripts/build_llama_windows.py --backends cpu,cuda
 - CUDA 构建静态链接 cudart/cublas，产物自包含，不需要额外复制 CUDA 运行时 DLL。
 - 打包也可使用官方预编译引擎备选：`third_party/llama.cpp.lock.json` 记录了 b10909 Windows x64 CPU/CUDA/Vulkan 包的 SHA-256；运行时不会自动下载或更新引擎。
 
+无法从源码构建某个后端时（例如本机没有 Vulkan SDK），可显式获取官方预编译引擎——脚本会下载、按 lock 文件校验 SHA-256、解压并写入 `builtFrom: official-prebuilt` 的 `engine.json`：
+
+```bash
+python scripts/fetch_official_engine.py --backend vulkan
+# 可选: --backend cpu|cuda-12.4|cuda-13.3  --force 替换已存在目录
+```
+
+桌面端自动选择引擎时先用 CPU 兜底，再按优先级（CUDA > Vulkan）逐个运行 `--list-devices` 探测真实硬件：只有报告了对应 GPU 设备的后端才会被选中，避免 A 卡/I 卡机器误选 CUDA 引擎静默跌回 CPU。用户在首页手动切换或恢复上次选择后，探测不再覆盖。
+
 ## 本地开发
 
 要求 Node.js 22+，以及满足 `frontend/pubspec.yaml` 中 Dart SDK 范围的 Flutter stable。Windows 桌面构建另需 Visual Studio 2022 的 Desktop development with C++；引擎源码构建另需 CMake 3.28+（CUDA/Vulkan 后端见上文）。

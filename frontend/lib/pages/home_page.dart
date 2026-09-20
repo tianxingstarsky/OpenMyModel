@@ -72,6 +72,16 @@ class _HomePageState extends State<HomePage> with WindowListener {
     await _loadPrefs();
     if (!mounted || _closing) return;
     await _inference.discoverEngines();
+    // 恢复用户上次选择的引擎目录；覆盖设备探测的默认值。
+    final prefs = await SharedPreferences.getInstance();
+    final savedEngine = prefs.getString('engine_dir') ?? '';
+    if (savedEngine.isNotEmpty && !_inference.runtime.isRunning) {
+      try {
+        _inference.selectEngineByDirectory(savedEngine);
+      } catch (_) {
+        // 目录已不存在或缺少 llama-server.exe：保留探测结果。
+      }
+    }
     await _refresh();
     if (!mounted || _closing) return;
     await _loadP();

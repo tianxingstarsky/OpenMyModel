@@ -60,7 +60,7 @@ flowchart LR
 
 ## ✨ 核心特性
 
-- **📦 内置推理引擎**：llama.cpp b10909 随应用分发（CPU 与 CUDA 源码构建），启动即用，无需安装 Python；引擎版本与后端在界面真实显示
+- **📦 内置推理引擎**：llama.cpp b10909 随应用分发（CPU/CUDA 源码构建 + Vulkan 官方预编译，均经 SHA-256 校验），启动即用，无需安装 Python；按真实硬件自动选择后端，N 卡/A 卡/I 卡都能用上 GPU
 - **🖥 本地 GPU 推理**：完整 llama.cpp 参数（GPU 层数 auto/all、`--fit` 显存自适应、KV 量化、Flash Attention 三态开关）
 - **🌐 WebSocket 隧道**：无需公网 IP，家庭主机也能上云；断线自动有界退避重连，主动断开不重连
 - **🔑 本地密钥管理**：API Key 持久化在本机，云端不持久化；验证时仍经过云后端和隧道，生产环境必须使用 HTTPS/WSS，并保护本机用户数据。
@@ -131,7 +131,7 @@ output_my_model/
 
 ### 环境要求
 
-- **桌面端（发布包）**：Windows 10+，无需安装 Python；CPU 引擎开箱即用，CUDA 引擎随包内置
+- **桌面端（发布包）**：Windows 10+，无需安装 Python；CPU/CUDA/Vulkan 引擎随包内置，自动按显卡选择后端
 - **从源码构建桌面端**：Flutter 3.x+、CMake 3.28+、Visual Studio 2022 C++ 工具集（CUDA 后端另需 CUDA toolkit；Vulkan 后端另需 Vulkan SDK）
 - **Node.js** 22+（云后端与本地云端桥接）
 - **模型文件**（GGUF 格式，如 Qwen 3.5 9B Q8）+ 可选 mmproj 文件
@@ -149,6 +149,7 @@ flutter run -d windows
 
 ```bash
 python scripts/build_llama_windows.py --backends cpu,cuda
+python scripts/fetch_official_engine.py --backend vulkan   # 无 Vulkan SDK 时用官方预编译包
 ```
 
 ### 2. 云后端
