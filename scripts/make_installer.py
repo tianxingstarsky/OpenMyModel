@@ -23,6 +23,16 @@ ISCC_CANDIDATES = [
 ]
 
 
+def find_signtool():
+    kits = Path("C:/Program Files (x86)/Windows Kits/10/bin")
+    if kits.is_dir():
+        for version in sorted(kits.iterdir(), reverse=True):
+            candidate = version / "x64" / "signtool.exe"
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def die(msg: str) -> None:
     print(f"[ERROR] {msg}", file=sys.stderr)
     sys.exit(1)
@@ -64,6 +74,12 @@ def main() -> None:
                         help="Directory for the resulting setup .exe")
     parser.add_argument("--iscc", default="", help="Explicit path to ISCC.exe")
     parser.add_argument("--engine-tag", default="b10909")
+    parser.add_argument("--sign-pfx", type=Path, default="",
+                        help="Optional PFX to Authenticode-sign the setup .exe")
+    parser.add_argument("--sign-password-file", type=Path, default="",
+                        help="File containing the PFX password")
+    parser.add_argument("--timestamp-url", default="",
+                        help="Optional RFC3161 timestamp server; empty = no timestamp")
     args = parser.parse_args()
 
     payload = args.payload.resolve()
@@ -104,6 +120,25 @@ def main() -> None:
     setup_exe = args.out / f"OpenMyModel-Setup-1.0.0-{rev}.exe"
     if not setup_exe.is_file():
         die(f"ISCC reported success but {setup_exe} is missing")
+
+    if args.sign_pfx:
+        if not args.sign_password_file.is_file():
+            die(f"--sign-password-file not found: {args.sign_password_file}")
+        signtool = find_signtool()
+        if signtool is None:
+            die("signtool.exe not found; install the Windows SDK to sign the installer")
+        password = args.sign_password_file.read_text(encoding="utf-8").strip()
+        cmd = [str(signtool), "sign", "/fd", "sha256", "/f", str(args.sign_pfx),
+               "/p", password]
+        if args.timestamp_url:
+            cmd += ["/tr", args.timestamp_url, "/td", "sha256"]
+        cmd.append(str(setup_exe))
+        proc = subprocess.run(cmd,
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if proc.returncode != 0:
+            die(f"signtool failed: {(proc.stdout or '') + (proc.stderr or '')}")
+        print(f"signed setup exe with {args.sign_pfx.name} (timestamp: {args.timestamp_url})")
+
     print(f"created {setup_exe}")
     print(f"  size:   {setup_exe.stat().st_size / (1024 * 1024):.1f} MiB")
     print(f"  sha256: {sha256_of(setup_exe)}")

@@ -22,6 +22,29 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def find_signtool() -> Path:
+    kits = Path("C:/Program Files (x86)/Windows Kits/10/bin")
+    if kits.is_dir():
+        for version in sorted(kits.iterdir(), reverse=True):
+            candidate = version / "x64" / "signtool.exe"
+            if candidate.is_file():
+                return candidate
+    raise FileNotFoundError("signtool.exe not found; install the Windows SDK")
+
+
+def sign_file(signtool: Path, target: Path, pfx: Path, password: str,
+              timestamp_url: str) -> None:
+    cmd = [str(signtool), "sign", "/fd", "sha256", "/f", str(pfx), "/p", password]
+    if timestamp_url:
+        cmd += ["/tr", timestamp_url, "/td", "sha256"]
+    cmd.append(str(target))
+    proc = subprocess.run(cmd,
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if proc.returncode != 0:
+        raise RuntimeError(f"signtool failed for {target.name}: "
+                           f"{(proc.stdout or '') + (proc.stderr or '')}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -42,6 +65,13 @@ def main():
     )
     parser.add_argument("--flutter", default="flutter",
                         help="Flutter executable (flutter.bat on Windows)")
+    parser.add_argument("--sign-pfx", type=Path, default="",
+                        help="Optional PFX code-signing certificate")
+    parser.add_argument("--sign-password-file", type=Path, default="",
+                        help="File containing the PFX password (never pass passwords on the command line)")
+    parser.add_argument("--timestamp-url", default="",
+                        help="Optional RFC3161 timestamp server (network permitting); "
+                             "empty = sign without timestamp (fine for self-signed certs)")
     args = parser.parse_args()
     if args.output.resolve().exists():
         parser.error(f"Refusing to overwrite existing output: {args.output.resolve()}")
@@ -110,8 +140,8 @@ def main():
 
     engine_meta = []
     for source in engines:
-        manifest = source / "engine.json"
-        info = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else {}
+        manifest_path = source / "engine.json"
+        info = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
         engine_meta.append({
             "name": source.name,
             "tag": info.get("tag", "unknown"),
@@ -127,6 +157,19 @@ def main():
         "This package contains no model, configuration profile, credentials or debug logs.\n",
         encoding="utf-8")
 
+    signed = []
+    if args.sign_pfx:
+        if not args.sign_password_file.is_file():
+            parser.error(f"--sign-password-file not found: {args.sign_password_file}")
+        signtool = find_signtool()
+        password = args.sign_password_file.read_text(encoding="utf-8").strip()
+        targets = [output / "openmymodel.exe"]
+        targets += [p for p in (output / "runtime" / "llama").rglob("llama-server.exe")]
+        for target in targets:
+            sign_file(signtool, target, args.sign_pfx, password, args.timestamp_url)
+            signed.append(str(target.relative_to(output)).replace("\\", "/"))
+        print(f"signed {len(signed)} executables with {args.sign_pfx.name} (timestamp: {args.timestamp_url})")
+
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     dirty = bool(subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=ROOT, text=True).strip())
     hashes = {str(path.relative_to(output)).replace("\\", "/"): sha256(path)
@@ -136,6 +179,7 @@ def main():
             "gitRevision": revision,
             "workingTreeModified": dirty,
             "engines": engine_meta,
+            "signedFiles": signed,
             "sha256": hashes,
         }, indent=2),
         encoding="utf-8")

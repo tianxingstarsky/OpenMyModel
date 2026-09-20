@@ -119,7 +119,20 @@ python scripts/make_installer.py --payload artifacts/OpenMyModel-win-x64-<rev>
 # 需要 ISCC.exe（winget install --id JRSoftware.InnoSetup -e），或 --iscc 指定路径
 ```
 
-安装包按用户级安装（无需管理员），默认目录 `%LOCALAPPDATA%\Programs\OpenMyModel`，含开始菜单/桌面快捷方式与卸载器；卸载不触碰用户数据（配置档案在 `%USERPROFILE%\.openmymodel`，偏好在 `%APPDATA%`）。安装包未做代码签名，首次运行会有 SmartScreen 提示。
+安装包按用户级安装（无需管理员），默认目录 `%LOCALAPPDATA%\Programs\OpenMyModel`，含开始菜单/桌面快捷方式与卸载器；卸载不触碰用户数据（配置档案在 `%USERPROFILE%\.openmymodel`，偏好在 `%APPDATA%`）。
+
+**代码签名（自签名）**：两个脚本都支持 `--sign-pfx <pfx> --sign-password-file <file>`。生成自签名证书并导入本机信任（仅本机显示"已验证"，SmartScreen 仍按文件声誉提示，私签不能消除）：
+
+```powershell
+New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=OpenMyModel Self-Signed, O=OpenMyModel' `
+  -KeyUsage DigitalSignature -KeyExportPolicy Exportable -KeyLength 3072 `
+  -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(5)
+# 导出 PFX/CER 后，在本机信任：
+Import-Certificate -FilePath openmymodel-selfsign.cer -CertStoreLocation Cert:\CurrentUser\Root
+Import-Certificate -FilePath openmymodel-selfsign.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher
+```
+
+当前本机证书指纹 `14BDE1CB7F61CABA83B8640B7B9963C51C3C1C52`，PFX/密码保存在 `artifacts/codesign/`（不入库）。签名默认不带 RFC3161 时间戳（本机网络到各时间戳服务器的 POST 被拦）；私签场景时间戳非必需——需要时传 `--timestamp-url`。正式分发请购买 CA 证书后用同样的参数替换。
 
 ## 部署注意事项
 
