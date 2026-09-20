@@ -51,6 +51,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
   List<Map<String, dynamic>> _profiles = [];
   ServerConfig _cfg = ServerConfig();
   bool _starting = false;
+  bool _stopping = false;
   bool _closing = false;
   int _currentIndex = 0;
   int _scanGeneration = 0;
@@ -174,7 +175,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
   }
 
   Future<void> _start() async {
-    if (_starting || _closing) return;
+    if (_starting || _stopping || _closing) return;
     if (_inference.selectedEngine == null) {
       return _msg('未发现 llama-server 引擎，请检查安装目录');
     }
@@ -198,15 +199,15 @@ class _HomePageState extends State<HomePage> with WindowListener {
   }
 
   Future<void> _stop() async {
-    if (_starting || _closing) return;
+    if (_starting || _stopping || _closing) return;
     if (!_inference.runtime.isRunning) return;
-    setState(() => _starting = true);
+    setState(() => _stopping = true);
     try {
       await _inference.stop();
     } catch (error) {
       if (mounted) _msg('停止失败: $error');
     } finally {
-      if (mounted && !_closing) setState(() => _starting = false);
+      if (mounted && !_closing) setState(() => _stopping = false);
     }
   }
 
@@ -478,12 +479,12 @@ class _HomePageState extends State<HomePage> with WindowListener {
               ),
               if (runtime.isRunning || runtime.state == EngineState.stopping)
                 ft.Button(
-                  onPressed: _starting || _closing ? null : _stop,
-                  child: Text(_starting ? '停止中…' : '停止'),
+                  onPressed: _starting || _stopping || _closing ? null : _stop,
+                  child: Text(_stopping ? '停止中…' : '停止'),
                 )
               else
                 ft.FilledButton(
-                  onPressed: _starting || _closing ? null : _start,
+                  onPressed: _starting || _stopping || _closing ? null : _start,
                   child: Text(_starting ? '启动中...' : '启动模型'),
                 ),
             ],
