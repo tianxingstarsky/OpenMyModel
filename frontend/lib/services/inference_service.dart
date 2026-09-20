@@ -397,19 +397,6 @@ class InferenceService {
     _emit(_runtime.copyWith(engine: info, lastError: ''));
   }
 
-  /// 用户手动指定一个包含 llama-server.exe 的目录；不覆盖运行中状态。
-  void selectEngineByDirectory(String dir) {
-    final info = _infoFromDirectory(dir);
-    if (info == null) {
-      throw EngineException('所选目录中没有 llama-server.exe');
-    }
-    if (!engines.any((e) => e.executable == info.executable)) {
-      engines.add(info);
-      engines.sort(_backendPriority);
-    }
-    if (!_runtime.isRunning) selectEngine(info);
-  }
-
   // ---------- 进程生命周期 ----------
 
   /// 校验并生成 llama-server 命令行参数（暴露用于测试）。

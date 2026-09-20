@@ -62,7 +62,7 @@ npm --prefix backend ci
 
 在 `backend/` 运行 `npm run setup` 初始化管理员密码，然后 `npm run dev`。也可以在第一次启动前设置 `ADMIN_PASSWORD`；已有配置不会被环境变量覆盖。数据目录默认是后端当前工作目录的 `data/`，可用 `OPENMYMODEL_DATA_DIR` 指向隔离测试目录。
 
-在 `frontend/` 运行 `flutter pub get` 和 `flutter run -d windows`。桌面端自动发现引擎：exe 旁 `runtime/llama/`（打包布局）、开发布局 `artifacts/engine/`，或用户在首页手动指定的目录。开发机上无需 Python；如需运行历史 Python 兼容测试，见下文自动化门禁。
+在 `frontend/` 运行 `flutter pub get` 和 `flutter run -d windows`。桌面端自动发现引擎：exe 旁 `runtime/llama/`（打包布局）与开发布局 `artifacts/engine/`，启动时按真实硬件自动选择后端（CUDA > Vulkan > CPU）。开发机上无需 Python；如需运行历史 Python 兼容测试，见下文自动化门禁。
 
 ### 生命周期与安全
 
@@ -125,7 +125,7 @@ python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-native
 
 | 现象 | 检查方向 |
 | --- | --- |
-| 首页显示"未发现引擎" | 检查安装目录 `runtime/llama/` 是否存在引擎；或用首页"指定目录"选择包含 llama-server.exe 的目录 |
+| 首页显示"未发现引擎" | 检查安装目录 `runtime/llama/` 是否完整（各引擎目录含 llama-server.exe 与 engine.json），修复后重启应用即可重新发现 |
 | 模型正在加载但聊天不可用 | 等待 `ready`，查看运行日志；加载超时有明确报错，不要重复点击启动 |
 | CUDA 引擎启动失败 | 查看 `error` 状态的日志尾部；可在首页切换回 CPU 引擎再启动 |
 | 云端 401 | 检查 Key 启用状态及所属节点在线状态 |

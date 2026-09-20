@@ -73,16 +73,6 @@ class _HomePageState extends State<HomePage> with WindowListener {
     await _loadPrefs();
     if (!mounted || _closing) return;
     await _inference.discoverEngines();
-    // 恢复用户上次选择的引擎目录；覆盖设备探测的默认值。
-    final prefs = await SharedPreferences.getInstance();
-    final savedEngine = prefs.getString('engine_dir') ?? '';
-    if (savedEngine.isNotEmpty && !_inference.runtime.isRunning) {
-      try {
-        _inference.selectEngineByDirectory(savedEngine);
-      } catch (_) {
-        // 目录已不存在或缺少 llama-server.exe：保留探测结果。
-      }
-    }
     await _refresh();
     if (!mounted || _closing) return;
     await _loadP();
@@ -99,21 +89,6 @@ class _HomePageState extends State<HomePage> with WindowListener {
   Future<void> _savePrefs() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('model_folder', tcFolder.text.trim());
-    await prefs.setString('engine_dir', _inference.selectedEngine?.directory ?? '');
-  }
-
-  Future<void> _pickEngineDir() async {
-    final path = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: '选择包含 llama-server.exe 的目录',
-    );
-    if (!mounted || path == null || _inference.runtime.isRunning) return;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('engine_dir', path);
-    } catch (_) {}
-    _inference.selectEngineByDirectory(path);
-    await _inference.discoverEngines();
-    if (mounted) setState(() {});
   }
 
   Future<void> _refresh() async {
@@ -322,7 +297,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
     final runtime = _inference.runtime;
     switch (runtime.state) {
       case EngineState.notFound:
-        return '未发现 llama-server 引擎；请检查安装目录 runtime/llama，或在下方手动选择';
+        return '未发现 llama-server 引擎；请确认安装目录 runtime/llama 完整后重新启动应用';
       case EngineState.idle:
         return runtime.lastError.isNotEmpty
             ? runtime.lastError
@@ -491,53 +466,30 @@ class _HomePageState extends State<HomePage> with WindowListener {
           ),
           const SizedBox(height: 20),
           _lbl('推理引擎'),
-          Row(
-            children: [
-              Expanded(
-                child: _inference.engines.length > 1
-                    ? ft.ComboBox<String>(
-                        value: _inference.selectedEngine?.label,
-                        items: _inference.engines
-                            .map(
-                              (engine) => ft.ComboBoxItem(
-                                value: engine.label,
-                                child: Text(engine.label),
-                              ),
-                            )
-                            .toList(),
-                        onChanged: (label) {
-                          final match = _inference.engines
-                              .where((engine) => engine.label == label);
-                          if (match.isNotEmpty) {
-                            _inference.selectEngine(match.first);
-                            _savePrefs();
-                            setState(() {});
-                          }
-                        },
+          _inference.engines.length > 1
+              ? ft.ComboBox<String>(
+                  value: _inference.selectedEngine?.label,
+                  items: _inference.engines
+                      .map(
+                        (engine) => ft.ComboBoxItem(
+                          value: engine.label,
+                          child: Text(engine.label),
+                        ),
                       )
-                    : Text(
-                        _inference.selectedEngine?.label ?? '未发现引擎',
-                        style: const TextStyle(fontSize: 13),
-                      ),
-              ),
-              const SizedBox(width: 8),
-              ft.Button(
-                onPressed: _starting || _inference.runtime.isRunning
-                    ? null
-                    : _pickEngineDir,
-                child: const Text('指定目录'),
-              ),
-              ft.Button(
-                onPressed: _starting || _inference.runtime.isRunning
-                    ? null
-                    : () async {
-                        await _inference.discoverEngines();
-                        if (mounted) setState(() {});
-                      },
-                child: const Text('重新扫描'),
-              ),
-            ],
-          ),
+                      .toList(),
+                  onChanged: (label) {
+                    final match = _inference.engines
+                        .where((engine) => engine.label == label);
+                    if (match.isNotEmpty) {
+                      _inference.selectEngine(match.first);
+                      setState(() {});
+                    }
+                  },
+                )
+              : Text(
+                  _inference.selectedEngine?.label ?? '未发现引擎',
+                  style: const TextStyle(fontSize: 13),
+                ),
           if ((_inference.selectedEngine?.versionSummary ?? '').isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 4),
