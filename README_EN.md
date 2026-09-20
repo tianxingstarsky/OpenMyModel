@@ -25,8 +25,7 @@
 ```mermaid
 flowchart LR
     subgraph Local Machine
-        A[Flutter Desktop] --> B[Python Bridge]
-        B --> C[llama-server<br/>Local GPU Inference]
+        A[Flutter Desktop<br/>InferenceService owns the process] --> C[llama-server<br/>Bundled llama.cpp b10909<br/>Local GPU Inference]
         A --> N[Node Bridge<br/>Local Key Validation]
         N --> C
     end
@@ -48,24 +47,30 @@ flowchart LR
 
 | Component | Stack | Role |
 |-----------|-------|------|
-| **Flutter Desktop** | Flutter + Dart | UI / llama-server management / API Key management (local-only, no cloud storage) / Chat interface |
-| **Python Bridge** | Python + FastAPI | Local HTTP API / llama-server lifecycle / local chat proxy |
+| **Flutter Desktop** | Flutter + Dart | UI / bundled llama-server process management (start, health check, stop) / API Key management (local-only, no cloud storage) / Chat connecting directly to the engine's OpenAI API |
+| **Bundled Engine** | llama.cpp b10909 (pinned Git submodule) | Official OpenAI-compatible HTTP API; CPU/CUDA backends built from source, Vulkan backend from the official prebuilt archive (all SHA-256 verified), backend auto-selected per GPU -- no Python or any runtime installation required |
 | **Node Bridge** | Node.js + ws | Desktop stdin/stdout control / local key validation / WebSocket HTTP tunnel |
 | **Cloud Backend** | TypeScript + Node.js | WebSocket server / Request transparent proxying to llama-server / CLI management |
+
+> Historical note: earlier versions managed llama-server through a local Python HTTP
+> bridge. The desktop app now manages the engine process directly via Dart
+> (`InferenceService`) and no longer requires Python. The `python/` directory is kept
+> only as a historical implementation and compatibility reference.
 
 ---
 
 ## Key Features
 
-- **Local GPU Inference**: Full llama.cpp parameter control, Q8 cache, GPU acceleration
-- **WebSocket Tunnel**: No public IP needed -- home lab goes cloud
+- **Bundled Inference Engine**: llama.cpp b10909 ships with the app (CPU/CUDA built from source + Vulkan official prebuilt, all SHA-256 verified), ready to run with no Python installation; the backend is auto-selected per hardware, so NVIDIA, AMD and Intel GPUs all get GPU acceleration
+- **Local GPU Inference**: full llama.cpp parameter surface (GPU layers auto/all, `--fit` VRAM adaptation, KV cache quantization, tri-state Flash Attention)
+- **WebSocket Tunnel**: No public IP needed -- home lab goes cloud; bounded exponential reconnect after drops, no auto-reconnect after a manual disconnect
 - **Local Key Storage**: Keys are persisted locally, not in the cloud database. Validation still passes through the cloud and tunnel; use HTTPS/WSS and protect local user data.
-- **OpenAI-Compatible API**: `/v1/chat/completions`, `/v1/models`, SSE streaming
+- **OpenAI-Compatible API**: `/v1/chat/completions`, `/v1/models`, SSE streaming; `reasoning_content` from thinking models is displayed separately in the chat UI
 - **Multimodal Support**: mmproj vision projector, image understanding
-- **Built-in Chat**: Multi-image upload + text, streaming responses
-- **Parameter Profiles**: Save multiple inference configs, switch with one click
+- **Built-in Chat**: Multi-image upload + text, streaming responses, stop-generation cuts the underlying connection
+- **Parameter Profiles**: Saved locally (compatible with legacy Python Bridge profile files), switch with one click
 - **Chinese CLI**: Wizard-driven command-line setup for the cloud backend
-- **Real-Time Status**: llama-server health and cloud connection status tracked live
+- **Real-Time Status**: Engine start/loading/ready/error states and cloud connection status tracked live
 
 ---
 
@@ -73,34 +78,28 @@ flowchart LR
 
 ### Prerequisites
 
-- **Flutter** 3.x+ (Windows/macOS/Linux)
-- **Python** 3.10+ (conda virtual env recommended)
-- **Node.js** 22+ (cloud backend and local tunnel)
-- **llama.cpp** compiled `llama-server` binary
+- **Desktop (release package)**: Windows 10+, no Python installation required; CPU/CUDA/Vulkan engines are bundled and the backend is auto-selected per GPU
+- **Building the desktop from source**: Flutter 3.x+, CMake 3.28+, Visual Studio 2022 C++ toolset (CUDA backend additionally needs the CUDA toolkit; Vulkan backend needs the Vulkan SDK)
+- **Node.js** 22+ (cloud backend and local cloud tunnel)
 - **GGUF model files** (e.g., Qwen 3.5 9B Q8) + optional mmproj
 
-### 1. Frontend (Windows)
-
-Prepare local Python and Node dependencies from the repository root. The desktop manages its own Python bridge; do not start another bridge on port 8765 at the same time.
+### 1. Desktop (Windows)
 
 ```bash
-python -m pip install -r python/requirements.txt
-npm --prefix scripts ci
+npm --prefix scripts ci            # cloud Node bridge dependency
 cd frontend
 flutter pub get
 flutter run -d windows
 ```
 
-### 2. Python Bridge (standalone debugging only)
+Build engines from source into `artifacts/engine/` (the packager collects them automatically):
 
 ```bash
-cd python
-conda activate myenv
-pip install -r requirements.txt
-python bridge_server.py
+python scripts/build_llama_windows.py --backends cpu,cuda
+python scripts/fetch_official_engine.py --backend vulkan   # official prebuilt when no Vulkan SDK
 ```
 
-### 3. Cloud Backend
+### 2. Cloud Backend
 
 ```bash
 cd backend
@@ -109,7 +108,7 @@ npm run setup                      # Configure admin password before first launc
 npm run dev
 ```
 
-### 4. CLI Management
+### 3. CLI Management
 
 ```bash
 cd backend
@@ -268,7 +267,7 @@ curl https://your-domain/v1/chat/completions \
 
 ## Development and releases
 
-See [development, testing and packaging notes](docs/DEVELOPMENT.md). Update the cloud backend and desktop bridge together; old bridges cannot report upstream HTTP status correctly.
+See [development, testing and packaging notes](docs/DEVELOPMENT.md) for the relay protocol, bundled engine builds, troubleshooting, automated tests and traceable Windows packaging. Update the cloud backend and desktop Node bridge together; old bridges cannot report upstream HTTP status correctly.
 
 ```bash
 npm --prefix scripts ci
@@ -277,7 +276,10 @@ npm --prefix scripts run check:release
 npm --prefix backend ci
 npm --prefix backend run build
 npm --prefix backend test
-python -m unittest discover -s python/tests -v
+python -m unittest discover -s python/tests -v   # legacy Python Bridge compatibility tests
+cd frontend && flutter analyze && flutter test && flutter build windows --release
+python scripts/build_llama_windows.py --backends cpu,cuda   # bundled engine source build
+python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-<rev>
 ```
 
 For Docker, copy `.env.example` to `.env`, set a strong password, then run `docker compose up -d --build`. Public deployments require TLS at the reverse proxy and an `https://` desktop server URL; the bundled nginx example does not supply certificates.

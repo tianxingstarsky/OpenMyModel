@@ -48,7 +48,7 @@ flowchart LR
 | 组件 | 技术栈 | 角色 |
 |------|--------|------|
 | **Flutter 桌面端** | Flutter + Dart | UI 界面 / 内置 llama-server 进程管理（启动、健康检查、停止）/ API Key 管理（本地存储+本地验证）/ 模型对话（直连引擎 OpenAI API） |
-| **内置引擎** | llama.cpp b10909（Git submodule 固定版本） | 官方 OpenAI 兼容 HTTP API；CPU / CUDA 后端由源码构建，无需安装 Python 或任何运行环境 |
+| **内置引擎** | llama.cpp b10909（Git submodule 固定版本） | 官方 OpenAI 兼容 HTTP API；CPU/CUDA 后端源码构建，Vulkan 后端官方预编译（均经 SHA-256 校验），按显卡自动选择，无需安装 Python 或任何运行环境 |
 | **Node Bridge** | Node.js + ws | Flutter stdin/stdout 控制 / 本地 Key 验证 / WebSocket HTTP 隧道 |
 | **云后端** | TypeScript + Node.js | WebSocket 服务端 / 请求透明转发到 llama-server / CLI 管理工具 |
 
