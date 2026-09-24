@@ -886,6 +886,23 @@ test("relay headers reject injection and remove transport/private headers", () =
   assert.throws(() => relayHeaders({ "content-encoding": "gzip" }));
 });
 
+test("admin node management keeps disconnected nodes visible with their last reported model", async t => {
+  const { app, node, tunnel } = await fixture(t);
+  const connected = await node({ nodeId: "retained-node", nodeName: "Retained node", modelName: "last-model" });
+  const login = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
+  const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+
+  const online = await app.inject({ method: "GET", url: "/api/admin/nodes", headers: { cookie } });
+  assert.deepEqual(online.json().map((entry: Message) => [entry.id, entry.isOnline, entry.serverRunning, entry.modelName]),
+    [["retained-node", true, true, "last-model"]]);
+
+  connected.socket.close();
+  await until(() => tunnel.getOnlineNodes().length === 0);
+  const offline = await app.inject({ method: "GET", url: "/api/admin/nodes", headers: { cookie } });
+  assert.deepEqual(offline.json().map((entry: Message) => [entry.id, entry.isOnline, entry.serverRunning, entry.modelName]),
+    [["retained-node", false, false, "last-model"]]);
+});
+
 test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, auth, and cancellation", async t => {
   const { CloudBridge } = require("../../scripts/cloud_bridge.js");
   const { app, url, post, tunnel } = await fixture(t);

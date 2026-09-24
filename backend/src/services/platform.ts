@@ -807,10 +807,18 @@ export class PlatformService {
   }
 
   adminNodeList() {
-    const live = this.tunnel.getOnlineNodes();
+    const nodes = new Map<string, Record<string, any>>();
+    const stored = this.sqlite.prepare(`SELECT id, name, connected_at AS connectedAt, last_heartbeat AS lastHeartbeat,
+      model_name AS modelName, model_config AS modelConfig FROM nodes`).all() as Array<Record<string, any>>;
+    for (const node of stored) nodes.set(node.id, { ...node, isOnline: false, serverRunning: false, slots: null });
+    for (const node of this.tunnel.getOnlineNodes()) {
+      nodes.set(node.id, { ...nodes.get(node.id), ...node, isOnline: true });
+    }
     const routes = this.sqlite.prepare("SELECT node_id, COUNT(*) AS route_count FROM model_routes WHERE enabled=1 GROUP BY node_id").all() as Array<any>;
     const byId = new Map(routes.map(row => [row.node_id, row.route_count]));
-    return live.map(node => ({ ...node, routeCount: byId.get(node.id) || 0 }));
+    const rows: Array<Record<string, any>> = [...nodes.values()]
+      .map(node => ({ ...node, routeCount: byId.get(node.id) || 0 }));
+    return rows.sort((a, b) => Number(b.isOnline) - Number(a.isOnline) || String(a.name).localeCompare(String(b.name)));
   }
 }
 
