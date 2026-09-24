@@ -960,7 +960,7 @@ test("requests beyond slot capacity surface as queued; loading nodes contribute 
 });
 
 test("managed gateway routes with the configured llama-server key and meters usage", async t => {
-  const { app, node, post } = await fixture(t);
+  const { app, node, post, directory } = await fixture(t);
   const nodeKey = "node-secret-for-llama-server";
   let relayed = false;
   await node({ modelName: "internal-model" }, (msg, send) => {
@@ -992,6 +992,13 @@ test("managed gateway routes with the configured llama-server key and meters usa
   assert.equal(routeResponse.statusCode, 200, routeResponse.body);
   assert.equal(routeResponse.json().routes[0].keyConfigured, true);
   assert.equal(routeResponse.body.includes(nodeKey), false, "admin route listing must not disclose the node key");
+  const storedRoutes = new Database(join(directory, "openmymodel.db"));
+  try {
+    const storedKey = storedRoutes.prepare("SELECT upstream_key FROM model_routes WHERE id=?")
+      .get(routeResponse.json().routes[0].id)?.upstream_key as string;
+    assert.match(storedKey, /^v1\./, "the node's llama-server key must be encrypted at rest");
+    assert.notEqual(storedKey, nodeKey);
+  } finally { storedRoutes.close(); }
   const existingRoute = routeResponse.json().routes[0];
   const editedRouteResponse = await app.inject({ method: "POST", url: `/api/admin/models/${modelId}/routes`, headers: adminHeaders,
     payload: { id: existingRoute.id, nodeId: existingRoute.nodeId, upstreamModel: "internal-model-v2", upstreamKey: "", weight: 3 } });
