@@ -697,8 +697,9 @@ export class PlatformService {
     const entries = Object.entries(fields);
     if (entries.length > 100 || entries.some(([key, value]) => key.length > 128 || String(value).length > 8192)) return false;
     const signature = fields.sign;
-    if (typeof signature !== "string" || fields.sign_type !== undefined && fields.sign_type !== "RSA2"
-      || fields.app_id !== this.setting("alipay_app_id") || fields.auth_app_id !== this.setting("alipay_app_id")
+    if (typeof signature !== "string" || fields.sign_type !== "RSA2"
+      || fields.app_id !== this.setting("alipay_app_id")
+      || fields.auth_app_id !== undefined && fields.auth_app_id !== this.setting("alipay_app_id")
       || fields.seller_id !== this.setting("alipay_seller_id") || fields.notify_type !== "trade_status_sync") return false;
     const canonical = (includeSignType: boolean) => {
       const values = { ...fields };

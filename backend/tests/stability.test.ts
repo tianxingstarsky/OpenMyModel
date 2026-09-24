@@ -400,8 +400,8 @@ test("provider email codes are single-use and lock after five failed attempts", 
   }
 });
 
-test("Alipay settings validate RSA keys and signed payments credit an order once", () => {
-  const directory = mkdtempSync(join(tmpdir(), "openmymodel-alipay-test-"));
+test("Alipay settings validate RSA keys and official signed callback fields credit an order once", async t => {
+  const { app, directory, tunnel } = await fixture(t);
   const database = createDatabase(directory);
   try {
     const appKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -409,8 +409,7 @@ test("Alipay settings validate RSA keys and signed payments credit an order once
     const appPrivateKey = appKeys.privateKey.export({ type: "pkcs1", format: "der" }).toString("base64");
     const alipayPrivateKey = alipayKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
     const alipayPublicKey = alipayKeys.publicKey.export({ type: "pkcs1", format: "der" }).toString("base64");
-    const platform = new PlatformService(database.sqlite, directory,
-      new WebSocketTunnel({ authenticate: async () => "ok" }), "https://api.example.test");
+    const platform = new PlatformService(database.sqlite, directory, tunnel, "https://api.example.test");
     assert.throws(() => platform.saveAdminSettings({
       mode: "provider", publicUrl: "http://api.example.test", mailHost: "smtp.example.test", mailPort: 465,
       mailUser: "mail-user", mailFrom: "billing@example.test", mailPassword: "mail-pass",
@@ -445,29 +444,39 @@ test("Alipay settings validate RSA keys and signed payments credit an order once
     assert.equal(createVerify("RSA-SHA256").update(paymentCanonical).verify(appKeys.publicKey, paymentSignature, "base64"), true);
 
     const signNotification = (fields: Record<string, string>) => ({ ...fields,
-      sign: createSign("RSA-SHA256").update(Object.keys(fields).sort().map(key => `${key}=${fields[key]}`).join("&"))
+      sign: createSign("RSA-SHA256").update(Object.keys(fields).filter(key => key !== "sign_type").sort()
+        .map(key => `${key}=${fields[key]}`).join("&"))
         .sign(alipayPrivateKey, "base64") });
-    const notification = signNotification({ app_id: "2026000000000001", auth_app_id: "2026000000000001",
-      seller_id: "2088000000000000", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: order.orderId,
+    const notification = signNotification({ app_id: "2026000000000001",
+      seller_id: "2088000000000000", sign_type: "RSA2", notify_type: "trade_status_sync", notify_id: "notify-1",
+      notify_time: "2026-09-24 12:00:00", charset: "utf-8", version: "1.0", out_trade_no: order.orderId,
       total_amount: "10.00", trade_status: "TRADE_SUCCESS", trade_no: "2026092400000001" });
-    assert.equal(platform.processAlipayNotification(notification), true);
-    assert.equal(platform.processAlipayNotification(notification), true, "duplicate notifications must be idempotent");
+    const callback = () => app.inject({ method: "POST", url: "/api/payments/alipay/notify",
+      headers: { "content-type": "application/x-www-form-urlencoded" }, payload: new URLSearchParams(notification).toString() });
+    const firstCallback = await callback();
+    assert.equal(firstCallback.statusCode, 200, firstCallback.body);
+    assert.equal(firstCallback.body, "success", "Alipay receives the success acknowledgement");
+    const duplicateCallback = await callback();
+    assert.equal(duplicateCallback.statusCode, 200, "duplicate notifications must be acknowledged");
     assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(userId) as { balance: number }).balance, 10);
     const topups = platform.balanceEntries(userId) as Array<Message>;
     assert.equal(topups.length, 1, "duplicate Alipay notifications must not duplicate balance ledger entries");
     assert.deepEqual([topups[0].type, topups[0].amount, topups[0].balanceAfter, topups[0].referenceId],
       ["topup", 10, 10, order.orderId]);
-    assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001", auth_app_id: "2026000000000001",
+    assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001", auth_app_id: "different-app",
+      seller_id: "2088000000000000", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: order.orderId,
+      total_amount: "10.00", trade_status: "TRADE_SUCCESS", trade_no: "2026092400000001" })), false,
+    "an optional auth_app_id is checked when Alipay includes it");
+    assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001",
       seller_id: "2088000000000000", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: order.orderId,
       total_amount: "100.00", trade_status: "TRADE_SUCCESS", trade_no: "2026092400000001" })), false,
     "signed callbacks with an amount that does not match the order must be rejected");
-    assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001", auth_app_id: "2026000000000001",
+    assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001",
       seller_id: "wrong-seller", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: order.orderId,
       total_amount: "10.00", trade_status: "TRADE_SUCCESS", trade_no: "2026092400000001" })), false,
     "notifications for another seller must be rejected");
   } finally {
     database.close();
-    rmSync(directory, { recursive: true, force: true });
   }
 });
 
