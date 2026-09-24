@@ -849,12 +849,12 @@ test("managed route rotation is independent for each public model", async t => {
   const modelA = await createModel("public-a");
   const modelB = await createModel("public-b");
   for (const route of [
-    { modelId: modelA, nodeId: "route-a", upstreamModel: "internal-a", upstreamKey: "node-key-a" },
+    { modelId: modelA, nodeId: "route-a", upstreamModel: "internal-a", upstreamKey: "node-key-a", weight: 2 },
     { modelId: modelA, nodeId: "route-b", upstreamModel: "internal-b", upstreamKey: "node-key-b" },
     { modelId: modelB, nodeId: "route-other", upstreamModel: "internal-other", upstreamKey: "node-key-other" },
   ]) {
     const response = await app.inject({ method: "POST", url: `/api/admin/models/${route.modelId}/routes`, headers: adminHeaders,
-      payload: { nodeId: route.nodeId, upstreamModel: route.upstreamModel, upstreamKey: route.upstreamKey, weight: 1 } });
+      payload: { nodeId: route.nodeId, upstreamModel: route.upstreamModel, upstreamKey: route.upstreamKey, weight: route.weight ?? 1 } });
     assert.equal(response.statusCode, 200, response.body);
   }
   const keyResponse = await app.inject({ method: "POST", url: "/api/admin/keys", headers: adminHeaders,
@@ -871,9 +871,13 @@ test("managed route rotation is independent for each public model", async t => {
   await call("public-b");
   await call("public-a");
 
-  assert.deepEqual(requests.get("route-a"), [{ model: "internal-a", key: "node-key-a" }]);
-  assert.deepEqual(requests.get("route-b"), [{ model: "internal-b", key: "node-key-b" }]);
+  assert.deepEqual(requests.get("route-a"), [
+    { model: "internal-a", key: "node-key-a" }, { model: "internal-a", key: "node-key-a" },
+  ], "the intervening request to another model must not advance this model's 2:1 route cycle");
+  assert.equal(requests.has("route-b"), false, "the lower-weight route is selected on the third request for its model");
   assert.deepEqual(requests.get("route-other"), [{ model: "internal-other", key: "node-key-other" }]);
+  await call("public-a");
+  assert.deepEqual(requests.get("route-b"), [{ model: "internal-b", key: "node-key-b" }]);
 });
 
 test("client disconnect before upstream headers cancels both stream modes", async t => {
