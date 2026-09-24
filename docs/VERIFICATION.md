@@ -7,7 +7,7 @@
 | 检查 | 结果 |
 | --- | --- |
 | `npm --prefix backend run build` | TypeScript 编译通过 |
-| `npm --prefix backend test` | 40 项通过；既有服务商账户隔离测试增加 `private, no-store` 响应头断言；余额与 Token 预留测试通过独立心跳模拟验证长时间无上游数据块时仍续期 |
+| `npm --prefix backend test` | 41 项通过；既有服务商账户隔离测试增加 `private, no-store` 响应头断言；Key 状态和 RPM 检查通过旧快照测试；余额与 Token 预留测试通过独立心跳模拟验证长时间无上游数据块时仍续期 |
 | `npm --prefix scripts test` | 13 项通过；本阶段未修改 Bridge 源码 |
 | `git diff --check` | 无空白错误 |
 

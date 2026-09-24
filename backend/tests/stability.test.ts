@@ -720,6 +720,30 @@ test("gateway token limits reserve concurrent prompt and output budgets atomical
   }
 });
 
+test("gateway rate checks honor updated and revoked keys from stale request snapshots", () => {
+  const directory = mkdtempSync(join(tmpdir(), "openmymodel-live-key-check-test-"));
+  const database = createDatabase(directory);
+  try {
+    const platform = new PlatformService(database.sqlite, directory, new WebSocketTunnel({ authenticate: async () => "ok" }));
+    const created = platform.createGatewayKey("live key check", null, 0, 0);
+    const staleSnapshot = platform.findGatewayKey(created.key)!;
+
+    assert.equal(platform.updateKeyLimits(staleSnapshot.id, 0, 1)?.rpmLimit, 1);
+    platform.checkGatewayKey(staleSnapshot);
+    assert.throws(() => platform.checkGatewayKey(staleSnapshot),
+      (error: any) => error.statusCode === 429,
+    "the current RPM limit is enforced even if the request began with an older key snapshot");
+
+    assert.equal(platform.disableKey(staleSnapshot.id), true);
+    assert.throws(() => platform.checkGatewayKey(staleSnapshot),
+      (error: any) => error.statusCode === 401,
+    "a revoked key cannot pass authorization with a stale active snapshot");
+  } finally {
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("JSON validation rejects malformed, non-JSON, and bodies exceeding 32 MiB", async t => {
   const { app } = await fixture(t);
   for (const contentType of [undefined, "text/plain", "application/x-www-form-urlencoded"]) {

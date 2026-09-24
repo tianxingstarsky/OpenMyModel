@@ -429,27 +429,33 @@ export class PlatformService {
   }
 
   checkGatewayKey(key: GatewayKey): void {
-    if (key.token_limit > 0 && key.total_tokens >= key.token_limit) throw new RelayError("API Key token limit exceeded", 429);
-    const providerMode = this.isProviderMode();
-    if (providerMode && !key.owner_user_id) throw new RelayError("API Key is not associated with a provider account", 403);
-    if (!providerMode && key.owner_user_id) throw new RelayError("User API Keys are only available in service-provider mode", 403);
-    if (key.owner_user_id) {
-      const user = this.sqlite.prepare("SELECT balance, is_active FROM platform_users WHERE id=?").get(key.owner_user_id) as
-        { balance: number; is_active: number } | undefined;
-      if (!user || !user.is_active) throw new RelayError("Account disabled", 403);
-      if (this.isProviderMode() && user.balance <= 0) throw new RelayError("Insufficient balance", 402);
-    }
     const now = isoNow();
     const reserve = this.sqlite.transaction(() => {
-      if (key.rpm_limit > 0) {
+      const current = this.sqlite.prepare(`SELECT owner_user_id, is_active, token_limit, total_tokens, rpm_limit
+        FROM gateway_keys WHERE id=?`).get(key.id) as
+        { owner_user_id: string | null; is_active: number; token_limit: number; total_tokens: number; rpm_limit: number } | undefined;
+      if (!current || current.is_active !== 1) throw new RelayError("Invalid API Key", 401);
+      if (current.token_limit > 0 && current.total_tokens >= current.token_limit) {
+        throw new RelayError("API Key token limit exceeded", 429);
+      }
+      const providerMode = this.isProviderMode();
+      if (providerMode && !current.owner_user_id) throw new RelayError("API Key is not associated with a provider account", 403);
+      if (!providerMode && current.owner_user_id) throw new RelayError("User API Keys are only available in service-provider mode", 403);
+      if (current.owner_user_id) {
+        const user = this.sqlite.prepare("SELECT balance, is_active FROM platform_users WHERE id=?").get(current.owner_user_id) as
+          { balance: number; is_active: number } | undefined;
+        if (!user || !user.is_active) throw new RelayError("Account disabled", 403);
+        if (providerMode && user.balance <= 0) throw new RelayError("Insufficient balance", 402);
+      }
+      if (current.rpm_limit > 0) {
         const row = this.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_request_events WHERE key_id=? AND created_at >= ?")
           .get(key.id, new Date(Date.now() - 60_000).toISOString()) as { count: number };
-        if (row.count >= key.rpm_limit) throw new RelayError("Rate limit exceeded", 429);
+        if (row.count >= current.rpm_limit) throw new RelayError("Rate limit exceeded", 429);
       }
       this.sqlite.prepare("INSERT INTO gateway_request_events(key_id, created_at) VALUES(?, ?)").run(key.id, now);
       this.sqlite.prepare("DELETE FROM gateway_request_events WHERE created_at < ?").run(new Date(Date.now() - 24 * 60 * 60_000).toISOString());
     });
-    reserve();
+    reserve.immediate();
   }
 
   recordDirectRequest(keyId: string): void {
