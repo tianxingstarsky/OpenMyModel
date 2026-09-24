@@ -884,9 +884,11 @@ export class PlatformService {
     if (fields.trade_status !== "TRADE_SUCCESS" && fields.trade_status !== "TRADE_FINISHED") return true;
     const order = this.sqlite.prepare("SELECT id, user_id, amount, status FROM payment_orders WHERE id=?").get(orderId) as
       { id: string; user_id: string; amount: number; status: string } | undefined;
-    const paidAmount = Number(fields.total_amount);
-    if (!order || typeof fields.trade_no !== "string" || !fields.trade_no || !Number.isFinite(paidAmount)
-      || paidAmount.toFixed(2) !== Number(order.amount).toFixed(2)) return false;
+    const paidAmount = fields.total_amount;
+    const paidCents = typeof paidAmount === "string" && /^(?:0|[1-9]\d{0,5})\.\d{2}$/.test(paidAmount)
+      ? Number(paidAmount.replace(".", "")) : Number.NaN;
+    if (!order || typeof fields.trade_no !== "string" || !fields.trade_no || !Number.isSafeInteger(paidCents)
+      || paidCents !== Math.round(Number(order.amount) * 100)) return false;
     if (order.status === "paid") return true;
     const transaction = this.sqlite.transaction(() => {
       const user = this.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(order.user_id) as { balance: number } | undefined;

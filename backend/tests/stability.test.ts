@@ -550,6 +550,15 @@ test("Alipay settings validate RSA keys and official signed callback fields cred
     assert.equal(topups.length, 1, "duplicate Alipay notifications must not duplicate balance ledger entries");
     assert.deepEqual([topups[0].type, topups[0].amount, topups[0].balanceAfter, topups[0].referenceId],
       ["topup", 10, 10, order.orderId]);
+    const precisionOrder = platform.createOrder(userId, 10, "https://api.example.test/console?payment=return");
+    assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001",
+      seller_id: "2088000000000000", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: precisionOrder.orderId,
+      total_amount: "10.001", trade_status: "TRADE_SUCCESS", trade_no: "2026092400000002" })), false,
+    "a signed callback with more than two decimal places must not be rounded into a matching payment");
+    assert.equal((database.sqlite.prepare("SELECT status FROM payment_orders WHERE id=?").get(precisionOrder.orderId) as { status: string }).status,
+      "pending", "a non-canonical amount leaves the order unpaid");
+    assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(userId) as { balance: number }).balance, 10,
+      "a non-canonical callback cannot credit the account");
     assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001", auth_app_id: "different-app",
       seller_id: "2088000000000000", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: order.orderId,
       total_amount: "10.00", trade_status: "TRADE_SUCCESS", trade_no: "2026092400000001" })), false,
