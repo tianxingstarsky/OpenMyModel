@@ -393,6 +393,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
           if (reply.raw.writableLength + Buffer.byteLength(chunk) > MAX_WRITE_QUEUE) {
             throw new RelayError("Downstream response is too slow");
           }
+          platform.refreshUsageReservations(usageReservationId, tokenReservationId);
           capture!.consume(chunk, body.stream === true);
           reply.raw.write(chunk, "utf8");
         },

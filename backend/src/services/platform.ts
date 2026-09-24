@@ -33,6 +33,9 @@ export class NodeRemovalBlockedError extends Error {
 const isoNow = () => new Date().toISOString();
 const DEFAULT_PROVIDER_MAX_TOKENS = 4096;
 const MAX_PROVIDER_MAX_TOKENS = 65_536;
+const PROVIDER_RESERVATION_MS = 15 * 60_000;
+const TOKEN_RESERVATION_MS = 24 * 60 * 60_000;
+const RESERVATION_RENEW_INTERVAL_MS = 5 * 60_000;
 const validEmail = (value: unknown): value is string => typeof value === "string" && value.length <= 254
   && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 const validPublicUrl = (value: string, httpsOnly = false): boolean => {
@@ -85,6 +88,7 @@ function asPem(value: string, type: "PRIVATE KEY" | "PUBLIC KEY"): string {
 export class PlatformService {
   private readonly secret: Buffer;
   private readonly routeCursors = new Map<string, number>();
+  private readonly reservationLastRenewedAt = new Map<string, number>();
 
   constructor(readonly sqlite: Database.Database, readonly dataDir: string, readonly tunnel: WebSocketTunnel, private readonly publicUrl = "") {
     this.secret = getPlatformSecret(dataDir);
@@ -507,7 +511,7 @@ export class PlatformService {
     const tokenReservationId = uuidv4();
     const now = Date.now();
     const createdAt = new Date(now).toISOString();
-    const expiresAt = new Date(now + 15 * 60_000).toISOString();
+    const expiresAt = new Date(now + PROVIDER_RESERVATION_MS).toISOString();
     const reserve = this.sqlite.transaction(() => {
       if (!this.isProviderMode()) throw new RelayError("Service-provider mode is disabled", 403);
       const key = this.sqlite.prepare("SELECT owner_user_id, token_limit, total_tokens FROM gateway_keys WHERE id=? AND is_active=1")
@@ -565,7 +569,10 @@ export class PlatformService {
       }
       return { id, maxTokens, reservedCost, ...(remainingKeyTokens === undefined ? {} : { tokenReservationId }) };
     });
-    return reserve.immediate();
+    const reservation = reserve.immediate();
+    this.reservationLastRenewedAt.set(id, now);
+    if (reservation.tokenReservationId) this.reservationLastRenewedAt.set(tokenReservationId, now);
+    return reservation;
   }
 
   reserveGatewayTokenUsage(keyId: string, promptTokens: number, requestedMaxTokens: number | undefined,
@@ -581,7 +588,8 @@ export class PlatformService {
 
     const id = uuidv4();
     const createdAt = isoNow();
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+    const now = Date.now();
+    const expiresAt = new Date(now + TOKEN_RESERVATION_MS).toISOString();
     const reserve = this.sqlite.transaction(() => {
       const key = this.sqlite.prepare("SELECT token_limit, total_tokens FROM gateway_keys WHERE id=? AND is_active=1")
         .get(keyId) as { token_limit: number; total_tokens: number } | undefined;
@@ -601,15 +609,46 @@ export class PlatformService {
         .run(id, keyId, promptTokens + maxTokens * completionCount, createdAt, expiresAt);
       return { id, maxTokens };
     });
-    return reserve.immediate();
+    const reservation = reserve.immediate();
+    if (reservation.id) this.reservationLastRenewedAt.set(reservation.id, now);
+    return reservation;
+  }
+
+  refreshUsageReservations(providerReservationId?: string, tokenReservationId?: string): void {
+    const now = Date.now();
+    const refreshProvider = !!providerReservationId
+      && now - (this.reservationLastRenewedAt.get(providerReservationId) ?? now) >= RESERVATION_RENEW_INTERVAL_MS;
+    const refreshToken = !!tokenReservationId
+      && now - (this.reservationLastRenewedAt.get(tokenReservationId) ?? now) >= RESERVATION_RENEW_INTERVAL_MS;
+    if (!refreshProvider && !refreshToken) return;
+
+    const lifetime = refreshProvider ? PROVIDER_RESERVATION_MS : TOKEN_RESERVATION_MS;
+    const expiresAt = new Date(now + lifetime).toISOString();
+    const refresh = this.sqlite.transaction(() => {
+      if (refreshProvider) {
+        this.sqlite.prepare("UPDATE provider_usage_reservations SET expires_at=? WHERE id=?")
+          .run(expiresAt, providerReservationId);
+      }
+      if (refreshToken) {
+        this.sqlite.prepare("UPDATE gateway_token_reservations SET expires_at=? WHERE id=?")
+          .run(expiresAt, tokenReservationId);
+      }
+    });
+    refresh.immediate();
+    if (refreshProvider) this.reservationLastRenewedAt.set(providerReservationId!, now);
+    if (refreshToken) this.reservationLastRenewedAt.set(tokenReservationId!, now);
   }
 
   releaseProviderUsage(id: string): void {
     this.sqlite.prepare("DELETE FROM provider_usage_reservations WHERE id=?").run(id);
+    this.reservationLastRenewedAt.delete(id);
   }
 
   releaseGatewayTokenUsage(id: string): void {
-    if (id) this.sqlite.prepare("DELETE FROM gateway_token_reservations WHERE id=?").run(id);
+    if (id) {
+      this.sqlite.prepare("DELETE FROM gateway_token_reservations WHERE id=?").run(id);
+      this.reservationLastRenewedAt.delete(id);
+    }
   }
 
   createUserKey(userId: string, name: unknown, tokenLimit: unknown = 0, rpmLimit: unknown = 0, modelFilterInput: unknown = []) {
@@ -705,6 +744,8 @@ export class PlatformService {
       if (tokenReservationId) this.sqlite.prepare("DELETE FROM gateway_token_reservations WHERE id=? AND key_id=?").run(tokenReservationId, keyId);
     });
     transaction.immediate();
+    if (reservationId) this.reservationLastRenewedAt.delete(reservationId);
+    if (tokenReservationId) this.reservationLastRenewedAt.delete(tokenReservationId);
   }
 
   overview() {
