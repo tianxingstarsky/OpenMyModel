@@ -518,6 +518,14 @@ export class PlatformService {
     return result.changes > 0 ? this.listKeys().find(key => key.id === id) ?? null : null;
   }
 
+  private addBalanceEntry(userId: string, type: "topup" | "usage" | "adjustment", amount: number,
+    balanceAfter: number, referenceId: string | null, description: string, actor = "system", createdAt = isoNow()): void {
+    this.sqlite.prepare(`INSERT INTO platform_balance_entries(id, user_id, entry_type, amount, balance_after,
+      reference_id, description, actor, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(uuidv4(), userId, type, Number(amount.toFixed(8)), Number(balanceAfter.toFixed(8)), referenceId,
+        description.slice(0, 300), actor.slice(0, 80), createdAt);
+  }
+
   recordUsage(keyId: string, publicModel: string, endpoint: string, prompt: number, completion: number, ip: string,
     userAgent: string, inputPrice = 0, outputPrice = 0, reservationId?: string): void {
     const input = Math.max(0, Math.floor(prompt));
@@ -526,7 +534,7 @@ export class PlatformService {
     const cost = Number(((input * inputPrice + output * outputPrice) / 1_000_000).toFixed(8));
     const now = isoNow();
     const transaction = this.sqlite.transaction(() => {
-      this.sqlite.prepare(`INSERT INTO usage_logs(api_key_id, model, endpoint, prompt_tokens, completion_tokens, total_tokens,
+      const usageLog = this.sqlite.prepare(`INSERT INTO usage_logs(api_key_id, model, endpoint, prompt_tokens, completion_tokens, total_tokens,
         timestamp, ip, user_agent, cost) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         keyId, publicModel, endpoint, input, output, total, now, ip || null, userAgent.slice(0, 512), cost);
       this.sqlite.prepare(`UPDATE gateway_keys SET last_used_at=?, total_tokens=total_tokens+?, total_requests=total_requests+1
@@ -536,11 +544,16 @@ export class PlatformService {
         ? this.sqlite.prepare("SELECT user_id FROM provider_usage_reservations WHERE id=? AND key_id=?").get(reservationId, keyId) as { user_id: string } | undefined
         : undefined;
       if (key?.owner_user_id && (this.isProviderMode() || reservation?.user_id === key.owner_user_id) && cost > 0) {
-        this.sqlite.prepare("UPDATE platform_users SET balance=round(balance-?, 8) WHERE id=?").run(cost, key.owner_user_id);
+        const debited = this.sqlite.prepare("UPDATE platform_users SET balance=round(balance-?, 8) WHERE id=?").run(cost, key.owner_user_id);
+        if (debited.changes) {
+          const user = this.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(key.owner_user_id) as { balance: number };
+          this.addBalanceEntry(key.owner_user_id, "usage", -cost, user.balance, String(usageLog.lastInsertRowid),
+            `${publicModel}: ${input} 输入 Token，${output} 输出 Token`, "system", now);
+        }
       }
       if (reservationId) this.sqlite.prepare("DELETE FROM provider_usage_reservations WHERE id=? AND key_id=?").run(reservationId, keyId);
     });
-    transaction();
+    transaction.immediate();
   }
 
   overview() {
@@ -607,10 +620,32 @@ export class PlatformService {
   }
 
   updateUser(id: string, input: Record<string, unknown>) {
-    if (input.balance !== undefined) this.sqlite.prepare("UPDATE platform_users SET balance=? WHERE id=?")
-      .run(safeNumber(input.balance, "余额", -1_000_000_000, 1_000_000_000), id);
-    if (input.active !== undefined) this.sqlite.prepare("UPDATE platform_users SET is_active=? WHERE id=?").run(input.active ? 1 : 0, id);
-    return this.adminUsers().find((user: any) => user.id === id) ?? null;
+    if (input.active !== undefined && typeof input.active !== "boolean") throw new Error("账号状态必须是布尔值");
+    const transaction = this.sqlite.transaction(() => {
+      const current = this.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(id) as { balance: number } | undefined;
+      if (!current) return null;
+      if (input.balance !== undefined) {
+        const balance = Number(safeNumber(input.balance, "余额", -1_000_000_000, 1_000_000_000).toFixed(8));
+        const delta = Number((balance - current.balance).toFixed(8));
+        if (delta !== 0) {
+          const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+          if (!reason || reason.length > 300) throw new Error("余额调整必须填写 1–300 个字符的原因");
+          this.sqlite.prepare("UPDATE platform_users SET balance=? WHERE id=?").run(balance, id);
+          this.addBalanceEntry(id, "adjustment", delta, balance, null, reason, "admin");
+        }
+      }
+      if (input.active !== undefined) this.sqlite.prepare("UPDATE platform_users SET is_active=? WHERE id=?").run(input.active ? 1 : 0, id);
+      return this.adminUsers().find((user: any) => user.id === id) ?? null;
+    });
+    return transaction.immediate();
+  }
+
+  balanceEntries(userId: string, limit = 100) {
+    const bounded = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 500)) : 100;
+    return this.sqlite.prepare(`SELECT id, entry_type AS type, amount, balance_after AS balanceAfter,
+      reference_id AS referenceId, description, actor, created_at AS createdAt
+      FROM platform_balance_entries WHERE user_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+      .all(userId, bounded);
   }
 
   orders(ownerUserId?: string) {
@@ -690,12 +725,19 @@ export class PlatformService {
       || paidAmount.toFixed(2) !== Number(order.amount).toFixed(2)) return false;
     if (order.status === "paid") return true;
     const transaction = this.sqlite.transaction(() => {
+      const user = this.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(order.user_id) as { balance: number } | undefined;
+      if (!user) return false;
       const updated = this.sqlite.prepare("UPDATE payment_orders SET status='paid', paid_at=?, trade_no=? WHERE id=? AND status='pending'")
         .run(isoNow(), String(fields.trade_no || "").slice(0, 128), order.id);
-      if (updated.changes) this.sqlite.prepare("UPDATE platform_users SET balance=round(balance+?, 8) WHERE id=?").run(order.amount, order.user_id);
+      if (updated.changes) {
+        this.sqlite.prepare("UPDATE platform_users SET balance=round(balance+?, 8) WHERE id=?").run(order.amount, order.user_id);
+        const balance = this.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(order.user_id) as { balance: number };
+        this.addBalanceEntry(order.user_id, "topup", order.amount, balance.balance, order.id,
+          `${this.setting("service_name") || "OpenMyModel"} 支付宝充值`, "alipay");
+      }
+      return true;
     });
-    transaction();
-    return true;
+    return transaction.immediate();
   }
 
   adminNodeList() {

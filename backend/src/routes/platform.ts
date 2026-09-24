@@ -137,7 +137,14 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   });
   app.patch<{ Params: { userId: string } }>("/api/admin/users/:userId", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
-    try { return platform.updateUser(request.params.userId, bodyOf(request)); } catch (error) { return apiError(reply, error); }
+    try {
+      const user = platform.updateUser(request.params.userId, bodyOf(request));
+      return user ?? reply.status(404).send({ error: "User not found" });
+    } catch (error) { return apiError(reply, error); }
+  });
+  app.get<{ Params: { userId: string } }>("/api/admin/users/:userId/balance-entries", async (request, reply) => {
+    if (!await requireAdmin(request, reply, platform, auth)) return;
+    return platform.balanceEntries(request.params.userId, Number((request.query as { limit?: string }).limit || 100));
   });
   app.get("/api/admin/orders", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
@@ -211,6 +218,10 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   app.get("/api/user/usage", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;
     return platform.usageRows(userId, Number((request.query as any)?.limit || 100));
+  });
+  app.get("/api/user/balance-entries", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    return platform.balanceEntries(userId, Number((request.query as any)?.limit || 100));
   });
   app.get("/api/user/orders", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;

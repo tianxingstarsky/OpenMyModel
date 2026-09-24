@@ -213,6 +213,19 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     const sessions = new PlatformService(database, directory, new WebSocketTunnel({ authenticate: async () => "ok" }));
     const alphaCookie = `omm_session=${sessions.createSession("user", "user-alpha")}`;
     const betaCookie = `omm_session=${sessions.createSession("user", "user-beta")}`;
+    const adjustmentWithoutReason = await app.inject({ method: "PATCH", url: "/api/admin/users/user-beta",
+      headers: { cookie: adminCookie }, payload: { balance: 92 } });
+    assert.equal(adjustmentWithoutReason.statusCode, 400);
+    assert.equal(database.prepare("SELECT balance FROM platform_users WHERE id='user-beta'").get()?.balance, 91,
+      "invalid support adjustments must leave the balance unchanged");
+    const adjustment = await app.inject({ method: "PATCH", url: "/api/admin/users/user-beta",
+      headers: { cookie: adminCookie }, payload: { balance: 92, reason: "客服补偿测试" } });
+    assert.equal(adjustment.statusCode, 200);
+    const betaBalanceEntries = await app.inject({ method: "GET", url: "/api/admin/users/user-beta/balance-entries",
+      headers: { cookie: adminCookie } });
+    assert.equal(betaBalanceEntries.json().length, 1);
+    assert.deepEqual([betaBalanceEntries.json()[0].type, betaBalanceEntries.json()[0].amount,
+      betaBalanceEntries.json()[0].balanceAfter, betaBalanceEntries.json()[0].actor], ["adjustment", 1, 92, "admin"]);
     const alphaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: alphaCookie }, payload: { name: "alpha-private" } });
     const betaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: betaCookie }, payload: { name: "beta-private" } });
     assert.equal(alphaKeyResponse.statusCode, 200);
@@ -244,6 +257,11 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
       .run("ORDER-BETA", "user-beta", 9, "paid", "beta order", timestamp);
 
     const get = async (path: string) => app.inject({ method: "GET", url: path, headers: { cookie: alphaCookie } });
+    const alphaBalanceEntries = await get("/api/user/balance-entries?userId=user-beta");
+    assert.deepEqual(alphaBalanceEntries.json(), [], "balance history must always be scoped to the signed-in account");
+    const betaOwnBalanceEntries = await app.inject({ method: "GET", url: "/api/user/balance-entries",
+      headers: { cookie: betaCookie } });
+    assert.deepEqual(betaOwnBalanceEntries.json().map((entry: Message) => entry.description), ["客服补偿测试"]);
     const userLimitEdit = await app.inject({ method: "PATCH", url: `/api/admin/keys/${betaKey.id}`, headers: { cookie: alphaCookie },
       payload: { rpmLimit: 1, tokenLimit: 1 } });
     assert.equal(userLimitEdit.statusCode, 401, "provider accounts cannot use administrator key controls");
@@ -301,6 +319,8 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.equal(checkout.searchParams.get("return_url"), "https://api.example.test/console?payment=return");
     const unauthenticated = await app.inject({ method: "GET", url: "/api/user/dashboard" });
     assert.equal(unauthenticated.statusCode, 401);
+    const unauthenticatedBalanceEntries = await app.inject({ method: "GET", url: "/api/user/balance-entries" });
+    assert.equal(unauthenticatedBalanceEntries.statusCode, 401);
     const personalMode = await app.inject({ method: "PUT", url: "/api/admin/settings", headers: { cookie: adminCookie }, payload: { mode: "personal" } });
     assert.equal(personalMode.statusCode, 200);
     const blockedProviderKey = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${alphaKey.key}` } });
@@ -411,6 +431,10 @@ test("Alipay settings validate RSA keys and signed payments credit an order once
     assert.equal(platform.processAlipayNotification(notification), true);
     assert.equal(platform.processAlipayNotification(notification), true, "duplicate notifications must be idempotent");
     assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(userId) as { balance: number }).balance, 10);
+    const topups = platform.balanceEntries(userId) as Array<Message>;
+    assert.equal(topups.length, 1, "duplicate Alipay notifications must not duplicate balance ledger entries");
+    assert.deepEqual([topups[0].type, topups[0].amount, topups[0].balanceAfter, topups[0].referenceId],
+      ["topup", 10, 10, order.orderId]);
     assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001", auth_app_id: "2026000000000001",
       seller_id: "2088000000000000", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: order.orderId,
       total_amount: "100.00", trade_status: "TRADE_SUCCESS", trade_no: "2026092400000001" })), false,
@@ -459,6 +483,10 @@ test("provider usage reservations serialize balance holds and settle on actual t
     assert.equal((database.sqlite.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count, 1,
       "settlement releases the unused portion of a reservation");
     assert.equal((database.sqlite.prepare("SELECT cost FROM usage_logs").get() as any).cost, 0.000008);
+    const usageEntries = platform.balanceEntries("reserve-user") as Array<Message>;
+    assert.equal(usageEntries.length, 1);
+    assert.deepEqual([usageEntries[0].type, usageEntries[0].amount, usageEntries[0].balanceAfter],
+      ["usage", -0.000008, 0.000002]);
     assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id='other-user'").get() as any).balance, 0.00001);
     platform.releaseProviderUsage(otherReservation.id);
     assert.equal((database.sqlite.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count, 0);

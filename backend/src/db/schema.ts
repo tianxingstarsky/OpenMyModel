@@ -196,6 +196,18 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
       trade_no TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS platform_balance_entries (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      entry_type TEXT NOT NULL,
+      amount REAL NOT NULL,
+      balance_after REAL NOT NULL,
+      reference_id TEXT,
+      description TEXT NOT NULL,
+      actor TEXT NOT NULL DEFAULT 'system',
+      created_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_usage_api_key ON usage_logs(api_key_id);
     CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_logs(timestamp);
     CREATE INDEX IF NOT EXISTS idx_model_routes_model ON model_routes(model_id, enabled);
@@ -206,6 +218,7 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
     CREATE INDEX IF NOT EXISTS idx_email_codes_lookup ON email_codes(email, purpose, created_at);
     CREATE INDEX IF NOT EXISTS idx_email_codes_created ON email_codes(created_at);
     CREATE INDEX IF NOT EXISTS idx_orders_user ON payment_orders(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_balance_entries_user_time ON platform_balance_entries(user_id, created_at);
   `);
   try { sqlite.exec("ALTER TABLE usage_logs ADD COLUMN cost REAL NOT NULL DEFAULT 0"); } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
