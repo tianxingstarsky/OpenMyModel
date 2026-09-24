@@ -1,5 +1,25 @@
 # 验证记录
 
+## 第四阶段：账务预留续期与账户响应缓存隔离（分支 `feat/llama-b10909-native-bridge`，2026-09-25）
+
+### 通过的检查
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm --prefix backend run build` | TypeScript 编译通过 |
+| `npm --prefix backend test` | 40 项通过；既有服务商账户隔离测试增加 `private, no-store` 响应头断言；余额与 Token 预留测试通过独立心跳模拟验证长时间无上游数据块时仍续期 |
+| `npm --prefix scripts test` | 13 项通过；本阶段未修改 Bridge 源码 |
+| `git diff --check` | 无空白错误 |
+
+### 覆盖边界
+
+- 账户响应缓存策略由 Fastify 注入测试验证，没有连接真实 CDN 或反向代理。
+- 续期回归以可控时钟和定时器验证服务逻辑；未等待真实 5 分钟推理请求。
+- 当前环境未发现 Flutter SDK 命令，因此本阶段没有重跑桌面端分析或测试；本阶段未修改 Flutter 源码。
+- 本阶段没有连接真实 SMTP、支付宝、远程节点或真实 GPU，也没有执行 Docker 构建。
+
+---
+
 ## 第三阶段：节点级 llama-server Key 与全栈回归（分支 `feat/llama-b10909-native-bridge`，2026-09-24）
 
 ### 通过的检查
