@@ -717,6 +717,21 @@ export class PlatformService {
       models, hourly: hours, tunnel: this.tunnel.statusSnapshot() };
   }
 
+  publicOverview() {
+    const overview = this.overview();
+    return {
+      requests: overview.requests,
+      input: overview.input,
+      output: overview.output,
+      requestsPerMinute: overview.requestsPerMinute,
+      onlineNodes: overview.onlineNodes,
+      totalNodes: overview.totalNodes,
+      models: overview.models.map((model: any) => ({ model: model.model, requests: model.requests, tokens: model.tokens })),
+      hourly: overview.hourly,
+      tunnel: overview.tunnel,
+    };
+  }
+
   usageRows(ownerUserId?: string, limit = 100) {
     const bounded = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 500)) : 100;
     const rows = ownerUserId

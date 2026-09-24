@@ -85,7 +85,7 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   app.get("/api/public/config", async () => platform.getPublicConfig());
   app.get("/api/public/dashboard", async (_request, reply) => {
     if (platform.isProviderMode()) return reply.status(404).send({ error: "Dashboard is private in service-provider mode" });
-    return platform.overview();
+    return platform.publicOverview();
   });
 
   app.post("/api/admin/login", async (request, reply) => {

@@ -194,10 +194,25 @@ test("administrator credential rotation revokes admin sessions without signing u
 });
 
 test("personal mode exposes only its public dashboard and blocks provider signup until configured", async t => {
-  const { app } = await fixture(t);
+  const { app, directory } = await fixture(t);
+  const database = new Database(join(directory, "openmymodel.db"));
+  database.prepare(`INSERT INTO gateway_keys(id,name,prefix,secret_hash,created_at) VALUES(?,?,?,?,?)`)
+    .run("public-dashboard-key", "dashboard test", "sk-test", "public-dashboard-hash", new Date().toISOString());
+  database.prepare(`INSERT INTO usage_logs(api_key_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,timestamp,cost)
+    VALUES(?,?,?,?,?,?,?,?)`).run("public-dashboard-key", "priced-model", "/v1/chat/completions", 2, 3, 5,
+      new Date().toISOString(), 7.25);
+  database.close();
   const dashboard = await app.inject({ method: "GET", url: "/api/public/dashboard" });
   assert.equal(dashboard.statusCode, 200);
   assert.equal(dashboard.json().onlineNodes, 0);
+  assert.equal("revenue" in dashboard.json(), false, "anonymous dashboards do not disclose service revenue");
+  assert.equal("cost" in dashboard.json().models[0], false, "anonymous dashboards do not disclose per-model costs");
+  assert.equal(dashboard.json().models[0].model, "priced-model", "the public dashboard retains operational model metrics");
+  const adminLogin = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
+  const adminCookie = String(adminLogin.headers["set-cookie"]).split(";", 1)[0];
+  const adminOverview = await app.inject({ method: "GET", url: "/api/admin/overview", headers: { cookie: adminCookie } });
+  assert.equal(adminOverview.json().revenue, 7.25, "administrators retain access to financial reporting");
+  assert.equal(adminOverview.json().models[0].cost, 7.25);
   const crossOriginSignup = await app.inject({ method: "POST", url: "/api/auth/email-code",
     headers: { origin: "https://evil.example.test" }, payload: { email: "person@example.com", purpose: "register" } });
   assert.equal(crossOriginSignup.statusCode, 403, "browser auth actions reject cross-origin form submissions");
