@@ -23,9 +23,40 @@ function sessionCookie(request: FastifyRequest, value: string, maxAge: number): 
   return `omm_session=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? "; Secure" : ""}`;
 }
 
+function allowSameOriginMutation(request: FastifyRequest, reply: FastifyReply, platform: PlatformService): boolean {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return true;
+  const originHeader = request.headers.origin;
+  const refererHeader = request.headers.referer;
+  if (originHeader === undefined && refererHeader === undefined) return true;
+
+  let source: string;
+  try {
+    source = new URL(typeof originHeader === "string" ? originHeader : refererHeader!).origin;
+  } catch {
+    reply.status(403).send({ error: "Cross-origin request blocked" });
+    return false;
+  }
+
+  const configuredUrl = platform.getAdminSettings().publicUrl;
+  let expected: string | undefined;
+  if (configuredUrl) {
+    try { expected = new URL(configuredUrl).origin; } catch { /* Fall back to the request host below. */ }
+  }
+  if (!expected) {
+    const first = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] : value)?.split(",", 1)[0].trim();
+    const forwardedProtocol = first(request.headers["x-forwarded-proto"]);
+    const protocol = forwardedProtocol === "http" || forwardedProtocol === "https" ? forwardedProtocol : request.protocol;
+    const host = first(request.headers["x-forwarded-host"]) || request.headers.host;
+    try { if (host) expected = new URL(`${protocol}://${host}`).origin; } catch { /* Reject if no valid request origin can be formed. */ }
+  }
+  if (expected && source === expected) return true;
+  reply.status(403).send({ error: "Cross-origin request blocked" });
+  return false;
+}
+
 async function requireAdmin(request: FastifyRequest, reply: FastifyReply, platform: PlatformService, auth: AdminAuthenticator): Promise<boolean> {
   const session = platform.getSession(cookie(request, "omm_session"));
-  if (session?.role === "admin") return true;
+  if (session?.role === "admin") return allowSameOriginMutation(request, reply, platform);
   if (request.headers["x-admin-password"] !== undefined) {
     const result = await auth.authenticate(request.headers["x-admin-password"], request.ip);
     if (result === "ok") return true;
@@ -41,6 +72,7 @@ function requireUser(request: FastifyRequest, reply: FastifyReply, platform: Pla
   if (!platform.isProviderMode()) { reply.status(403).send({ error: "Service-provider mode is disabled" }); return null; }
   const session = platform.getSession(cookie(request, "omm_session"));
   if (session?.role !== "user" || !session.userId) { reply.status(401).send({ error: "Sign in required" }); return null; }
+  if (!allowSameOriginMutation(request, reply, platform)) return null;
   return session.userId;
 }
 
@@ -71,6 +103,7 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
     return { ok: true, settings: platform.getAdminSettings() };
   });
   app.post("/api/admin/logout", async (request, reply) => {
+    if (cookie(request, "omm_session") && !allowSameOriginMutation(request, reply, platform)) return;
     platform.revokeSession(cookie(request, "omm_session"));
     reply.header("set-cookie", sessionCookie(request, "", 0));
     return { ok: true };
@@ -191,6 +224,7 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
     return { ok: true, email: session.email };
   });
   app.post("/api/auth/logout", async (request, reply) => {
+    if (cookie(request, "omm_session") && !allowSameOriginMutation(request, reply, platform)) return;
     platform.revokeSession(cookie(request, "omm_session"));
     reply.header("set-cookie", sessionCookie(request, "", 0));
     return { ok: true };

@@ -190,6 +190,12 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     alipayPublicKey: alipayKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
   } });
   assert.equal(configured.statusCode, 200, configured.body);
+  const csrfModel = await app.inject({ method: "POST", url: "/api/admin/models",
+    headers: { cookie: adminCookie, origin: "https://evil.example.test", "content-type": "application/x-www-form-urlencoded" },
+    payload: "publicName=csrf-model&inputPrice=0&outputPrice=0" });
+  assert.equal(csrfModel.statusCode, 403, "cookie-authenticated admin writes reject cross-origin forms");
+  const modelsAfterCsrf = await app.inject({ method: "GET", url: "/api/admin/models", headers: { cookie: adminCookie } });
+  assert.equal(modelsAfterCsrf.json().some((model: Message) => model.publicName === "csrf-model"), false);
   const blockedPersonalKey = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${personalKey}` } });
   assert.equal(blockedPersonalKey.statusCode, 403);
   const orphanProviderKey = await app.inject({ method: "POST", url: "/api/admin/keys", headers: { cookie: adminCookie },
@@ -229,7 +235,12 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.equal(betaBalanceEntries.json().length, 1);
     assert.deepEqual([betaBalanceEntries.json()[0].type, betaBalanceEntries.json()[0].amount,
       betaBalanceEntries.json()[0].balanceAfter, betaBalanceEntries.json()[0].actor], ["adjustment", 1, 92, "admin"]);
-    const alphaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: alphaCookie },
+    const csrfUserKey = await app.inject({ method: "POST", url: "/api/user/keys",
+      headers: { cookie: alphaCookie, origin: "https://evil.example.test", "content-type": "application/x-www-form-urlencoded" },
+      payload: "name=csrf-key&rpmLimit=0&tokenLimit=0" });
+    assert.equal(csrfUserKey.statusCode, 403, "cookie-authenticated user writes reject cross-origin forms");
+    const alphaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys",
+      headers: { cookie: alphaCookie, origin: "https://api.example.test" },
       payload: { name: "alpha-private", rpmLimit: 2, tokenLimit: 100 } });
     const betaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: betaCookie }, payload: { name: "beta-private" } });
     assert.equal(alphaKeyResponse.statusCode, 200);
