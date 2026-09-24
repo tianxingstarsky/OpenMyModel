@@ -204,6 +204,7 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
     CREATE INDEX IF NOT EXISTS idx_provider_reservations_user_expiry ON provider_usage_reservations(user_id, expires_at);
     CREATE INDEX IF NOT EXISTS idx_platform_sessions_expiry ON platform_sessions(expires_at);
     CREATE INDEX IF NOT EXISTS idx_email_codes_lookup ON email_codes(email, purpose, created_at);
+    CREATE INDEX IF NOT EXISTS idx_email_codes_created ON email_codes(created_at);
     CREATE INDEX IF NOT EXISTS idx_orders_user ON payment_orders(user_id, created_at);
   `);
   try { sqlite.exec("ALTER TABLE usage_logs ADD COLUMN cost REAL NOT NULL DEFAULT 0"); } catch (error) {

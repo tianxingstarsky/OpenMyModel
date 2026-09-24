@@ -173,19 +173,34 @@ export class PlatformService {
     if (!validEmail(emailInput)) throw new Error("请输入有效邮箱地址");
     if (purposeInput !== "register" && purposeInput !== "login") throw new Error("验证码用途无效");
     const email = emailInput.trim().toLowerCase();
-    const user = this.sqlite.prepare("SELECT id FROM platform_users WHERE email = ?").get(email);
-    if (purposeInput === "register" && user) throw new Error("此邮箱已注册，请直接登录");
-    if (purposeInput === "login" && !user) throw new Error("此邮箱尚未注册");
-    const recent = this.sqlite.prepare("SELECT created_at FROM email_codes WHERE email = ? AND created_at > ? ORDER BY created_at DESC LIMIT 1")
-      .get(email, new Date(Date.now() - 60_000).toISOString());
-    if (recent) throw new Error("验证码发送过于频繁，请稍后再试");
-    this.sqlite.prepare("DELETE FROM email_codes WHERE expires_at < ?").run(isoNow());
-    const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
-    const now = isoNow();
-    this.sqlite.prepare(`INSERT INTO email_codes(id, email, purpose, code_hash, expires_at, created_at)
-      VALUES(?, ?, ?, ?, ?, ?)`)
-      .run(uuidv4(), email, purposeInput, hashPlatformValue(`${email}\n${purposeInput}\n${code}`, this.secret),
-        new Date(Date.now() + 10 * 60_000).toISOString(), now);
+    const sendRequest = this.sqlite.transaction(() => {
+      const user = this.sqlite.prepare("SELECT id, is_active FROM platform_users WHERE email = ?").get(email) as
+        { id: string; is_active: number } | undefined;
+      if ((purposeInput === "register" && user) || (purposeInput === "login" && (!user || user.is_active !== 1))) return null;
+
+      const nowMs = Date.now();
+      const now = new Date(nowMs).toISOString();
+      this.sqlite.prepare("DELETE FROM email_codes WHERE created_at < ?").run(new Date(nowMs - 24 * 60 * 60_000).toISOString());
+      const recent = this.sqlite.prepare("SELECT 1 FROM email_codes WHERE email = ? AND created_at >= ? LIMIT 1")
+        .get(email, new Date(nowMs - 60_000).toISOString());
+      const emailCount = this.sqlite.prepare("SELECT COUNT(*) AS count FROM email_codes WHERE email = ? AND created_at >= ?")
+        .get(email, new Date(nowMs - 60 * 60_000).toISOString()) as { count: number };
+      const globalCount = this.sqlite.prepare("SELECT COUNT(*) AS count FROM email_codes WHERE created_at >= ?")
+        .get(new Date(nowMs - 60 * 60_000).toISOString()) as { count: number };
+      if (recent || emailCount.count >= 5 || globalCount.count >= 200) return null;
+
+      const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+      const id = uuidv4();
+      this.sqlite.prepare("UPDATE email_codes SET consumed_at=? WHERE email=? AND purpose=? AND consumed_at IS NULL")
+        .run(now, email, purposeInput);
+      this.sqlite.prepare(`INSERT INTO email_codes(id, email, purpose, code_hash, expires_at, created_at)
+        VALUES(?, ?, ?, ?, ?, ?)`)
+        .run(id, email, purposeInput, hashPlatformValue(`${email}\n${purposeInput}\n${code}`, this.secret),
+          new Date(nowMs + 10 * 60_000).toISOString(), now);
+      return { id, email, code };
+    }).immediate();
+    if (!sendRequest) return;
+
     const transporter = nodemailer.createTransport({
       host: this.setting("mail_host"), port: Number(this.setting("mail_port") || "465"),
       secure: Number(this.setting("mail_port") || "465") === 465,
@@ -193,10 +208,10 @@ export class PlatformService {
       connectionTimeout: 12_000, greetingTimeout: 12_000, socketTimeout: 15_000,
     });
     await transporter.sendMail({
-      from: this.setting("mail_from"), to: email,
+      from: this.setting("mail_from"), to: sendRequest.email,
       subject: `${this.setting("service_name") || "OpenMyModel"} 邮箱验证码`,
-      text: `你的验证码是 ${code}，10 分钟内有效。若非本人操作，请忽略此邮件。`,
-      html: `<div style="font-family:Arial,sans-serif;color:#1f2937"><h2>${escapeHtml(this.setting("service_name") || "OpenMyModel")}</h2><p>你的邮箱验证码：</p><p style="font-size:30px;font-weight:700;letter-spacing:8px;color:#087f6e">${code}</p><p>10 分钟内有效。若非本人操作，请忽略此邮件。</p></div>`,
+      text: `你的验证码是 ${sendRequest.code}，10 分钟内有效。若非本人操作，请忽略此邮件。`,
+      html: `<div style="font-family:Arial,sans-serif;color:#1f2937"><h2>${escapeHtml(this.setting("service_name") || "OpenMyModel")}</h2><p>你的邮箱验证码：</p><p style="font-size:30px;font-weight:700;letter-spacing:8px;color:#087f6e">${sendRequest.code}</p><p>10 分钟内有效。若非本人操作，请忽略此邮件。</p></div>`,
     });
   }
 
@@ -217,25 +232,36 @@ export class PlatformService {
     if (!this.isProviderMode()) throw new Error("服务商模式尚未启用");
     if (!validEmail(emailInput) || typeof codeInput !== "string" || !/^\d{6}$/.test(codeInput)) throw new Error("邮箱或验证码格式无效");
     const email = emailInput.trim().toLowerCase();
-    const row = this.sqlite.prepare(`SELECT id, code_hash, attempts FROM email_codes
-      WHERE email = ? AND purpose = ? AND consumed_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1`)
-      .get(email, purpose, isoNow()) as { id: string; code_hash: string; attempts: number } | undefined;
-    if (!row || row.attempts >= 5) throw new Error("验证码无效或已过期");
-    this.sqlite.prepare("UPDATE email_codes SET attempts = attempts + 1 WHERE id = ?").run(row.id);
-    const actual = Buffer.from(hashPlatformValue(`${email}\n${purpose}\n${codeInput}`, this.secret), "hex");
-    const expected = Buffer.from(row.code_hash, "hex");
-    if (!timingSafeEqual(actual, expected)) throw new Error("验证码无效或已过期");
-    this.sqlite.prepare("UPDATE email_codes SET consumed_at = ? WHERE id = ?").run(isoNow(), row.id);
-    let user = this.sqlite.prepare("SELECT id, is_active FROM platform_users WHERE email = ?").get(email) as { id: string; is_active: number } | undefined;
-    if (purpose === "register") {
-      if (user) throw new Error("此邮箱已注册，请直接登录");
-      const id = uuidv4();
-      this.sqlite.prepare("INSERT INTO platform_users(id, email, created_at) VALUES(?, ?, ?)").run(id, email, isoNow());
-      user = { id, is_active: 1 };
-    } else if (!user) throw new Error("此邮箱尚未注册");
-    if (!user || user.is_active !== 1) throw new Error("此账号已停用，请联系管理员");
-    this.sqlite.prepare("UPDATE platform_users SET last_login_at = ? WHERE id = ?").run(isoNow(), user.id);
-    return { token: this.createSession("user", user.id), userId: user.id, email };
+    const result = this.sqlite.transaction(() => {
+      if (!this.isProviderMode()) return { error: "服务商模式尚未启用" };
+      const row = this.sqlite.prepare(`SELECT id, code_hash, attempts FROM email_codes
+        WHERE email = ? AND purpose = ? AND consumed_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1`)
+        .get(email, purpose, isoNow()) as { id: string; code_hash: string; attempts: number } | undefined;
+      if (!row || row.attempts >= 5) return { error: "验证码无效或已过期" };
+      const incremented = this.sqlite.prepare(`UPDATE email_codes SET attempts = attempts + 1
+        WHERE id = ? AND consumed_at IS NULL AND attempts < 5`).run(row.id);
+      if (!incremented.changes) return { error: "验证码无效或已过期" };
+      const actual = Buffer.from(hashPlatformValue(`${email}\n${purpose}\n${codeInput}`, this.secret), "hex");
+      const expected = Buffer.from(row.code_hash, "hex");
+      if (!timingSafeEqual(actual, expected)) return { error: "验证码无效或已过期" };
+      const consumed = this.sqlite.prepare("UPDATE email_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL")
+        .run(isoNow(), row.id);
+      if (!consumed.changes) return { error: "验证码无效或已过期" };
+
+      let user = this.sqlite.prepare("SELECT id, is_active FROM platform_users WHERE email = ?")
+        .get(email) as { id: string; is_active: number } | undefined;
+      if (purpose === "register") {
+        if (user) return { error: "此邮箱已注册，请直接登录" };
+        const id = uuidv4();
+        this.sqlite.prepare("INSERT INTO platform_users(id, email, created_at) VALUES(?, ?, ?)").run(id, email, isoNow());
+        user = { id, is_active: 1 };
+      } else if (!user) return { error: "验证码无效或已过期" };
+      if (!user || user.is_active !== 1) return { error: "此账号已停用，请联系管理员" };
+      this.sqlite.prepare("UPDATE platform_users SET last_login_at = ? WHERE id = ?").run(isoNow(), user.id);
+      return { token: this.createSession("user", user.id), userId: user.id, email };
+    }).immediate();
+    if ("error" in result) throw new Error(result.error);
+    return result;
   }
 
   saveModel(input: Record<string, unknown>) {

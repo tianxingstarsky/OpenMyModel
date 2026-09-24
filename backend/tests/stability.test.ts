@@ -16,6 +16,7 @@ import { WebSocketTunnel } from "../src/services/websocket";
 import { relayHeaders } from "../src/routes/openai";
 import { createDatabase } from "../src/db/schema";
 import { PlatformService } from "../src/services/platform";
+import { getPlatformSecret, hashPlatformValue } from "../src/services/secrets";
 
 const PASSWORD = "test-only-admin-password";
 const passwordHash = hashPassword(PASSWORD);
@@ -158,7 +159,8 @@ test("personal mode exposes only its public dashboard and blocks provider signup
   assert.equal(dashboard.statusCode, 200);
   assert.equal(dashboard.json().onlineNodes, 0);
   const signup = await app.inject({ method: "POST", url: "/api/auth/email-code", payload: { email: "person@example.com", purpose: "register" } });
-  assert.equal(signup.statusCode, 400);
+  assert.equal(signup.statusCode, 503);
+  assert.match(signup.json().error, /服务商模式尚未启用/);
 
   const login = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
   const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
@@ -201,6 +203,13 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
       .run("user-alpha", "alpha@example.test", 12.5, createdAt);
     database.prepare("INSERT INTO platform_users(id,email,balance,created_at) VALUES(?,?,?,?)")
       .run("user-beta", "beta@example.test", 91, createdAt);
+    const knownRegister = await app.inject({ method: "POST", url: "/api/auth/email-code",
+      payload: { email: "alpha@example.test", purpose: "register" } });
+    const unknownLogin = await app.inject({ method: "POST", url: "/api/auth/email-code",
+      payload: { email: "unknown@example.test", purpose: "login" } });
+    assert.equal(knownRegister.statusCode, 200);
+    assert.equal(unknownLogin.statusCode, 200);
+    assert.deepEqual(knownRegister.json(), unknownLogin.json(), "email-code responses must not disclose account existence");
     const sessions = new PlatformService(database, directory, new WebSocketTunnel({ authenticate: async () => "ok" }));
     const alphaCookie = `omm_session=${sessions.createSession("user", "user-alpha")}`;
     const betaCookie = `omm_session=${sessions.createSession("user", "user-beta")}`;
@@ -292,6 +301,54 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.equal(blockedProviderKey.statusCode, 403);
   } finally {
     database.close();
+  }
+});
+
+test("provider email codes are single-use and lock after five failed attempts", () => {
+  const directory = mkdtempSync(join(tmpdir(), "openmymodel-email-code-test-"));
+  const database = createDatabase(directory);
+  try {
+    const settings = database.sqlite.prepare("INSERT INTO platform_settings(key, value) VALUES(?, ?)");
+    for (const [key, value] of Object.entries({
+      mode: "provider", mail_host: "smtp.example.test", mail_port: "465", mail_user: "mailer",
+      mail_from: "support@example.test", mail_password: "encrypted-placeholder", alipay_app_id: "app",
+      alipay_seller_id: "seller", alipay_private_key: "private", alipay_public_key: "public",
+    })) settings.run(key, value);
+
+    const now = new Date().toISOString();
+    const secret = getPlatformSecret(directory);
+    const addUser = database.sqlite.prepare("INSERT INTO platform_users(id, email, created_at) VALUES(?, ?, ?)");
+    addUser.run("user-code-valid", "code-valid@example.test", now);
+    addUser.run("user-code-locked", "code-locked@example.test", now);
+    const addCode = database.sqlite.prepare(`INSERT INTO email_codes(id, email, purpose, code_hash, expires_at, created_at)
+      VALUES(?, ?, 'login', ?, ?, ?)`);
+    const expiry = new Date(Date.now() + 10 * 60_000).toISOString();
+    addCode.run("code-valid", "code-valid@example.test",
+      hashPlatformValue("code-valid@example.test\nlogin\n123456", secret), expiry, now);
+    addCode.run("code-locked", "code-locked@example.test",
+      hashPlatformValue("code-locked@example.test\nlogin\n123456", secret), expiry, now);
+
+    const platform = new PlatformService(database.sqlite, directory,
+      new WebSocketTunnel({ authenticate: async () => "ok" }));
+    const session = platform.loginWithCode("code-valid@example.test", "login", "123456");
+    assert.equal(platform.getSession(session.token)?.userId, "user-code-valid");
+    assert.throws(() => platform.loginWithCode("code-valid@example.test", "login", "123456"), /验证码无效/);
+    const consumed = database.sqlite.prepare("SELECT attempts, consumed_at FROM email_codes WHERE id='code-valid'").get() as
+      { attempts: number; consumed_at: string | null };
+    assert.equal(consumed.attempts, 1);
+    assert.ok(consumed.consumed_at);
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      assert.throws(() => platform.loginWithCode("code-locked@example.test", "login", "999999"), /验证码无效/);
+    }
+    assert.throws(() => platform.loginWithCode("code-locked@example.test", "login", "123456"), /验证码无效/);
+    const locked = database.sqlite.prepare("SELECT attempts, consumed_at FROM email_codes WHERE id='code-locked'").get() as
+      { attempts: number; consumed_at: string | null };
+    assert.equal(locked.attempts, 5);
+    assert.equal(locked.consumed_at, null);
+  } finally {
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

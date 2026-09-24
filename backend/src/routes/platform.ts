@@ -158,8 +158,16 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   });
 
   app.post("/api/auth/email-code", async (request, reply) => {
-    try { await platform.sendEmailCode(bodyOf(request).email, bodyOf(request).purpose); return { ok: true }; }
-    catch (error) { return apiError(reply, error, 400); }
+    const body = bodyOf(request);
+    if (typeof body.email !== "string" || body.email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
+      return reply.status(400).send({ error: "请输入有效邮箱地址" });
+    }
+    if (body.purpose !== "register" && body.purpose !== "login") return reply.status(400).send({ error: "验证码用途无效" });
+    if (!platform.isProviderMode()) return reply.status(503).send({ error: "服务商模式尚未启用" });
+
+    void platform.sendEmailCode(body.email, body.purpose)
+      .catch(error => request.log.error({ err: error }, "Email verification code delivery failed"));
+    return { ok: true, message: "如果邮箱符合条件，验证码将发送至邮箱。" };
   });
   for (const purpose of ["register", "login"] as const) {
     app.post(`/api/auth/${purpose}`, async (request, reply) => {
