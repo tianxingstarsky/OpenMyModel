@@ -131,7 +131,7 @@ test("startup uses isolated env configuration and requires explicit initializati
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("database migration makes administrator sessions nullable and preserves existing sessions", () => {
+test("database migrations preserve sessions and add encrypted node-key storage", () => {
   const directory = mkdtempSync(join(tmpdir(), "openmymodel-session-migration-"));
   const path = join(directory, "openmymodel.db");
   const oldDatabase = new Database(path);
@@ -139,7 +139,12 @@ test("database migration makes administrator sessions nullable and preserves exi
     token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, role TEXT NOT NULL,
     expires_at TEXT NOT NULL, created_at TEXT NOT NULL
   ); CREATE INDEX idx_platform_sessions_expiry ON platform_sessions(expires_at);
-  INSERT INTO platform_sessions VALUES('existing-session', 'user-1', 'user', '2999-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');`);
+  INSERT INTO platform_sessions VALUES('existing-session', 'user-1', 'user', '2999-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+  CREATE TABLE nodes (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, connected_at TEXT NOT NULL, last_heartbeat TEXT,
+    is_online INTEGER NOT NULL DEFAULT 0, model_name TEXT, model_config TEXT
+  );
+  INSERT INTO nodes(id,name,connected_at,model_name) VALUES('old-node','Old node','2026-01-01T00:00:00.000Z','old-model');`);
   oldDatabase.close();
   const database = createDatabase(directory);
   try {
@@ -147,6 +152,10 @@ test("database migration makes administrator sessions nullable and preserves exi
     assert.equal(columns.find(column => column.name === "user_id")?.notnull, 0);
     assert.equal(database.sqlite.prepare("SELECT token_hash FROM platform_sessions WHERE token_hash='existing-session'").get()?.token_hash,
       "existing-session");
+    const nodeColumns = database.sqlite.pragma("table_info(nodes)") as Array<{ name: string }>;
+    assert.ok(nodeColumns.some(column => column.name === "upstream_api_key"));
+    assert.equal(database.sqlite.prepare("SELECT model_name, upstream_api_key FROM nodes WHERE id='old-node'").get()?.model_name,
+      "old-model", "existing node records survive credential-storage migration");
   } finally {
     database.close();
     rmSync(directory, { recursive: true, force: true });
@@ -1005,13 +1014,26 @@ test("admin node management keeps disconnected nodes visible with their last rep
   const connected = await node({ nodeId: "retained-node", nodeName: "Retained node", modelName: "last-model" });
   const login = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
   const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+  const headers = { cookie, "content-type": "application/json" };
+
+  const unauthenticatedKeyWrite = await app.inject({ method: "PUT", url: "/api/admin/nodes/retained-node/api-key",
+    payload: { apiKey: "attacker-value" } });
+  assert.equal(unauthenticatedKeyWrite.statusCode, 401, "node credentials can only be changed by an authenticated administrator");
+  const savedNodeKey = await app.inject({ method: "PUT", url: "/api/admin/nodes/retained-node/api-key", headers,
+    payload: { apiKey: "retained-node-secret" } });
+  assert.equal(savedNodeKey.statusCode, 200, savedNodeKey.body);
+  const nodeDetails = await app.inject({ method: "GET", url: "/api/admin/nodes", headers });
+  assert.equal(nodeDetails.json()[0].keyConfigured, true);
+  assert.equal(nodeDetails.body.includes("retained-node-secret"), false, "node keys are never returned to the admin browser");
+  assert.equal(nodeDetails.body.includes("upstream_api_key"), false, "encrypted node keys are also excluded from admin responses");
 
   const model = await app.inject({ method: "POST", url: "/api/admin/models", headers: { cookie },
     payload: { publicName: "retained-model", inputPrice: 0, outputPrice: 0 } });
   assert.equal(model.statusCode, 200);
   const route = await app.inject({ method: "POST", url: `/api/admin/models/${model.json().id}/routes`, headers: { cookie },
-    payload: { nodeId: "retained-node", upstreamModel: "last-model", upstreamKey: "node-secret" } });
+    payload: { nodeId: "retained-node", upstreamModel: "last-model" } });
   assert.equal(route.statusCode, 200, route.body);
+  assert.equal(route.json().routes[0].keySource, "node");
 
   const online = await app.inject({ method: "GET", url: "/api/admin/nodes", headers: { cookie } });
   assert.deepEqual(online.json().map((entry: Message) => [entry.id, entry.isOnline, entry.serverRunning, entry.modelName]),
@@ -1022,9 +1044,15 @@ test("admin node management keeps disconnected nodes visible with their last rep
   const offline = await app.inject({ method: "GET", url: "/api/admin/nodes", headers: { cookie } });
   assert.deepEqual(offline.json().map((entry: Message) => [entry.id, entry.isOnline, entry.serverRunning, entry.modelName]),
     [["retained-node", false, false, "last-model"]]);
+  assert.equal(offline.json()[0].keyConfigured, true, "node credentials stay available while the compute node is offline");
   const offlineModels = await app.inject({ method: "GET", url: "/api/admin/models", headers: { cookie } });
   assert.deepEqual(offlineModels.json()[0].routes.map((entry: Message) => [entry.nodeName, entry.nodeModel, entry.nodeOnline]),
     [["Retained node", "last-model", false]]);
+  const clearedNodeKey = await app.inject({ method: "DELETE", url: "/api/admin/nodes/retained-node/api-key", headers, payload: {} });
+  assert.equal(clearedNodeKey.statusCode, 200, clearedNodeKey.body);
+  assert.equal(clearedNodeKey.json().keyConfigured, false);
+  const afterClear = await app.inject({ method: "GET", url: "/api/admin/nodes", headers });
+  assert.equal(afterClear.json()[0].keyConfigured, false);
 });
 
 test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, auth, and cancellation", async t => {
@@ -1222,6 +1250,7 @@ test("requests beyond slot capacity surface as queued; loading nodes contribute 
 test("managed gateway routes with the configured llama-server key and meters usage", async t => {
   const { app, node, post, directory } = await fixture(t);
   const nodeKey = "node-secret-for-llama-server";
+  let expectedNodeKey = nodeKey;
   let relayed = false;
   await node({ modelName: "internal-model" }, (msg, send) => {
     if (msg.type !== "http_relay") return;
@@ -1238,7 +1267,7 @@ test("managed gateway routes with the configured llama-server key and meters usa
       return;
     }
     relayed = true;
-    assert.equal(msg.upstreamApiKey, nodeKey);
+    assert.equal(msg.upstreamApiKey, expectedNodeKey);
     const requestBody = JSON.parse(msg.body);
     assert.equal(requestBody.model, "internal-model-v2");
     const streaming = requestBody.stream === true;
@@ -1255,28 +1284,34 @@ test("managed gateway routes with the configured llama-server key and meters usa
   assert.equal(login.statusCode, 200);
   const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
   const adminHeaders = { cookie, "content-type": "application/json" };
+  const nodeKeyResponse = await app.inject({ method: "PUT", url: "/api/admin/nodes/node-1/api-key", headers: adminHeaders,
+    payload: { apiKey: nodeKey } });
+  assert.equal(nodeKeyResponse.statusCode, 200, nodeKeyResponse.body);
   const modelResponse = await app.inject({ method: "POST", url: "/api/admin/models", headers: adminHeaders,
     payload: { publicName: "public-chat", remark: "调度验证", inputPrice: 2, outputPrice: 4 } });
   assert.equal(modelResponse.statusCode, 200, modelResponse.body);
   const modelId = modelResponse.json().id;
   const routeResponse = await app.inject({ method: "POST", url: `/api/admin/models/${modelId}/routes`, headers: adminHeaders,
-    payload: { nodeId: "node-1", upstreamModel: "internal-model-v2", upstreamKey: nodeKey, weight: 1 } });
+    payload: { nodeId: "node-1", upstreamModel: "internal-model-v2", weight: 1 } });
   assert.equal(routeResponse.statusCode, 200, routeResponse.body);
   assert.equal(routeResponse.json().routes[0].keyConfigured, true);
+  assert.equal(routeResponse.json().routes[0].keySource, "node");
   assert.equal(routeResponse.body.includes(nodeKey), false, "admin route listing must not disclose the node key");
   const storedRoutes = new Database(join(directory, "openmymodel.db"));
   try {
-    const storedKey = storedRoutes.prepare("SELECT upstream_key FROM model_routes WHERE id=?")
-      .get(routeResponse.json().routes[0].id)?.upstream_key as string;
+    const storedKey = storedRoutes.prepare("SELECT upstream_api_key FROM nodes WHERE id=?")
+      .get("node-1")?.upstream_api_key as string;
     assert.match(storedKey, /^v1\./, "the node's llama-server key must be encrypted at rest");
     assert.notEqual(storedKey, nodeKey);
+    assert.equal(storedRoutes.prepare("SELECT upstream_key FROM model_routes WHERE id=?")
+      .get(routeResponse.json().routes[0].id)?.upstream_key, "", "new model routes refer to the node-level key instead of copying it");
   } finally { storedRoutes.close(); }
   const existingRoute = routeResponse.json().routes[0];
   const editedRouteResponse = await app.inject({ method: "POST", url: `/api/admin/models/${modelId}/routes`, headers: adminHeaders,
     payload: { id: existingRoute.id, nodeId: existingRoute.nodeId, upstreamModel: "internal-model-v2", upstreamKey: "", weight: 3 } });
   assert.equal(editedRouteResponse.statusCode, 200, editedRouteResponse.body);
   assert.equal(editedRouteResponse.json().routes[0].weight, 3);
-  assert.equal(editedRouteResponse.json().routes[0].keyConfigured, true, "leaving the node key blank keeps the encrypted value");
+  assert.equal(editedRouteResponse.json().routes[0].keyConfigured, true, "the route continues to use its configured node-level key");
   assert.equal(editedRouteResponse.body.includes(nodeKey), false, "editing a route still never returns the node key");
 
   const keyResponse = await app.inject({ method: "POST", url: "/api/admin/keys", headers: adminHeaders,
@@ -1294,9 +1329,21 @@ test("managed gateway routes with the configured llama-server key and meters usa
   assert.equal(responseBody.usage.completion_tokens, 7);
   assert.equal(relayed, true);
 
+  expectedNodeKey = "rotated-node-secret-for-llama-server";
+  const rotatedNodeKey = await app.inject({ method: "PUT", url: "/api/admin/nodes/node-1/api-key", headers: adminHeaders,
+    payload: { apiKey: expectedNodeKey } });
+  assert.equal(rotatedNodeKey.statusCode, 200, rotatedNodeKey.body);
+  assert.equal(rotatedNodeKey.body.includes(expectedNodeKey), false, "rotating a node key never returns the secret");
+
   const streamed = await post({ model: "public-chat", stream: true, stream_options: { include_usage: false }, messages: [] }, gatewayKey).response;
   assert.equal(streamed.statusCode, 200);
   assert.match(await text(streamed), /"prompt_tokens":3/);
+  const rotatedStoredKey = new Database(join(directory, "openmymodel.db"));
+  try {
+    const encrypted = rotatedStoredKey.prepare("SELECT upstream_api_key FROM nodes WHERE id='node-1'").get()?.upstream_api_key as string;
+    assert.match(encrypted, /^v1\./);
+    assert.notEqual(encrypted, expectedNodeKey);
+  } finally { rotatedStoredKey.close(); }
 
   const limited = await post({ model: "public-chat", messages: [] }, gatewayKey).response;
   assert.equal(limited.statusCode, 429);

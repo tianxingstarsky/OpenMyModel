@@ -13,7 +13,7 @@ type GatewayKey = {
 };
 type ModelRoute = {
   id: string; model_id: string; public_name: string; node_id: string; upstream_model: string;
-  upstream_key: string; weight: number; enabled: number; input_price: number; output_price: number;
+  upstream_key: string; node_api_key?: string | null; weight: number; enabled: number; input_price: number; output_price: number;
 };
 
 const isoNow = () => new Date().toISOString();
@@ -300,9 +300,10 @@ export class PlatformService {
     const previous = this.sqlite.prepare("SELECT upstream_key FROM model_routes WHERE id = ?").get(id) as { upstream_key: string } | undefined;
     const upstreamKey = typeof input.upstreamKey === "string" && input.upstreamKey.trim()
       ? encryptSecret(input.upstreamKey.trim(), this.secret) : previous?.upstream_key || "";
-    if (!modelId || !nodeId || !upstreamModel || !upstreamKey || upstreamModel.length > 256 || /[\r\n]/.test(upstreamModel)
+    const nodeKey = this.sqlite.prepare("SELECT upstream_api_key FROM nodes WHERE id=?").get(nodeId) as { upstream_api_key: string | null } | undefined;
+    if (!modelId || !nodeId || !upstreamModel || (!upstreamKey && !nodeKey?.upstream_api_key) || upstreamModel.length > 256 || /[\r\n]/.test(upstreamModel)
       || (typeof input.upstreamKey === "string" && (input.upstreamKey.length > 4096 || /[\r\n]/.test(input.upstreamKey)))) {
-      throw new Error("请选择模型和节点，填写节点实际模型名及与 llama-server --api-key 一致的节点 Key");
+      throw new Error("请选择模型和节点，填写节点实际模型名，并先在节点管理中配置该节点的 llama-server API Key");
     }
     if (!this.sqlite.prepare("SELECT id FROM platform_models WHERE id = ?").get(modelId)) throw new Error("模型不存在");
     const weight = Math.round(safeNumber(input.weight ?? 1, "调度权重", 1, 100));
@@ -322,6 +323,8 @@ export class PlatformService {
       .map(node => [node.id, node]));
     const models = this.sqlite.prepare("SELECT * FROM platform_models ORDER BY public_name COLLATE NOCASE").all() as Array<Record<string, any>>;
     const routes = this.sqlite.prepare("SELECT * FROM model_routes ORDER BY weight DESC").all() as Array<Record<string, any>>;
+    const nodeKeys = new Map((this.sqlite.prepare("SELECT id, upstream_api_key FROM nodes").all() as Array<{ id: string; upstream_api_key: string | null }>)
+      .map(node => [node.id, node.upstream_api_key]));
     return models.map(model => ({
       id: model.id, publicName: model.public_name, remark: model.remark,
       inputPrice: model.input_price, outputPrice: model.output_price, enabled: model.enabled === 1,
@@ -330,7 +333,8 @@ export class PlatformService {
         const node = liveNode || knownNodes.get(route.node_id);
         return { id: route.id, nodeId: route.node_id, nodeName: node?.name || route.node_id, nodeModel: node?.modelName || "",
           nodeOnline: !!liveNode?.serverRunning, upstreamModel: route.upstream_model, weight: route.weight,
-          enabled: route.enabled === 1, keyConfigured: !!route.upstream_key };
+          enabled: route.enabled === 1, keyConfigured: !!nodeKeys.get(route.node_id) || !!route.upstream_key,
+          keySource: nodeKeys.get(route.node_id) ? "node" : route.upstream_key ? "route" : "missing" };
       }),
     }));
   }
@@ -346,8 +350,9 @@ export class PlatformService {
   }
 
   async selectManagedRoute(modelName: string, signal?: AbortSignal): Promise<{ nodeId: string; connectionId: string; upstreamModel: string; upstreamKey: string; publicName: string; inputPrice: number; outputPrice: number }> {
-    const rows = this.sqlite.prepare(`SELECT r.*, m.public_name, m.input_price, m.output_price FROM model_routes r
-      JOIN platform_models m ON m.id=r.model_id WHERE m.public_name=? AND m.enabled=1 AND r.enabled=1 ORDER BY r.weight DESC, r.id ASC`)
+    const rows = this.sqlite.prepare(`SELECT r.*, n.upstream_api_key AS node_api_key, m.public_name, m.input_price, m.output_price FROM model_routes r
+      JOIN platform_models m ON m.id=r.model_id LEFT JOIN nodes n ON n.id=r.node_id
+      WHERE m.public_name=? AND m.enabled=1 AND r.enabled=1 ORDER BY r.weight DESC, r.id ASC`)
       .all(modelName) as ModelRoute[];
     const online = new Set(this.tunnel.getOnlineNodes().filter(node => node.serverRunning).map(node => node.id));
     let candidates = rows.filter(row => online.has(row.node_id));
@@ -366,7 +371,8 @@ export class PlatformService {
       if (signal?.aborted) throw new RelayError("HTTP client disconnected", 499);
       try {
         const target = this.tunnel.routeToNode(route.node_id);
-        return { ...target, upstreamModel: route.upstream_model, upstreamKey: route.upstream_key ? decryptSecret(route.upstream_key, this.secret) : "",
+        const encryptedKey = route.node_api_key || route.upstream_key;
+        return { ...target, upstreamModel: route.upstream_model, upstreamKey: encryptedKey ? decryptSecret(encryptedKey, this.secret) : "",
           publicName: route.public_name, inputPrice: route.input_price, outputPrice: route.output_price };
       } catch (error) { lastError = error; }
     }
@@ -870,8 +876,11 @@ export class PlatformService {
   adminNodeList() {
     const nodes = new Map<string, Record<string, any>>();
     const stored = this.sqlite.prepare(`SELECT id, name, connected_at AS connectedAt, last_heartbeat AS lastHeartbeat,
-      model_name AS modelName, model_config AS modelConfig FROM nodes`).all() as Array<Record<string, any>>;
-    for (const node of stored) nodes.set(node.id, { ...node, isOnline: false, serverRunning: false, slots: null });
+      model_name AS modelName, model_config AS modelConfig, upstream_api_key AS upstreamApiKey FROM nodes`).all() as Array<Record<string, any>>;
+    for (const node of stored) {
+      const { upstreamApiKey, ...safeNode } = node;
+      nodes.set(node.id, { ...safeNode, keyConfigured: !!upstreamApiKey, isOnline: false, serverRunning: false, slots: null });
+    }
     for (const node of this.tunnel.getOnlineNodes()) {
       nodes.set(node.id, { ...nodes.get(node.id), ...node, isOnline: true });
     }
@@ -880,6 +889,24 @@ export class PlatformService {
     const rows: Array<Record<string, any>> = [...nodes.values()]
       .map(node => ({ ...node, routeCount: byId.get(node.id) || 0 }));
     return rows.sort((a, b) => Number(b.isOnline) - Number(a.isOnline) || String(a.name).localeCompare(String(b.name)));
+  }
+
+  saveNodeApiKey(nodeIdInput: unknown, apiKeyInput: unknown) {
+    const nodeId = typeof nodeIdInput === "string" ? nodeIdInput.trim() : "";
+    const apiKey = typeof apiKeyInput === "string" ? apiKeyInput.trim() : "";
+    if (!nodeId || nodeId.length > 256 || !apiKey || apiKey.length > 4096 || /[\0\r\n]/.test(apiKey)) {
+      throw new Error("节点 ID 或 llama-server API Key 无效");
+    }
+    const updated = this.sqlite.prepare("UPDATE nodes SET upstream_api_key=? WHERE id=?")
+      .run(encryptSecret(apiKey, this.secret), nodeId);
+    if (!updated.changes) throw new Error("节点不存在，请先让节点连接到服务器");
+    return { nodeId, keyConfigured: true };
+  }
+
+  clearNodeApiKey(nodeIdInput: unknown): boolean {
+    const nodeId = typeof nodeIdInput === "string" ? nodeIdInput.trim() : "";
+    if (!nodeId || nodeId.length > 256) return false;
+    return this.sqlite.prepare("UPDATE nodes SET upstream_api_key=NULL WHERE id=?").run(nodeId).changes > 0;
   }
 }
 

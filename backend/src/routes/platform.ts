@@ -117,6 +117,17 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
     if (!await requireAdmin(request, reply, platform, auth)) return;
     return platform.adminNodeList();
   });
+  app.put<{ Params: { nodeId: string } }>("/api/admin/nodes/:nodeId/api-key", async (request, reply) => {
+    if (!await requireAdmin(request, reply, platform, auth)) return;
+    try { return platform.saveNodeApiKey(request.params.nodeId, bodyOf(request).apiKey); }
+    catch (error) { return apiError(reply, error); }
+  });
+  app.delete<{ Params: { nodeId: string } }>("/api/admin/nodes/:nodeId/api-key", async (request, reply) => {
+    if (!await requireAdmin(request, reply, platform, auth)) return;
+    return platform.clearNodeApiKey(request.params.nodeId)
+      ? { ok: true, keyConfigured: false }
+      : reply.status(404).send({ error: "Node not found" });
+  });
   app.get("/api/admin/models", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
     return platform.adminModels();

@@ -46,6 +46,7 @@ export const nodes = sqliteTable("nodes", {
   isOnline: integer("is_online", { mode: "boolean" }).notNull().default(false),
   modelName: text("model_name"),            // 当前加载的模型
   modelConfig: text("model_config"),        // JSON 模型配置
+  upstreamApiKey: text("upstream_api_key"), // AES-GCM encrypted llama-server API key
 });
 
 // ==================== 数据库初始化 ====================
@@ -97,7 +98,8 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
       last_heartbeat TEXT,
       is_online INTEGER NOT NULL DEFAULT 0,
       model_name TEXT,
-      model_config TEXT
+      model_config TEXT,
+      upstream_api_key TEXT
     );
 
     CREATE TABLE IF NOT EXISTS platform_settings (
@@ -230,6 +232,9 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
     CREATE INDEX IF NOT EXISTS idx_balance_entries_user_time ON platform_balance_entries(user_id, created_at);
   `);
   try { sqlite.exec("ALTER TABLE usage_logs ADD COLUMN cost REAL NOT NULL DEFAULT 0"); } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
+  }
+  try { sqlite.exec("ALTER TABLE nodes ADD COLUMN upstream_api_key TEXT"); } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
   }
   const sessionUserId = (sqlite.pragma("table_info(platform_sessions)") as Array<{ name: string; notnull: number }>)

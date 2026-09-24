@@ -7,8 +7,8 @@
 - 本地聊天由 Flutter 直连引擎官方 OpenAI 兼容 API（`/v1/chat/completions` SSE），不再经过任何本地 HTTP 代理；停止生成即关闭底层连接。
 - 配置档案由 Dart `ProfileStore` 直接读写 `%USERPROFILE%\.openmymodel\profiles`，兼容旧版本导出的档案文件（旧布尔字段自动映射为三态 `auto/on/off`）。
 - Node Bridge 从 Flutter 接收桌面端调用密钥和连接配置，通过 WebSocket 连接云后端。桌面端 Key 仍由本机桥接校验；认证请求中的 Key 会经过云端内存。
-- 管理端为模型路由保存与 `llama-server --api-key` 一致的节点 Key，并以服务器数据目录中的 AES 密钥加密。统一网关 Key 只保存 HMAC 哈希，原始 Key 创建时仅显示一次。
-- 云后端使用 Fastify；统一网关调用按公开模型别名选择在线节点路由，将该路由的上游模型名和节点 Key 经隧道转发。不会把用户对话广播到其他节点。
+- 管理端按节点保存与 `llama-server --api-key` 一致的节点 Key，并以服务器数据目录中的 AES 密钥加密；同一节点的所有模型路由共用此 Key，旧版逐路由 Key 继续作为回退。统一网关 Key 只保存 HMAC 哈希，原始 Key 创建时仅显示一次。
+- 云后端使用 Fastify；统一网关调用按公开模型别名选择在线节点路由，将该路由的上游模型名和节点级 Key 经隧道转发；没有节点级 Key 时兼容使用历史路由级 Key。不会把用户对话广播到其他节点。
 - `/admin` 是管理员面板；个人模式的 `/dashboard` 无需登录并只展示聚合数据；服务商模式的 `/console` 需要邮箱验证码登录，用户可设置自己 API Key 的每分钟请求和 Token 总量限额。
 - 云端只承诺 `/v1/models` 和 `/v1/chat/completions`，不是完整 OpenAI API 实现。引擎本地的其他端点（`/props`、`/slots`、`/metrics` 等）属于引擎原生能力，未全部透出云端。
 - 服务端网关会记录上游返回的输入/输出 Token、费用、请求次数和每分钟频率；服务商模式按输入/输出每百万 Token 计价并从账户余额扣除，流式请求会启用 `stream_options.include_usage` 获取 usage。若上游未返回输出 usage，会调用同一节点的 `/tokenize` 计量已生成的文本（包括客户端断开前已收到的部分）；该补偿也不可用时会记录错误并按节点已报告的 Token 结算。个人模式的公开聚合仪表盘也统计经云端网关转发的节点 Key 调用；这类调用使用服务器密钥生成的 HMAC 标识归档并按上游报告计量，不扣余额。完全绕过云端网关直连 `llama-server` 的请求无法纳入云端统计。
@@ -21,7 +21,7 @@
 
 1. Bridge 发送 `auth`（包含 `protocolVersion: 2`、节点信息和可选 `serverRunning`），云端回复 `auth_ok`。
 2. 请求认证使用 `validate_key` / `key_valid`；密钥由本机校验。
-3. 转发使用 `http_relay { requestId, path, method, body, upstreamApiKey? }`。个人模式的桌面 Key 调用不发送覆盖值，Bridge 沿用本机配置的 llama-server Key；管理端路由则传入该节点加密保存的上游 Key。
+3. 转发使用 `http_relay { requestId, path, method, body, upstreamApiKey? }`。个人模式的桌面 Key 调用不发送覆盖值，Bridge 沿用本机配置的 llama-server Key；管理端路由则传入该节点加密保存的上游 Key；历史版本逐路由保存的 Key 仍可用作回退。
 4. 上游响应先发送 `http_headers { requestId, statusCode, headers }`，再发送任意数量的 `http_chunk { requestId, data }`，最后发送 `http_done`。
 5. 转发错误使用 `http_error { requestId, statusCode, message }`。响应头尚未发送时返回对应 HTTP 错误；响应开始后发生错误，中断连接，不伪造成功结束。
 6. 客户端取消、空闲超时或节点断线都会关闭上游请求。取消消息为 `cancel_request { requestId }`。

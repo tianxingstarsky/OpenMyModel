@@ -52,7 +52,7 @@ export async function buildApp(options: AppOptions = {}) {
     logger: options.logger ?? {
       level: "info",
       redact: ["req.headers.authorization", "req.headers['x-admin-password']", "password", "body.password", "body.code",
-        "body.mailPassword", "body.alipayPrivateKey", "body.alipayPublicKey", "body.upstreamKey"],
+        "body.mailPassword", "body.alipayPrivateKey", "body.alipayPublicKey", "body.upstreamKey", "body.apiKey"],
     },
   });
   app.decorate("tunnel", tunnel);

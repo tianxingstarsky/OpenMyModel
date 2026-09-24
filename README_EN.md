@@ -70,7 +70,7 @@ flowchart LR
 - **Built-in Chat**: Multi-image upload + text, streaming responses, stop-generation cuts the underlying connection
 - **Parameter Profiles**: Saved locally (compatible with profile files exported by older versions), switch with one click
 - **Public Status Page**: the cloud backend's landing page shows online nodes, concurrency capacity/utilization, throughput and per-model concurrency — public aggregates only
-- **Admin and Routing**: `/admin` configures nodes, public model aliases, upstream model names, required `llama-server --api-key` credentials, route weights, unified API keys, usage and orders. Node keys are encrypted on the server and sent only to their node over the tunnel
+- **Admin and Routing**: `/admin` configures nodes, public model aliases, upstream model names, one `llama-server --api-key` configured per node, route weights, unified API keys, usage and orders. Node keys are configured once per node, encrypted on the server, and sent only to their node over the tunnel; older route-level credentials remain a fallback
 - **Personal Mode**: no end-user registration; admins issue unified API keys, and `/dashboard` shows aggregate status without login. Callers may also access a node directly with its desktop-managed key
 - **Service-Provider Mode**: requires an HTTPS public base URL, configured SMTP email, Alipay app ID, seller ID, RSA2 private key and Alipay public key. Payment return and notification URLs always use the configured base URL. Users register/sign in with email codes, manage their own API keys, usage, orders and balance history, and top up at `/console`. Billing uses input/output token prices; cached tokens have no separate price
 - **Separate API Key Roles**: the node key protects the local `llama-server` HTTP service. The gateway key identifies external callers for limits and metering. Gateway keys are shown once; only their hashes are stored
@@ -240,9 +240,9 @@ Then click "Restart" in Baota Node Projects.
 ```
 Personal-mode direct call: desktop API key or node `--api-key` -> that node's bridge validation -> llama-server
 Unified gateway call: gateway API key -> backend auth/limits/metering -> public model route
-  -> decrypt that route's node key -> tunnel relay -> node bridge calls llama-server with Bearer key
+  -> decrypt the selected node's API key (falling back to a legacy route-level key) -> tunnel relay -> node bridge calls llama-server with Bearer key
 
-The node key protects the node's HTTP service and is managed separately from caller gateway keys. Node keys are encrypted with a local server secret in the database; gateway keys are stored as hashes. Use HTTPS/WSS in production and protect the server data directory and secret file.
+The node key protects the node's HTTP service and is managed separately from caller gateway keys. The admin configures one key per node and all routes for that node share it; older route-level keys remain a fallback. Node keys are encrypted with a local server secret in the database; gateway keys are stored as hashes. Use HTTPS/WSS in production and protect the server data directory and secret file.
 ```
 
 Admin console: `/admin`; public personal-mode dashboard: `/dashboard`; provider user console: `/console`. Configure the HTTPS public base URL, SMTP and Alipay credentials in the admin console before enabling provider mode.
