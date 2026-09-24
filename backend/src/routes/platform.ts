@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { AdminAuthenticator } from "../services/auth";
-import { NodeKeyInUseError, PlatformService } from "../services/platform";
+import { NodeKeyInUseError, NodeRemovalBlockedError, PlatformService } from "../services/platform";
 import { RelayError } from "../services/websocket";
 
 const bodyOf = (request: FastifyRequest): Record<string, unknown> =>
@@ -117,6 +117,16 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   app.get("/api/admin/nodes", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
     return platform.adminNodeList();
+  });
+  app.delete<{ Params: { nodeId: string } }>("/api/admin/nodes/:nodeId", async (request, reply) => {
+    if (!await requireAdmin(request, reply, platform, auth)) return;
+    try {
+      return platform.removeOfflineNode(request.params.nodeId)
+        ? { ok: true }
+        : reply.status(404).send({ error: "Node not found" });
+    } catch (error) {
+      return apiError(reply, error, error instanceof NodeRemovalBlockedError ? 409 : 400);
+    }
   });
   app.put<{ Params: { nodeId: string } }>("/api/admin/nodes/:nodeId/api-key", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;

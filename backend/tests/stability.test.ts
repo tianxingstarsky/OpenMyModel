@@ -1117,6 +1117,8 @@ test("admin node management keeps disconnected nodes visible with their last rep
   assert.equal(savedNodeKey.statusCode, 200, savedNodeKey.body);
   const unauthenticatedKeyVerify = await app.inject({ method: "POST", url: "/api/admin/nodes/retained-node/api-key/verify", payload: {} });
   assert.equal(unauthenticatedKeyVerify.statusCode, 401, "checking a stored node credential requires administrator authentication");
+  const unauthenticatedNodeRemoval = await app.inject({ method: "DELETE", url: "/api/admin/nodes/retained-node" });
+  assert.equal(unauthenticatedNodeRemoval.statusCode, 401, "removing a node requires administrator authentication");
   const verifiedNodeKey = await app.inject({ method: "POST", url: "/api/admin/nodes/retained-node/api-key/verify", headers, payload: {} });
   assert.deepEqual(verifiedNodeKey.json(), { nodeId: "retained-node", valid: true });
   assert.equal(verifiedNodeKey.body.includes("retained-node-secret"), false, "verification never returns the stored secret");
@@ -1139,10 +1141,17 @@ test("admin node management keeps disconnected nodes visible with their last rep
     payload: { nodeId: "retained-node", upstreamModel: "last-model" } });
   assert.equal(route.statusCode, 200, route.body);
   assert.equal(route.json().routes[0].keySource, "node");
+  const disabledRoute = await app.inject({ method: "POST", url: `/api/admin/models/${model.json().id}/routes`, headers: { cookie },
+    payload: { nodeId: "retained-node", upstreamModel: "last-model-disabled", enabled: false } });
+  assert.equal(disabledRoute.statusCode, 200, disabledRoute.body);
+  const enabledRouteId = disabledRoute.json().routes.find((entry: Message) => entry.enabled).id;
+  const disabledRouteId = disabledRoute.json().routes.find((entry: Message) => !entry.enabled).id;
 
   const online = await app.inject({ method: "GET", url: "/api/admin/nodes", headers: { cookie } });
   assert.deepEqual(online.json().map((entry: Message) => [entry.id, entry.isOnline, entry.serverRunning, entry.modelName]),
     [["retained-node", true, true, "last-model"]]);
+  const removeOnline = await app.inject({ method: "DELETE", url: "/api/admin/nodes/retained-node", headers: { cookie } });
+  assert.equal(removeOnline.statusCode, 409, `a connected node cannot be removed from inventory: ${removeOnline.body}`);
 
   connected.socket.close();
   await until(() => tunnel.getOnlineNodes().length === 0);
@@ -1153,20 +1162,31 @@ test("admin node management keeps disconnected nodes visible with their last rep
   const offlineVerify = await app.inject({ method: "POST", url: "/api/admin/nodes/retained-node/api-key/verify", headers, payload: {} });
   assert.equal(offlineVerify.statusCode, 503, "key verification explains that the node must be online");
   const offlineModels = await app.inject({ method: "GET", url: "/api/admin/models", headers: { cookie } });
-  assert.deepEqual(offlineModels.json()[0].routes.map((entry: Message) => [entry.nodeName, entry.nodeModel, entry.nodeOnline]),
-    [["Retained node", "last-model", false]]);
+  assert.deepEqual(offlineModels.json()[0].routes.map((entry: Message) => [entry.nodeName, entry.nodeModel, entry.nodeOnline]).sort(),
+    [["Retained node", "last-model", false], ["Retained node", "last-model", false]].sort());
+  assert.equal(offline.json()[0].routeCount, 2, "inventory counts enabled and disabled model-route references");
+  const blockedRemoval = await app.inject({ method: "DELETE", url: "/api/admin/nodes/retained-node", headers: { cookie } });
+  assert.equal(blockedRemoval.statusCode, 409);
+  assert.match(blockedRemoval.json().error, /2 条模型路由引用/);
   const blockedClear = await app.inject({ method: "DELETE", url: "/api/admin/nodes/retained-node/api-key", headers, payload: {} });
   assert.equal(blockedClear.statusCode, 409);
   assert.match(blockedClear.json().error, /1 条启用路由依赖节点级 API Key/);
   const stillConfigured = await app.inject({ method: "GET", url: "/api/admin/nodes", headers: { cookie } });
   assert.equal(stillConfigured.json()[0].keyConfigured, true, "a rejected key removal must preserve the active route credential");
-  const removeRoute = await app.inject({ method: "DELETE", url: `/api/admin/routes/${route.json().routes[0].id}`, headers: { cookie } });
+  const removeRoute = await app.inject({ method: "DELETE", url: `/api/admin/routes/${enabledRouteId}`, headers: { cookie } });
   assert.equal(removeRoute.statusCode, 200, removeRoute.body);
+  const removeDisabledRoute = await app.inject({ method: "DELETE", url: `/api/admin/routes/${disabledRouteId}`, headers: { cookie } });
+  assert.equal(removeDisabledRoute.statusCode, 200, removeDisabledRoute.body);
   const clearedNodeKey = await app.inject({ method: "DELETE", url: "/api/admin/nodes/retained-node/api-key", headers, payload: {} });
   assert.equal(clearedNodeKey.statusCode, 200, clearedNodeKey.body);
   assert.equal(clearedNodeKey.json().keyConfigured, false);
   const afterClear = await app.inject({ method: "GET", url: "/api/admin/nodes", headers });
   assert.equal(afterClear.json()[0].keyConfigured, false);
+  const removedNode = await app.inject({ method: "DELETE", url: "/api/admin/nodes/retained-node", headers: { cookie } });
+  assert.deepEqual(removedNode.json(), { ok: true });
+  assert.deepEqual((await app.inject({ method: "GET", url: "/api/admin/nodes", headers })).json(), []);
+  const missingNode = await app.inject({ method: "DELETE", url: "/api/admin/nodes/retained-node", headers: { cookie } });
+  assert.equal(missingNode.statusCode, 404);
 });
 
 test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, auth, and cancellation", async t => {

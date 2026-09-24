@@ -23,6 +23,13 @@ export class NodeKeyInUseError extends Error {
   }
 }
 
+export class NodeRemovalBlockedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NodeRemovalBlockedError";
+  }
+}
+
 const isoNow = () => new Date().toISOString();
 const DEFAULT_PROVIDER_MAX_TOKENS = 4096;
 const MAX_PROVIDER_MAX_TOKENS = 65_536;
@@ -917,11 +924,30 @@ export class PlatformService {
     for (const node of this.tunnel.getOnlineNodes()) {
       nodes.set(node.id, { ...nodes.get(node.id), ...node, isOnline: true });
     }
-    const routes = this.sqlite.prepare("SELECT node_id, COUNT(*) AS route_count FROM model_routes WHERE enabled=1 GROUP BY node_id").all() as Array<any>;
+    const routes = this.sqlite.prepare("SELECT node_id, COUNT(*) AS route_count FROM model_routes GROUP BY node_id").all() as Array<any>;
     const byId = new Map(routes.map(row => [row.node_id, row.route_count]));
     const rows: Array<Record<string, any>> = [...nodes.values()]
       .map(node => ({ ...node, routeCount: byId.get(node.id) || 0 }));
     return rows.sort((a, b) => Number(b.isOnline) - Number(a.isOnline) || String(a.name).localeCompare(String(b.name)));
+  }
+
+  removeOfflineNode(nodeIdInput: unknown): boolean {
+    const nodeId = typeof nodeIdInput === "string" ? nodeIdInput.trim() : "";
+    if (!nodeId || nodeId.length > 256) return false;
+    const remove = this.sqlite.transaction(() => {
+      const node = this.sqlite.prepare("SELECT id FROM nodes WHERE id=?").get(nodeId);
+      if (!node) return false;
+      if (this.tunnel.getOnlineNodes().some(online => online.id === nodeId)) {
+        throw new NodeRemovalBlockedError("节点仍连接到服务器，请先在桌面端断开连接");
+      }
+      const routes = this.sqlite.prepare("SELECT COUNT(*) AS count FROM model_routes WHERE node_id=?")
+        .get(nodeId) as { count: number };
+      if (routes.count > 0) {
+        throw new NodeRemovalBlockedError(`节点仍被 ${routes.count} 条模型路由引用，请先移除这些路由`);
+      }
+      return this.sqlite.prepare("DELETE FROM nodes WHERE id=?").run(nodeId).changes > 0;
+    });
+    return remove.immediate();
   }
 
   saveNodeApiKey(nodeIdInput: unknown, apiKeyInput: unknown) {
