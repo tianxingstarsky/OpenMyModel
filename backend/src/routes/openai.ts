@@ -104,10 +104,59 @@ async function managedPromptTokenCount(tunnel: WebSocketTunnel, node: { nodeId: 
   return tokenized.tokens.length;
 }
 
+async function managedCompletionTokenCount(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string },
+  texts: string[], upstreamApiKey: string, signal: AbortSignal): Promise<number> {
+  let total = 0;
+  for (const content of texts) {
+    if (!content) continue;
+    const tokenized = await relayJson(tunnel, node, "/tokenize", {
+      content, add_special: false, parse_special: true,
+    }, upstreamApiKey, signal);
+    if (!Array.isArray(tokenized.tokens) || tokenized.tokens.some(token => !Number.isInteger(token))) {
+      throw new RelayError("Node did not return valid completion tokens", 503);
+    }
+    total += tokenized.tokens.length;
+    if (!Number.isSafeInteger(total)) throw new RelayError("Node returned an invalid completion token count", 503);
+  }
+  return total;
+}
+
 class UsageCapture {
   private buffer = "";
+  private readonly completionText = new Map<string, string>();
+  private completionTextLength = 0;
   prompt = 0;
   completion = 0;
+  completionReported = false;
+  completionTextTruncated = false;
+
+  constructor(private readonly captureCompletionText: boolean) {}
+
+  completionTexts(): string[] {
+    return [...this.completionText.values()];
+  }
+
+  private appendCompletion(index: string, value: unknown): void {
+    if (!this.captureCompletionText || typeof value !== "string" || !value) return;
+    if (this.completionTextLength + value.length > 4 * 1024 * 1024) {
+      this.completionTextTruncated = true;
+      return;
+    }
+    this.completionTextLength += value.length;
+    this.completionText.set(index, (this.completionText.get(index) || "") + value);
+  }
+
+  private appendContent(index: string, value: unknown): void {
+    if (typeof value === "string") {
+      this.appendCompletion(index, value);
+    } else if (Array.isArray(value)) {
+      for (const part of value) {
+        if (part && typeof part === "object" && (part as Record<string, unknown>).type === "text") {
+          this.appendCompletion(index, (part as Record<string, unknown>).text);
+        }
+      }
+    }
+  }
 
   private take(value: unknown): void {
     if (!value || typeof value !== "object") return;
@@ -115,8 +164,41 @@ class UsageCapture {
     const usage = item.usage && typeof item.usage === "object" ? item.usage : item;
     const prompt = usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokens;
     const completion = usage.completion_tokens ?? usage.output_tokens ?? usage.completionTokens;
-    if (Number.isFinite(Number(prompt)) && Number(prompt) >= 0) this.prompt = Math.floor(Number(prompt));
-    if (Number.isFinite(Number(completion)) && Number(completion) >= 0) this.completion = Math.floor(Number(completion));
+    const numeric = (candidate: unknown): number | undefined => {
+      if (typeof candidate !== "number" && typeof candidate !== "string") return undefined;
+      if (typeof candidate === "string" && !candidate.trim()) return undefined;
+      const parsed = Number(candidate);
+      return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+    };
+    const promptCount = numeric(prompt);
+    const completionCount = numeric(completion);
+    if (promptCount !== undefined) this.prompt = promptCount;
+    if (completionCount !== undefined) {
+      this.completion = completionCount;
+      this.completionReported = true;
+    }
+
+    if (!this.captureCompletionText || !Array.isArray(item.choices)) return;
+    item.choices.forEach((choice: unknown, position: number) => {
+      if (!choice || typeof choice !== "object" || Array.isArray(choice)) return;
+      const candidate = choice as Record<string, any>;
+      const index = Number.isSafeInteger(candidate.index) && candidate.index >= 0 ? candidate.index : position;
+      const outputIndex = `choice:${index}`;
+      this.appendContent(outputIndex, candidate.delta?.content ?? candidate.message?.content ?? candidate.text);
+      this.appendCompletion(outputIndex, candidate.delta?.reasoning_content ?? candidate.message?.reasoning_content);
+      this.appendCompletion(outputIndex, candidate.delta?.reasoning ?? candidate.message?.reasoning);
+      this.appendCompletion(outputIndex, candidate.delta?.refusal ?? candidate.message?.refusal);
+      const calls = candidate.delta?.tool_calls ?? candidate.message?.tool_calls;
+      if (Array.isArray(calls)) {
+        for (let callIndex = 0; callIndex < calls.length; callIndex++) {
+          const call = calls[callIndex];
+          if (!call || typeof call !== "object") continue;
+          const outputIndex = `tool:${index}:${Number.isSafeInteger(call.index) ? call.index : callIndex}`;
+          this.appendCompletion(outputIndex, call.function?.name);
+          this.appendCompletion(outputIndex, call.function?.arguments);
+        }
+      }
+    });
   }
 
   consume(chunk: string, streaming: boolean): void {
@@ -205,10 +287,30 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     let upstreamHeadersReceived = false;
     let upstreamStatus = 200;
     let capture: UsageCapture | undefined;
+    let node: { nodeId: string; connectionId: string } | undefined;
+    let upstreamApiKey: string | undefined;
+
+    const settledCompletionTokens = async (): Promise<number> => {
+      if (!capture) return 0;
+      const texts = capture.completionTexts();
+      if (!usageReservationId || (capture.completionReported && (capture.completion > 0 || texts.length === 0))) {
+        return capture.completion;
+      }
+      if (!node || !upstreamApiKey) return capture.completion;
+      if (capture.completionTextTruncated) {
+        request.log.error({ model: publicModel }, "Completion text exceeded the token metering buffer");
+        return capture.completion;
+      }
+      try {
+        // Settlement must still finish if the caller disconnects after receiving part of a stream.
+        return await managedCompletionTokenCount(tunnel, node, texts, upstreamApiKey, AbortSignal.timeout(10_000));
+      } catch (error) {
+        request.log.error({ err: error, model: publicModel }, "Completion token usage was unavailable; charging reported usage only");
+        return capture.completion;
+      }
+    };
 
     try {
-      let node;
-      let upstreamApiKey: string | undefined;
       let relayBody = body;
       if (managedKey) {
         platform.checkGatewayKey(managedKey);
@@ -242,7 +344,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
           ? body.stream_options as Record<string, unknown> : {};
         relayBody = { ...relayBody, stream_options: { ...streamOptions, include_usage: true } };
       }
-      capture = new UsageCapture();
+      capture = new UsageCapture(!!usageReservationId);
       await tunnel.relayHttp(node, { path: request.url, body: JSON.stringify(relayBody), upstreamApiKey }, {
         signal: controller.signal,
         onHeaders: (statusCode, headers) => {
@@ -267,9 +369,10 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
         },
       });
       const usage = capture.finish(body.stream === true);
+      const completionTokens = await settledCompletionTokens();
       try {
         platform.recordUsage(targetKeyId, publicModel, "/v1/chat/completions",
-          upstreamStatus < 400 ? (usage.prompt || reservedPromptTokens) : 0, upstreamStatus < 400 ? usage.completion : 0,
+          upstreamStatus < 400 ? (usage.prompt || reservedPromptTokens) : 0, upstreamStatus < 400 ? completionTokens : 0,
           request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId);
         usageReservationId = undefined;
       } catch (error) { request.log.error({ err: error }, "Usage could not be recorded"); }
@@ -277,9 +380,10 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     } catch (error) {
       if (usageReservationId && upstreamHeadersReceived && upstreamStatus < 400) {
         const partialUsage = capture?.finish(body.stream === true);
+        const completionTokens = await settledCompletionTokens();
         try {
           platform.recordUsage(targetKeyId, publicModel, "/v1/chat/completions",
-            partialUsage?.prompt || reservedPromptTokens, partialUsage?.completion || 0,
+            partialUsage?.prompt || reservedPromptTokens, completionTokens,
             request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId);
           usageReservationId = undefined;
         } catch (recordError) { request.log.error({ err: recordError }, "Partial usage could not be recorded"); }

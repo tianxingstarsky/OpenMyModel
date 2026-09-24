@@ -1060,9 +1060,13 @@ test("provider gateway preflights node tokens and reserves no more than the avai
       value = { prompt: "formatted prompt" };
     } else if (msg.path === "/tokenize") {
       const body = JSON.parse(msg.body);
-      assert.equal(body.content, "formatted prompt");
-      assert.equal(body.add_special, true);
-      value = { tokens: [1, 2, 3, 4, 5] };
+      if (body.content === "formatted prompt") {
+        assert.equal(body.add_special, true);
+        value = { tokens: [1, 2, 3, 4, 5] };
+      } else {
+        assert.equal(body.add_special, false);
+        value = { tokens: body.content === "ok" ? [6, 7, 8] : [9, 10, 11, 12] };
+      }
     } else {
       inferenceCalls++;
       const body = JSON.parse(msg.body);
@@ -1074,7 +1078,7 @@ test("provider gateway preflights node tokens and reserves no more than the avai
         return;
       }
       assert.equal(body.max_tokens, 5, "the output cap is reduced to the remaining affordable balance");
-      value = { choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 5, completion_tokens: 3 } };
+      value = { choices: [{ message: { content: "ok" } }] };
     }
     send(headers(msg.requestId, 200, { "content-type": "application/json" }));
     send({ type: "http_chunk", requestId: msg.requestId, data: JSON.stringify(value) });
@@ -1119,7 +1123,7 @@ test("provider gateway preflights node tokens and reserves no more than the avai
     assert.equal(response.statusCode, 200);
     await text(response);
     assert.equal(inferenceCalls, 1);
-    assert.deepEqual(relayedPaths, ["/apply-template", "/tokenize", "/v1/chat/completions"]);
+    assert.deepEqual(relayedPaths, ["/apply-template", "/tokenize", "/v1/chat/completions", "/tokenize"]);
     assert.equal(tunnel.statusSnapshot().totals.totalRequests, 1,
       "internal billing tokenization calls do not inflate public inference request statistics");
     const balance = database.prepare("SELECT balance FROM platform_users WHERE id='provider-user'").get() as { balance: number };
@@ -1140,6 +1144,6 @@ test("provider gateway preflights node tokens and reserves no more than the avai
     await until(() => cancelledStream &&
       (database.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count === 0);
     const afterCancel = database.prepare("SELECT balance FROM platform_users WHERE id='provider-user'").get() as { balance: number };
-    assert.equal(afterCancel.balance, 0.000015, "cancelled streaming requests charge the exact input prompt cost");
+    assert.equal(afterCancel.balance, 0.000011, "cancelled streams charge input tokens and tokenize emitted output when upstream usage is absent");
   } finally { database.close(); }
 });
