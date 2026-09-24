@@ -145,14 +145,14 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
     if (!await requireAdmin(request, reply, platform, auth)) return;
     try {
       const body = bodyOf(request);
-      return platform.createGatewayKey(body.name, null, body.tokenLimit, body.rpmLimit);
+      return platform.createGatewayKey(body.name, null, body.tokenLimit, body.rpmLimit, body.modelFilter);
     } catch (error) { return apiError(reply, error); }
   });
   app.patch<{ Params: { keyId: string } }>("/api/admin/keys/:keyId", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
     try {
       const body = bodyOf(request);
-      const key = platform.updateKeyLimits(request.params.keyId, body.tokenLimit, body.rpmLimit);
+      const key = platform.updateKeyLimits(request.params.keyId, body.tokenLimit, body.rpmLimit, undefined, body.modelFilter);
       return key ?? reply.status(404).send({ error: "API Key not found" });
     } catch (error) { return apiError(reply, error); }
   });
@@ -240,6 +240,10 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
     const userId = requireUser(request, reply, platform); if (!userId) return;
     return platform.listPublicModels();
   });
+  app.get("/api/user/key-models", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    return platform.keyModelOptions();
+  });
   app.get("/api/user/keys", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;
     return platform.listKeys(userId);
@@ -248,14 +252,14 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
     const userId = requireUser(request, reply, platform); if (!userId) return;
     try {
       const body = bodyOf(request);
-      return platform.createUserKey(userId, body.name, body.tokenLimit, body.rpmLimit);
+      return platform.createUserKey(userId, body.name, body.tokenLimit, body.rpmLimit, body.modelFilter);
     } catch (error) { return apiError(reply, error); }
   });
   app.patch<{ Params: { keyId: string } }>("/api/user/keys/:keyId", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;
     try {
       const body = bodyOf(request);
-      const key = platform.updateKeyLimits(request.params.keyId, body.tokenLimit, body.rpmLimit, userId);
+      const key = platform.updateKeyLimits(request.params.keyId, body.tokenLimit, body.rpmLimit, userId, body.modelFilter);
       return key ?? reply.status(404).send({ error: "API Key not found" });
     } catch (error) { return apiError(reply, error); }
   });

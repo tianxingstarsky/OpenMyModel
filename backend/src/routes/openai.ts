@@ -235,9 +235,13 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     const rawKey = authorization?.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
     const managedKey = rawKey ? platform.findGatewayKey(rawKey) : null;
     if (managedKey) {
-      try { platform.checkGatewayKey(managedKey); }
+      let modelFilter: string[];
+      try {
+        platform.checkGatewayKey(managedKey);
+        modelFilter = platform.allowedModels(managedKey);
+      }
       catch (error) { const status = error instanceof RelayError ? error.statusCode : 401; return reply.status(status).send({ error: { message: (error as Error).message, type: "authentication_error" } }); }
-      return { object: "list", data: platform.publicModels(platform.allowedModels(managedKey)) };
+      return { object: "list", data: platform.publicModels(modelFilter) };
     }
     if (!rawKey) {
       return reply.status(401).send({ error: { message: "Missing API Key", type: "authentication_error" } });

@@ -202,6 +202,11 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
   assert.equal(csrfModel.statusCode, 403, "cookie-authenticated admin writes reject cross-origin forms");
   const modelsAfterCsrf = await app.inject({ method: "GET", url: "/api/admin/models", headers: { cookie: adminCookie } });
   assert.equal(modelsAfterCsrf.json().some((model: Message) => model.publicName === "csrf-model"), false);
+  for (const publicName of ["alpha-model", "beta-model"]) {
+    const response = await app.inject({ method: "POST", url: "/api/admin/models", headers: { cookie: adminCookie },
+      payload: { publicName, inputPrice: 0, outputPrice: 0 } });
+    assert.equal(response.statusCode, 200, response.body);
+  }
   const blockedPersonalKey = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${personalKey}` } });
   assert.equal(blockedPersonalKey.statusCode, 403);
   const orphanProviderKey = await app.inject({ method: "POST", url: "/api/admin/keys", headers: { cookie: adminCookie },
@@ -247,14 +252,19 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.equal(csrfUserKey.statusCode, 403, "cookie-authenticated user writes reject cross-origin forms");
     const alphaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys",
       headers: { cookie: alphaCookie, origin: "https://api.example.test" },
-      payload: { name: "alpha-private", rpmLimit: 2, tokenLimit: 100 } });
-    const betaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: betaCookie }, payload: { name: "beta-private" } });
+      payload: { name: "alpha-private", rpmLimit: 2, tokenLimit: 100, modelFilter: ["alpha-model"] } });
+    const betaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: betaCookie },
+      payload: { name: "beta-private", modelFilter: ["beta-model"] } });
     assert.equal(alphaKeyResponse.statusCode, 200);
     assert.equal(betaKeyResponse.statusCode, 200);
     const alphaKey = alphaKeyResponse.json();
     const betaKey = betaKeyResponse.json();
     assert.deepEqual([alphaKey.rpmLimit, alphaKey.tokenLimit], [2, 100]);
+    assert.deepEqual(alphaKey.modelFilter, ["alpha-model"]);
+    assert.deepEqual(betaKey.modelFilter, ["beta-model"]);
     assert.equal("ownerEmail" in alphaKey, false, "a user's key response must not include another account's owner details");
+    const userModelOptions = await app.inject({ method: "GET", url: "/api/user/key-models", headers: { cookie: alphaCookie } });
+    assert.deepEqual(userModelOptions.json().map((model: Message) => model.id), ["alpha-model", "beta-model"]);
     const adminKeys = await app.inject({ method: "GET", url: "/api/admin/keys", headers: { cookie: adminCookie } });
     assert.equal(adminKeys.json().find((key: Message) => key.id === alphaKey.id).ownerEmail, "alpha@example.test");
     assert.equal(adminKeys.json().find((key: Message) => key.id === betaKey.id).ownerEmail, "beta@example.test");
@@ -264,11 +274,15 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.deepEqual([updatedByOwner.json().rpmLimit, updatedByOwner.json().tokenLimit], [7, 250]);
     assert.equal(updatedByOwner.body.includes(alphaKey.key), false, "changing key limits never returns the secret");
     const foreignKeyLimitUpdate = await app.inject({ method: "PATCH", url: `/api/user/keys/${betaKey.id}`, headers: { cookie: alphaCookie },
-      payload: { rpmLimit: 1, tokenLimit: 1 } });
+      payload: { rpmLimit: 1, tokenLimit: 1, modelFilter: ["not-a-configured-model"] } });
     assert.equal(foreignKeyLimitUpdate.statusCode, 404, "a user cannot inspect or edit another account's key");
     assert.deepEqual([foreignKeyLimitUpdate.json().error,
-      (await app.inject({ method: "GET", url: "/api/user/keys", headers: { cookie: betaCookie } })).json()[0].rpmLimit],
-      ["API Key not found", 0]);
+      (await app.inject({ method: "GET", url: "/api/user/keys", headers: { cookie: betaCookie } })).json()[0].rpmLimit,
+      (await app.inject({ method: "GET", url: "/api/user/keys", headers: { cookie: betaCookie } })).json()[0].modelFilter],
+      ["API Key not found", 0, ["beta-model"]]);
+    const unknownUserModel = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: alphaCookie },
+      payload: { name: "invalid-model", modelFilter: ["not-a-configured-model"] } });
+    assert.equal(unknownUserModel.statusCode, 400);
     const concurrentKeyCreations = await Promise.all(Array.from({ length: 21 }, (_, index) => app.inject({
       method: "POST", url: "/api/user/keys", headers: { cookie: gammaCookie }, payload: { name: `gamma-${index}` },
     })));
@@ -276,10 +290,11 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.equal(concurrentKeyCreations.filter(response => response.statusCode === 400).length, 1,
       "the active key ceiling stays enforced when requests arrive concurrently");
     const updatedAlphaKey = await app.inject({ method: "PATCH", url: `/api/admin/keys/${alphaKey.id}`, headers: { cookie: adminCookie },
-      payload: { rpmLimit: 7, tokenLimit: 250 } });
+      payload: { rpmLimit: 7, tokenLimit: 250, modelFilter: ["beta-model"] } });
     assert.equal(updatedAlphaKey.statusCode, 200, updatedAlphaKey.body);
     assert.equal(updatedAlphaKey.json().rpmLimit, 7);
     assert.equal(updatedAlphaKey.json().tokenLimit, 250);
+    assert.deepEqual(updatedAlphaKey.json().modelFilter, ["beta-model"]);
     assert.equal(updatedAlphaKey.body.includes(alphaKey.key), false, "updating key limits never returns the secret");
 
     const timestamp = new Date().toISOString();
@@ -819,7 +834,7 @@ test("eligible nodes with the same key rotate deterministically without broadcas
 });
 
 test("managed route rotation is independent for each public model", async t => {
-  const { app, node, post } = await fixture(t);
+  const { app, node, post, directory } = await fixture(t);
   const requests = new Map<string, Array<{ model: string; key: string }>>();
   const respond = (nodeId: string) => (msg: Message, send: (message: Message) => void) => {
     if (msg.type !== "http_relay" || msg.path !== "/v1/chat/completions") return;
@@ -861,6 +876,30 @@ test("managed route rotation is independent for each public model", async t => {
     payload: { name: "scheduler test" } });
   assert.equal(keyResponse.statusCode, 200, keyResponse.body);
   const gatewayKey = keyResponse.json().key as string;
+  const restrictedKeyResponse = await app.inject({ method: "POST", url: "/api/admin/keys", headers: adminHeaders,
+    payload: { name: "public-a only", modelFilter: ["public-a"] } });
+  assert.equal(restrictedKeyResponse.statusCode, 200, restrictedKeyResponse.body);
+  const restrictedKey = restrictedKeyResponse.json().key as string;
+  assert.deepEqual(restrictedKeyResponse.json().modelFilter, ["public-a"]);
+  const invalidFilter = await app.inject({ method: "POST", url: "/api/admin/keys", headers: adminHeaders,
+    payload: { name: "invalid filter", modelFilter: ["not-configured"] } });
+  assert.equal(invalidFilter.statusCode, 400);
+
+  const visibleModels = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${restrictedKey}` } });
+  assert.deepEqual(visibleModels.json().data.map((model: Message) => model.id), ["public-a"]);
+  const rejectedModel = await post({ model: "public-b", messages: [{ role: "user", content: "hello" }] }, restrictedKey).response;
+  assert.equal(rejectedModel.statusCode, 403);
+  await text(rejectedModel);
+  assert.equal(requests.has("route-other"), false, "a model rejected by the key filter never reaches a node");
+  const changedFilter = await app.inject({ method: "PATCH", url: `/api/admin/keys/${restrictedKeyResponse.json().id}`,
+    headers: adminHeaders, payload: { rpmLimit: 0, tokenLimit: 0, modelFilter: ["public-b"] } });
+  assert.equal(changedFilter.statusCode, 200, changedFilter.body);
+  assert.deepEqual(changedFilter.json().modelFilter, ["public-b"]);
+  const changedVisibleModels = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${restrictedKey}` } });
+  assert.deepEqual(changedVisibleModels.json().data.map((model: Message) => model.id), ["public-b"]);
+  const nowRejected = await post({ model: "public-a", messages: [{ role: "user", content: "hello" }] }, restrictedKey).response;
+  assert.equal(nowRejected.statusCode, 403);
+  await text(nowRejected);
 
   const call = async (model: string) => {
     const response = await post({ model, messages: [{ role: "user", content: "hello" }] }, gatewayKey).response;
@@ -878,6 +917,19 @@ test("managed route rotation is independent for each public model", async t => {
   assert.deepEqual(requests.get("route-other"), [{ model: "internal-other", key: "node-key-other" }]);
   await call("public-a");
   assert.deepEqual(requests.get("route-b"), [{ model: "internal-b", key: "node-key-b" }]);
+
+  const database = new Database(join(directory, "openmymodel.db"));
+  try {
+    database.prepare("UPDATE gateway_keys SET model_filter=? WHERE id=?").run("{malformed", restrictedKeyResponse.json().id);
+  } finally { database.close(); }
+  const corruptedModelList = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${restrictedKey}` } });
+  assert.equal(corruptedModelList.statusCode, 403, "malformed stored permissions fail closed");
+  const beforeCorruptedRequest = requests.get("route-other")?.length ?? 0;
+  const corruptedFilterRequest = await post({ model: "public-b", messages: [{ role: "user", content: "hello" }] }, restrictedKey).response;
+  assert.equal(corruptedFilterRequest.statusCode, 403);
+  await text(corruptedFilterRequest);
+  assert.equal(requests.get("route-other")?.length ?? 0, beforeCorruptedRequest,
+    "malformed stored permissions never reach an upstream node");
 });
 
 test("client disconnect before upstream headers cancels both stream modes", async t => {

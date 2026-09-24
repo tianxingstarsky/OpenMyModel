@@ -374,19 +374,22 @@ export class PlatformService {
     throw new RelayError("Requested model is not available", 404);
   }
 
-  createGatewayKey(nameInput: unknown, ownerUserId: string | null = null, tokenLimitInput: unknown = 0, rpmInput: unknown = 0) {
+  createGatewayKey(nameInput: unknown, ownerUserId: string | null = null, tokenLimitInput: unknown = 0, rpmInput: unknown = 0,
+    modelFilterInput: unknown = []) {
     const name = typeof nameInput === "string" ? nameInput.trim().slice(0, 80) : "";
     if (!name) throw new Error("密钥名称不能为空");
     if (this.isProviderMode() && ownerUserId === null) throw new Error("服务商模式下 API Key 必须关联用户账户");
     const tokenLimit = Math.floor(safeNumber(tokenLimitInput, "Token 限额", 0, 1_000_000_000_000));
     const rpmLimit = Math.floor(safeNumber(rpmInput, "每分钟请求上限", 0, 100_000));
+    const modelFilter = this.normalizeModelFilter(modelFilterInput);
     const id = uuidv4();
     const raw = `sk-oom-gw-${randomBytes(32).toString("hex")}`;
     const prefix = raw.slice(0, 17);
-    this.sqlite.prepare(`INSERT INTO gateway_keys(id, name, prefix, secret_hash, owner_user_id, token_limit, rpm_limit, created_at)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, name, prefix, hashPlatformValue(raw, this.secret), ownerUserId, tokenLimit, rpmLimit, isoNow());
-    return { id, name, key: raw, prefix, tokenLimit, rpmLimit, createdAt: isoNow() };
+    const createdAt = isoNow();
+    this.sqlite.prepare(`INSERT INTO gateway_keys(id, name, prefix, secret_hash, owner_user_id, token_limit, rpm_limit, model_filter, created_at)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, name, prefix, hashPlatformValue(raw, this.secret), ownerUserId, tokenLimit, rpmLimit, JSON.stringify(modelFilter), createdAt);
+    return { id, name, key: raw, prefix, tokenLimit, rpmLimit, modelFilter, createdAt };
   }
 
   findGatewayKey(raw: string): GatewayKey | null {
@@ -430,7 +433,38 @@ export class PlatformService {
   }
 
   allowedModels(key: GatewayKey): string[] {
-    try { return JSON.parse(key.model_filter) as string[]; } catch { return []; }
+    const parsed = this.parseStoredModelFilter(key.model_filter);
+    if (!parsed) throw new RelayError("API Key model permissions are invalid", 403);
+    return parsed;
+  }
+
+  private normalizeModelFilter(input: unknown): string[] {
+    if (!Array.isArray(input) || input.length > 256) throw new Error("模型权限必须是最多 256 项的模型名称数组");
+    const names = [...new Set(input.map(value => {
+      if (typeof value !== "string") throw new Error("模型权限包含无效名称");
+      const name = value.trim();
+      if (!name || name.length > 128 || /[\0\r\n]/.test(name)) throw new Error("模型权限包含无效名称");
+      return name;
+    }))];
+    if (names.length) {
+      const placeholders = names.map(() => "?").join(",");
+      const configured = this.sqlite.prepare(`SELECT public_name FROM platform_models WHERE public_name IN (${placeholders})`)
+        .all(...names) as Array<{ public_name: string }>;
+      if (configured.length !== names.length) throw new Error("模型权限包含尚未配置的模型");
+    }
+    return names;
+  }
+
+  private parseStoredModelFilter(value: unknown): string[] | null {
+    if (typeof value !== "string") return null;
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (!Array.isArray(parsed) || parsed.length > 256 || parsed.some(name => typeof name !== "string" || !name
+        || name.trim() !== name || name.length > 128 || /[\0\r\n]/.test(name))) {
+        return null;
+      }
+      return [...new Set(parsed)];
+    } catch { return null; }
   }
 
   reserveProviderUsage(keyId: string, promptTokens: number, requestedMaxTokens: number | undefined, completionCount: number,
@@ -556,14 +590,14 @@ export class PlatformService {
     if (id) this.sqlite.prepare("DELETE FROM gateway_token_reservations WHERE id=?").run(id);
   }
 
-  createUserKey(userId: string, name: unknown, tokenLimit: unknown = 0, rpmLimit: unknown = 0) {
+  createUserKey(userId: string, name: unknown, tokenLimit: unknown = 0, rpmLimit: unknown = 0, modelFilterInput: unknown = []) {
     const create = this.sqlite.transaction(() => {
       const user = this.sqlite.prepare("SELECT is_active FROM platform_users WHERE id=?").get(userId) as { is_active: number } | undefined;
       if (!user || user.is_active !== 1) throw new Error("账号不存在或已停用");
       const active = this.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_keys WHERE owner_user_id=? AND is_active=1")
         .get(userId) as { count: number };
       if (active.count >= 20) throw new Error("最多可同时持有 20 个有效密钥");
-      return this.createGatewayKey(name, userId, tokenLimit, rpmLimit);
+      return this.createGatewayKey(name, userId, tokenLimit, rpmLimit, modelFilterInput);
     });
     return create.immediate();
   }
@@ -573,12 +607,16 @@ export class PlatformService {
       ? this.sqlite.prepare("SELECT * FROM gateway_keys WHERE owner_user_id=? ORDER BY created_at DESC").all(ownerUserId)
       : this.sqlite.prepare(`SELECT k.*, u.email AS owner_email FROM gateway_keys k
         LEFT JOIN platform_users u ON u.id=k.owner_user_id ORDER BY k.created_at DESC`).all();
-    return (rows as Array<Record<string, any>>).map(row => ({ id: row.id, name: row.name, prefix: row.prefix,
-      ownerUserId: row.owner_user_id, active: row.is_active === 1, tokenLimit: row.token_limit, rpmLimit: row.rpm_limit,
-      ...(ownerUserId === undefined ? { ownerEmail: row.owner_email ?? null } : {}),
-      totalTokens: row.total_tokens, totalRequests: row.total_requests, createdAt: row.created_at, lastUsedAt: row.last_used_at,
-      requestsLastMinute: (this.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_request_events WHERE key_id=? AND created_at >= ?")
-        .get(row.id, new Date(Date.now() - 60_000).toISOString()) as { count: number }).count }));
+    return (rows as Array<Record<string, any>>).map(row => {
+      const modelFilter = this.parseStoredModelFilter(row.model_filter);
+      return { id: row.id, name: row.name, prefix: row.prefix,
+        ownerUserId: row.owner_user_id, active: row.is_active === 1, tokenLimit: row.token_limit, rpmLimit: row.rpm_limit,
+        modelFilter: modelFilter ?? [], modelFilterValid: modelFilter !== null,
+        ...(ownerUserId === undefined ? { ownerEmail: row.owner_email ?? null } : {}),
+        totalTokens: row.total_tokens, totalRequests: row.total_requests, createdAt: row.created_at, lastUsedAt: row.last_used_at,
+        requestsLastMinute: (this.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_request_events WHERE key_id=? AND created_at >= ?")
+          .get(row.id, new Date(Date.now() - 60_000).toISOString()) as { count: number }).count };
+    });
   }
 
   disableKey(id: string, ownerUserId?: string): boolean {
@@ -588,14 +626,24 @@ export class PlatformService {
     return result.changes > 0;
   }
 
-  updateKeyLimits(id: string, tokenLimitInput: unknown, rpmLimitInput: unknown, ownerUserId?: string) {
+  updateKeyLimits(id: string, tokenLimitInput: unknown, rpmLimitInput: unknown, ownerUserId?: string, modelFilterInput?: unknown) {
     const tokenLimit = Math.floor(safeNumber(tokenLimitInput, "Token 限额", 0, 1_000_000_000_000));
     const rpmLimit = Math.floor(safeNumber(rpmLimitInput, "每分钟请求上限", 0, 100_000));
-    const result = ownerUserId === undefined
-      ? this.sqlite.prepare("UPDATE gateway_keys SET token_limit=?, rpm_limit=? WHERE id=?").run(tokenLimit, rpmLimit, id)
-      : this.sqlite.prepare("UPDATE gateway_keys SET token_limit=?, rpm_limit=? WHERE id=? AND owner_user_id=?")
-        .run(tokenLimit, rpmLimit, id, ownerUserId);
-    return result.changes > 0 ? this.listKeys(ownerUserId).find(key => key.id === id) ?? null : null;
+    const update = this.sqlite.transaction(() => {
+      const existing = ownerUserId === undefined
+        ? this.sqlite.prepare("SELECT id FROM gateway_keys WHERE id=?").get(id)
+        : this.sqlite.prepare("SELECT id FROM gateway_keys WHERE id=? AND owner_user_id=?").get(id, ownerUserId);
+      if (!existing) return false;
+      if (modelFilterInput === undefined) {
+        return this.sqlite.prepare("UPDATE gateway_keys SET token_limit=?, rpm_limit=? WHERE id=?")
+          .run(tokenLimit, rpmLimit, id).changes > 0;
+      }
+      const modelFilter = JSON.stringify(this.normalizeModelFilter(modelFilterInput));
+      return this.sqlite.prepare("UPDATE gateway_keys SET token_limit=?, rpm_limit=?, model_filter=? WHERE id=?")
+        .run(tokenLimit, rpmLimit, modelFilter, id).changes > 0;
+    });
+    const changed = update.immediate();
+    return changed ? this.listKeys(ownerUserId).find(key => key.id === id) ?? null : null;
   }
 
   private addBalanceEntry(userId: string, type: "topup" | "usage" | "adjustment", amount: number,
@@ -692,6 +740,11 @@ export class PlatformService {
     const models = this.adminModels();
     return models.filter(model => model.enabled && model.routes.some(route => route.enabled && live.has(route.nodeId)))
       .map(model => ({ id: model.publicName, remark: model.remark, inputPrice: model.inputPrice, outputPrice: model.outputPrice }));
+  }
+
+  keyModelOptions() {
+    return this.sqlite.prepare("SELECT public_name AS id FROM platform_models WHERE enabled=1 ORDER BY public_name COLLATE NOCASE")
+      .all() as Array<{ id: string }>;
   }
 
   adminUsers() {
