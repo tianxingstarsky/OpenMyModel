@@ -1,5 +1,28 @@
 # 验证记录
 
+## 第三阶段：节点级 llama-server Key 与全栈回归（分支 `feat/llama-b10909-native-bridge`，提交 `6095629`）
+
+### 通过的检查
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm --prefix backend run build` | TypeScript 编译通过 |
+| `npm --prefix backend test` | 36 项通过；覆盖服务商账户隔离、支付宝回调、Token 结算、节点级 Key 加密/轮换和历史路由 Key 回退 |
+| `npm --prefix scripts test` | 13 项通过 |
+| `npm --prefix scripts run check:release` | 发布 Bridge 与源码一致 |
+| `flutter analyze` | No issues found |
+| `flutter test` | 30 项通过 |
+| 管理端 Playwright 冒烟 | 使用临时模拟 API 验证节点 Key 配置、清除和状态刷新；请求体正确，页面无脚本异常 |
+| `git diff --check` | 无空白错误 |
+
+### 覆盖边界
+
+- Playwright 使用本地临时 HTTP 服务和模拟 API，没有连接真实 SMTP、支付宝或远程 llama-server。
+- 上游节点 Key 的调度与轮换由后端真实 HTTP/WebSocket 夹具验证；没有在本轮连接生产节点或真实 GPU。
+- Flutter 源码未修改；本轮执行了静态分析与单元测试，没有重复构建 Windows Release 安装包。
+
+---
+
 ## 第二阶段：内置 llama.cpp b10909 引擎（分支 feat/llama-b10909-native-bridge，提交 89fc35b）
 
 环境：Windows 10 x64，RTX 5060 Ti 16GB，Visual Studio 2022 BuildTools 17.14 + VS18.6，CMake 3.28.1，CUDA 13.2，Node.js 24，Flutter 3.44.1 / Dart 3.12.1。
