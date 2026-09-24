@@ -214,6 +214,12 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     const adminKeys = await app.inject({ method: "GET", url: "/api/admin/keys", headers: { cookie: adminCookie } });
     assert.equal(adminKeys.json().find((key: Message) => key.id === alphaKey.id).ownerEmail, "alpha@example.test");
     assert.equal(adminKeys.json().find((key: Message) => key.id === betaKey.id).ownerEmail, "beta@example.test");
+    const updatedAlphaKey = await app.inject({ method: "PATCH", url: `/api/admin/keys/${alphaKey.id}`, headers: { cookie: adminCookie },
+      payload: { rpmLimit: 7, tokenLimit: 250 } });
+    assert.equal(updatedAlphaKey.statusCode, 200, updatedAlphaKey.body);
+    assert.equal(updatedAlphaKey.json().rpmLimit, 7);
+    assert.equal(updatedAlphaKey.json().tokenLimit, 250);
+    assert.equal(updatedAlphaKey.body.includes(alphaKey.key), false, "updating key limits never returns the secret");
 
     const timestamp = new Date().toISOString();
     const addUsage = database.prepare(`INSERT INTO usage_logs(api_key_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,
@@ -229,6 +235,12 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
       .run("ORDER-BETA", "user-beta", 9, "paid", "beta order", timestamp);
 
     const get = async (path: string) => app.inject({ method: "GET", url: path, headers: { cookie: alphaCookie } });
+    const userLimitEdit = await app.inject({ method: "PATCH", url: `/api/admin/keys/${betaKey.id}`, headers: { cookie: alphaCookie },
+      payload: { rpmLimit: 1, tokenLimit: 1 } });
+    assert.equal(userLimitEdit.statusCode, 401, "provider accounts cannot use administrator key controls");
+    const alphaKeys = await get("/api/user/keys");
+    assert.equal(alphaKeys.json().find((key: Message) => key.id === alphaKey.id).rpmLimit, 7);
+    assert.equal(alphaKeys.json().find((key: Message) => key.id === alphaKey.id).tokenLimit, 250);
     const dashboard = await get("/api/user/dashboard?userId=user-beta");
     assert.equal(dashboard.statusCode, 200);
     assert.equal(dashboard.json().user.email, "alpha@example.test");

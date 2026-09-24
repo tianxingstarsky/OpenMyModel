@@ -412,6 +412,14 @@ export class PlatformService {
     return result.changes > 0;
   }
 
+  updateKeyLimits(id: string, tokenLimitInput: unknown, rpmLimitInput: unknown) {
+    const tokenLimit = Math.floor(safeNumber(tokenLimitInput, "Token 限额", 0, 1_000_000_000_000));
+    const rpmLimit = Math.floor(safeNumber(rpmLimitInput, "每分钟请求上限", 0, 100_000));
+    const result = this.sqlite.prepare("UPDATE gateway_keys SET token_limit=?, rpm_limit=? WHERE id=?")
+      .run(tokenLimit, rpmLimit, id);
+    return result.changes > 0 ? this.listKeys().find(key => key.id === id) ?? null : null;
+  }
+
   recordUsage(keyId: string, publicModel: string, endpoint: string, prompt: number, completion: number, ip: string, userAgent: string, inputPrice = 0, outputPrice = 0): void {
     const input = Math.max(0, Math.floor(prompt));
     const output = Math.max(0, Math.floor(completion));

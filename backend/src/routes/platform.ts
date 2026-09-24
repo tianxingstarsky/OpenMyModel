@@ -114,6 +114,14 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
       return platform.createGatewayKey(body.name, null, body.tokenLimit, body.rpmLimit);
     } catch (error) { return apiError(reply, error); }
   });
+  app.patch<{ Params: { keyId: string } }>("/api/admin/keys/:keyId", async (request, reply) => {
+    if (!await requireAdmin(request, reply, platform, auth)) return;
+    try {
+      const body = bodyOf(request);
+      const key = platform.updateKeyLimits(request.params.keyId, body.tokenLimit, body.rpmLimit);
+      return key ?? reply.status(404).send({ error: "API Key not found" });
+    } catch (error) { return apiError(reply, error); }
+  });
   app.delete<{ Params: { keyId: string } }>("/api/admin/keys/:keyId", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
     return { ok: platform.disableKey(request.params.keyId) };
