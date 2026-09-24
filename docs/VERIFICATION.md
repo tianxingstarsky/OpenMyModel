@@ -7,7 +7,7 @@
 | 检查 | 结果 |
 | --- | --- |
 | `npm --prefix backend run build` | TypeScript 编译通过 |
-| `npm --prefix backend test` | 44 项通过；验证管理员全站 Token/分统计、公开/服务商面板展示、用户与单 Key 最近一分钟统计，以及双账户数值隔离 |
+| `npm --prefix backend test` | 44 项通过；验证管理员全站 Token/分统计、公开/服务商面板展示、用户与单 Key 最近一分钟统计、双账户数值隔离，以及节点回显 `Authorization`/`X-API-Key` 不会传给调用者 |
 | `git diff --check` | 无空白错误 |
 
 ### 覆盖边界

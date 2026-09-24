@@ -1501,7 +1501,8 @@ test("managed gateway routes with the configured llama-server key and meters usa
     const body = streaming
       ? 'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\ndata: [DONE]\n\n'
       : JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 11, completion_tokens: 7 } });
-    send(headers(msg.requestId, 200, { "content-type": streaming ? "text/event-stream" : "application/json" }));
+    send(headers(msg.requestId, 200, { "content-type": streaming ? "text/event-stream" : "application/json",
+      authorization: `Bearer ${expectedNodeKey}`, "x-api-key": expectedNodeKey }));
     send({ type: "http_chunk", requestId: msg.requestId, data: body });
     send({ type: "http_done", requestId: msg.requestId });
   });
@@ -1550,6 +1551,8 @@ test("managed gateway routes with the configured llama-server key and meters usa
 
   const response = await post({ model: "public-chat", messages: [{ role: "user", content: "hello" }] }, gatewayKey).response;
   assert.equal(response.statusCode, 200);
+  assert.equal(response.headers.authorization, undefined, "node credentials must not be echoed to the caller");
+  assert.equal(response.headers["x-api-key"], undefined, "custom node API Key headers must not be echoed to the caller");
   const responseBody = JSON.parse(await text(response));
   assert.equal(responseBody.usage.prompt_tokens, 11);
   assert.equal(responseBody.usage.completion_tokens, 7);
