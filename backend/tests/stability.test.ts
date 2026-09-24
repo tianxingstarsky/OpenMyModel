@@ -170,6 +170,91 @@ test("personal mode exposes only its public dashboard and blocks provider signup
   assert.equal(config.json().mode, "personal");
 });
 
+test("provider dashboards, keys, usage and orders remain isolated between accounts", async t => {
+  const { app, directory } = await fixture(t);
+  const adminLogin = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
+  const adminCookie = String(adminLogin.headers["set-cookie"]).split(";", 1)[0];
+  const appKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const alipayKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const configured = await app.inject({ method: "PUT", url: "/api/admin/settings", headers: { cookie: adminCookie }, payload: {
+    mode: "provider", publicUrl: "https://api.example.test", mailHost: "smtp.example.test", mailPort: 465,
+    mailUser: "mail-user", mailFrom: "billing@example.test", mailPassword: "mail-pass",
+    alipayAppId: "2026000000000001", alipaySellerId: "2088000000000000",
+    alipayPrivateKey: appKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    alipayPublicKey: alipayKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+  } });
+  assert.equal(configured.statusCode, 200, configured.body);
+
+  const database = new Database(join(directory, "openmymodel.db"));
+  try {
+    const createdAt = new Date().toISOString();
+    database.prepare("INSERT INTO platform_users(id,email,balance,created_at) VALUES(?,?,?,?)")
+      .run("user-alpha", "alpha@example.test", 12.5, createdAt);
+    database.prepare("INSERT INTO platform_users(id,email,balance,created_at) VALUES(?,?,?,?)")
+      .run("user-beta", "beta@example.test", 91, createdAt);
+    const sessions = new PlatformService(database, directory, new WebSocketTunnel({ authenticate: async () => "ok" }));
+    const alphaCookie = `omm_session=${sessions.createSession("user", "user-alpha")}`;
+    const betaCookie = `omm_session=${sessions.createSession("user", "user-beta")}`;
+    const alphaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: alphaCookie }, payload: { name: "alpha-private" } });
+    const betaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: betaCookie }, payload: { name: "beta-private" } });
+    assert.equal(alphaKeyResponse.statusCode, 200);
+    assert.equal(betaKeyResponse.statusCode, 200);
+    const alphaKey = alphaKeyResponse.json();
+    const betaKey = betaKeyResponse.json();
+
+    const timestamp = new Date().toISOString();
+    const addUsage = database.prepare(`INSERT INTO usage_logs(api_key_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,
+      timestamp,ip,user_agent,cost) VALUES(?,?,?,?,?,?,?,?,?,?)`);
+    addUsage.run(alphaKey.id, "alpha-model", "/v1/chat/completions", 3, 4, 7, timestamp, "192.0.2.1", "alpha-client", 0.01);
+    addUsage.run(betaKey.id, "beta-model", "/v1/chat/completions", 30, 40, 70, timestamp, "198.51.100.1", "beta-client", 0.1);
+    const addEvent = database.prepare("INSERT INTO gateway_request_events(key_id,created_at) VALUES(?,?)");
+    addEvent.run(alphaKey.id, timestamp);
+    addEvent.run(betaKey.id, timestamp);
+    database.prepare("INSERT INTO payment_orders(id,user_id,amount,status,description,created_at) VALUES(?,?,?,?,?,?)")
+      .run("ORDER-ALPHA", "user-alpha", 5, "paid", "alpha order", timestamp);
+    database.prepare("INSERT INTO payment_orders(id,user_id,amount,status,description,created_at) VALUES(?,?,?,?,?,?)")
+      .run("ORDER-BETA", "user-beta", 9, "paid", "beta order", timestamp);
+
+    const get = async (path: string) => app.inject({ method: "GET", url: path, headers: { cookie: alphaCookie } });
+    const dashboard = await get("/api/user/dashboard?userId=user-beta");
+    assert.equal(dashboard.statusCode, 200);
+    assert.equal(dashboard.json().user.email, "alpha@example.test");
+    assert.equal(dashboard.json().user.balance, 12.5);
+    assert.deepEqual(dashboard.json().keys.map((key: Message) => key.name), ["alpha-private"]);
+    assert.deepEqual(dashboard.json().usage.map((row: Message) => row.model), ["alpha-model"]);
+    assert.equal(dashboard.json().requestsPerMinute, 1);
+    assert.equal(dashboard.body.includes("beta@example.test"), false);
+    assert.equal(dashboard.body.includes("beta-private"), false);
+
+    const keys = await get("/api/user/keys");
+    assert.deepEqual(keys.json().map((key: Message) => key.name), ["alpha-private"]);
+    const usage = await get("/api/user/usage?limit=100&userId=user-beta");
+    assert.deepEqual(usage.json().map((row: Message) => row.model), ["alpha-model"]);
+    assert.equal(usage.body.includes("beta-model"), false);
+    const orders = await get("/api/user/orders?userId=user-beta");
+    assert.deepEqual(orders.json().map((order: Message) => order.id), ["ORDER-ALPHA"]);
+
+    const foreignDelete = await app.inject({ method: "DELETE", url: `/api/user/keys/${betaKey.id}`, headers: { cookie: alphaCookie } });
+    assert.equal(foreignDelete.statusCode, 200);
+    assert.equal(foreignDelete.json().ok, false);
+    const betaKeysAfter = await app.inject({ method: "GET", url: "/api/user/keys", headers: { cookie: betaCookie } });
+    assert.equal(betaKeysAfter.json()[0].active, true);
+
+    const spoofedKey = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: alphaCookie },
+      payload: { name: "still-alpha", userId: "user-beta" } });
+    assert.equal(spoofedKey.statusCode, 200);
+    assert.equal(database.prepare("SELECT owner_user_id FROM gateway_keys WHERE id=?").get(spoofedKey.json().id)?.owner_user_id, "user-alpha");
+    const spoofedOrder = await app.inject({ method: "POST", url: "/api/user/orders", headers: { cookie: alphaCookie },
+      payload: { amount: 2, userId: "user-beta" } });
+    assert.equal(spoofedOrder.statusCode, 200);
+    assert.equal(database.prepare("SELECT user_id FROM payment_orders WHERE id=?").get(spoofedOrder.json().orderId)?.user_id, "user-alpha");
+    const unauthenticated = await app.inject({ method: "GET", url: "/api/user/dashboard" });
+    assert.equal(unauthenticated.statusCode, 401);
+  } finally {
+    database.close();
+  }
+});
+
 test("Alipay settings validate RSA keys and signed payments credit an order once", () => {
   const directory = mkdtempSync(join(tmpdir(), "openmymodel-alipay-test-"));
   const database = createDatabase(directory);
