@@ -8,6 +8,7 @@
 - 配置档案由 Dart `ProfileStore` 直接读写 `%USERPROFILE%\.openmymodel\profiles`，兼容旧版本导出的档案文件（旧布尔字段自动映射为三态 `auto/on/off`）。
 - Node Bridge 从 Flutter 接收桌面端调用密钥和连接配置，通过 WebSocket 连接云后端。桌面端 Key 仍由本机桥接校验；认证请求中的 Key 会经过云端内存。
 - 管理端按节点保存与 `llama-server --api-key` 一致的节点 Key，并以服务器数据目录中的 AES 密钥加密；同一节点的所有模型路由共用此 Key，旧版逐路由 Key 继续作为回退。统一网关 Key 只保存 HMAC 哈希，原始 Key 创建时仅显示一次。
+- `/admin` 节点页明确区分保护 llama-server 的节点 Key 与调用者使用的统一网关 Key；节点概览实时汇总就绪状态、路由引用和 Key 配置，并可按节点名称、ID、报告模型及连接状态筛选。
 - 管理端可移除已断开的历史节点；节点仍在线，或仍被启用/停用模型路由引用时，服务器会拒绝删除。节点表显示全部路由引用数，提示管理员先清理路由。
 - 云后端使用 Fastify；统一网关调用按公开模型别名选择在线节点路由，将该路由的上游模型名和节点级 Key 经隧道转发；没有节点级 Key 时兼容使用历史路由级 Key。不会把用户对话广播到其他节点。
 - 网关转发上游响应时会移除认证凭据相关响应头（包括 `Authorization`、`WWW-Authenticate`、`X-API-Key` 和常见 Key/Token 别名），避免节点回显凭据时把节点 Key 返回给网关调用者。

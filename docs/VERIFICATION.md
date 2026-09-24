@@ -1,5 +1,22 @@
 # 验证记录
 
+## 第五阶段：节点管理界面与凭据响应过滤（分支 `feat/llama-b10909-native-bridge`，2026-09-25）
+
+### 通过的检查
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm --prefix backend run build` | TypeScript 编译通过 |
+| `npm --prefix backend test` | 43 项通过；覆盖节点管理页 Key 用途说明、状态概览、组合搜索与状态过滤、脚本语法，以及上游认证响应头过滤 |
+| `git diff --check` | 无空白错误 |
+
+### 覆盖边界
+
+- 节点管理页面由静态 HTML/脚本测试验证；本阶段未连接真实节点，也未运行浏览器截图回归。
+- 节点管理概念图是设计参考，不是对真实页面的截图。
+
+---
+
 ## 第四阶段：账务预留续期与账户响应缓存隔离（分支 `feat/llama-b10909-native-bridge`，2026-09-25）
 
 ### 通过的检查
@@ -7,7 +24,7 @@
 | 检查 | 结果 |
 | --- | --- |
 | `npm --prefix backend run build` | TypeScript 编译通过 |
-| `npm --prefix backend test` | 41 项通过；服务商账户隔离测试覆盖 `private, no-store` 响应头；Key 状态、RPM 和模型白名单检查通过旧快照测试；账务回归覆盖长时间无上游数据块时续期，以及非流式 JSON 超过 4 MiB 后仍准确结算尾部 usage；中继响应会过滤认证凭据头，避免节点回显 Key |
+| `npm --prefix backend test` | 41 项通过；服务商账户隔离测试覆盖 `private, no-store` 响应头；Key 状态、RPM 和模型白名单检查通过旧快照测试；账务回归覆盖长时间无上游数据块时续期，以及非流式 JSON 超过 4 MiB 后仍准确结算尾部 usage |
 | `npm --prefix scripts test` | 13 项通过；本阶段未修改 Bridge 源码 |
 | `git diff --check` | 无空白错误 |
 
