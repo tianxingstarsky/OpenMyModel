@@ -776,6 +776,13 @@ export class PlatformService {
       if (!current) return null;
       if (input.balance !== undefined) {
         const balance = Number(safeNumber(input.balance, "余额", -1_000_000_000, 1_000_000_000).toFixed(8));
+        const now = isoNow();
+        this.sqlite.prepare("DELETE FROM provider_usage_reservations WHERE expires_at <= ?").run(now);
+        const held = this.sqlite.prepare(`SELECT COALESCE(SUM(reserved_cost), 0) AS amount
+          FROM provider_usage_reservations WHERE user_id=? AND expires_at > ?`).get(id, now) as { amount: number };
+        if (balance + 1e-12 < held.amount) {
+          throw new Error(`余额不能低于推理请求已预留金额 ¥${held.amount.toFixed(8)}，请待请求结算后再调整`);
+        }
         const delta = Number((balance - current.balance).toFixed(8));
         if (delta !== 0) {
           const reason = typeof input.reason === "string" ? input.reason.trim() : "";

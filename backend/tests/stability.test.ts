@@ -549,6 +549,11 @@ test("provider usage reservations serialize balance holds and settle on actual t
     assert.throws(() => platform.reserveProviderUsage(gatewayKey.id, 5, 1, 1, 1, 1),
       (error: any) => error.statusCode === 402, "concurrent calls cannot reserve the same balance twice");
     assert.equal((database.sqlite.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count, 2);
+    assert.throws(() => platform.updateUser("reserve-user", { balance: 0, reason: "客服调整余额" }),
+      /余额不能低于推理请求已预留金额/,
+    "support cannot lower a balance below funds already reserved by an in-flight request");
+    assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id='reserve-user'").get() as any).balance,
+      0.00001, "a rejected adjustment leaves the account and reservation intact");
 
     platform.recordUsage(gatewayKey.id, "reserve-model", "/v1/chat/completions", 5, 3, "127.0.0.1", "test", 1, 1, reservation.id);
     assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id='reserve-user'").get() as any).balance, 0.000002);
@@ -560,6 +565,8 @@ test("provider usage reservations serialize balance holds and settle on actual t
     assert.deepEqual([usageEntries[0].type, usageEntries[0].amount, usageEntries[0].balanceAfter],
       ["usage", -0.000008, 0.000002]);
     assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id='other-user'").get() as any).balance, 0.00001);
+    const adjustmentAfterSettlement = platform.updateUser("reserve-user", { balance: 0, reason: "结算后清零" });
+    assert.equal(adjustmentAfterSettlement.balance, 0, "support may adjust funds again after the hold is settled");
     platform.releaseProviderUsage(otherReservation.id);
     assert.equal((database.sqlite.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count, 0);
 
