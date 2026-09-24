@@ -818,6 +818,64 @@ test("eligible nodes with the same key rotate deterministically without broadcas
   assert.equal(second.messages.filter(msg => msg.type === "validate_key").length, 2);
 });
 
+test("managed route rotation is independent for each public model", async t => {
+  const { app, node, post } = await fixture(t);
+  const requests = new Map<string, Array<{ model: string; key: string }>>();
+  const respond = (nodeId: string) => (msg: Message, send: (message: Message) => void) => {
+    if (msg.type !== "http_relay" || msg.path !== "/v1/chat/completions") return;
+    const body = JSON.parse(msg.body);
+    const received = requests.get(nodeId) ?? [];
+    received.push({ model: body.model, key: msg.upstreamApiKey });
+    requests.set(nodeId, received);
+    send(headers(msg.requestId, 200));
+    send({ type: "http_chunk", requestId: msg.requestId, data: JSON.stringify({
+      choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }) });
+    send({ type: "http_done", requestId: msg.requestId });
+  };
+  await node({ nodeId: "route-a", modelName: "internal-a" }, respond("route-a"));
+  await node({ nodeId: "route-b", modelName: "internal-b" }, respond("route-b"));
+  await node({ nodeId: "route-other", modelName: "internal-other" }, respond("route-other"));
+
+  const login = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
+  const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+  const adminHeaders = { cookie, "content-type": "application/json" };
+  const createModel = async (publicName: string) => {
+    const response = await app.inject({ method: "POST", url: "/api/admin/models", headers: adminHeaders,
+      payload: { publicName, inputPrice: 0, outputPrice: 0 } });
+    assert.equal(response.statusCode, 200, response.body);
+    return response.json().id as string;
+  };
+  const modelA = await createModel("public-a");
+  const modelB = await createModel("public-b");
+  for (const route of [
+    { modelId: modelA, nodeId: "route-a", upstreamModel: "internal-a", upstreamKey: "node-key-a" },
+    { modelId: modelA, nodeId: "route-b", upstreamModel: "internal-b", upstreamKey: "node-key-b" },
+    { modelId: modelB, nodeId: "route-other", upstreamModel: "internal-other", upstreamKey: "node-key-other" },
+  ]) {
+    const response = await app.inject({ method: "POST", url: `/api/admin/models/${route.modelId}/routes`, headers: adminHeaders,
+      payload: { nodeId: route.nodeId, upstreamModel: route.upstreamModel, upstreamKey: route.upstreamKey, weight: 1 } });
+    assert.equal(response.statusCode, 200, response.body);
+  }
+  const keyResponse = await app.inject({ method: "POST", url: "/api/admin/keys", headers: adminHeaders,
+    payload: { name: "scheduler test" } });
+  assert.equal(keyResponse.statusCode, 200, keyResponse.body);
+  const gatewayKey = keyResponse.json().key as string;
+
+  const call = async (model: string) => {
+    const response = await post({ model, messages: [{ role: "user", content: "hello" }] }, gatewayKey).response;
+    assert.equal(response.statusCode, 200);
+    await text(response);
+  };
+  await call("public-a");
+  await call("public-b");
+  await call("public-a");
+
+  assert.deepEqual(requests.get("route-a"), [{ model: "internal-a", key: "node-key-a" }]);
+  assert.deepEqual(requests.get("route-b"), [{ model: "internal-b", key: "node-key-b" }]);
+  assert.deepEqual(requests.get("route-other"), [{ model: "internal-other", key: "node-key-other" }]);
+});
+
 test("client disconnect before upstream headers cancels both stream modes", async t => {
   const { node, post, tunnel } = await fixture(t);
   const peer = await node({}, keyOwner);

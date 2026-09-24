@@ -70,7 +70,7 @@ function asPem(value: string, type: "PRIVATE KEY" | "PUBLIC KEY"): string {
 
 export class PlatformService {
   private readonly secret: Buffer;
-  private routeCursor = 0;
+  private readonly routeCursors = new Map<string, number>();
 
   constructor(readonly sqlite: Database.Database, readonly dataDir: string, readonly tunnel: WebSocketTunnel, private readonly publicUrl = "") {
     this.secret = getPlatformSecret(dataDir);
@@ -287,6 +287,7 @@ export class PlatformService {
   }
 
   deleteModel(id: string): void {
+    this.routeCursors.delete(id);
     this.sqlite.prepare("DELETE FROM model_routes WHERE model_id = ?").run(id);
     this.sqlite.prepare("DELETE FROM platform_models WHERE id = ?").run(id);
   }
@@ -346,15 +347,19 @@ export class PlatformService {
 
   async selectManagedRoute(modelName: string, signal?: AbortSignal): Promise<{ nodeId: string; connectionId: string; upstreamModel: string; upstreamKey: string; publicName: string; inputPrice: number; outputPrice: number }> {
     const rows = this.sqlite.prepare(`SELECT r.*, m.public_name, m.input_price, m.output_price FROM model_routes r
-      JOIN platform_models m ON m.id=r.model_id WHERE m.public_name=? AND m.enabled=1 AND r.enabled=1 ORDER BY r.weight DESC`)
+      JOIN platform_models m ON m.id=r.model_id WHERE m.public_name=? AND m.enabled=1 AND r.enabled=1 ORDER BY r.weight DESC, r.id ASC`)
       .all(modelName) as ModelRoute[];
     const online = new Set(this.tunnel.getOnlineNodes().filter(node => node.serverRunning).map(node => node.id));
     let candidates = rows.filter(row => online.has(row.node_id));
     if (!candidates.length) throw new RelayError("Requested model is not available", 404);
-    const totalWeight = candidates.reduce((sum, route) => sum + Math.min(route.weight, 100), 0);
-    const ticket = this.routeCursor++ % Math.max(totalWeight, 1);
+    const routeWeight = (route: ModelRoute) => Number.isSafeInteger(route.weight)
+      ? Math.max(1, Math.min(route.weight, 100)) : 1;
+    const totalWeight = candidates.reduce((sum, route) => sum + routeWeight(route), 0);
+    const modelId = candidates[0].model_id;
+    const ticket = (this.routeCursors.get(modelId) ?? 0) % totalWeight;
+    this.routeCursors.set(modelId, (ticket + 1) % totalWeight);
     let cumulative = 0;
-    const selected = candidates.find(route => (cumulative += Math.min(route.weight, 100)) > ticket)!;
+    const selected = candidates.find(route => (cumulative += routeWeight(route)) > ticket)!;
     candidates = [selected, ...candidates.filter(route => route.id !== selected.id)];
     let lastError: unknown;
     for (const route of candidates) {
