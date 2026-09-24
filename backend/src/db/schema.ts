@@ -58,7 +58,7 @@ export function initDatabase(): void {
   db = defaultDatabase.db;
 }
 
-export function createDatabase(directory: string): { db: BetterSQLite3Database; close: () => void } {
+export function createDatabase(directory: string): { db: BetterSQLite3Database; sqlite: Database.Database; close: () => void } {
   mkdirSync(directory, { recursive: true });
   const sqlite = new Database(join(directory, "openmymodel.db"));
   sqlite.pragma("journal_mode = WAL");
@@ -100,8 +100,123 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
       model_config TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS platform_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS platform_models (
+      id TEXT PRIMARY KEY,
+      public_name TEXT NOT NULL UNIQUE,
+      remark TEXT NOT NULL DEFAULT '',
+      input_price REAL NOT NULL DEFAULT 0,
+      output_price REAL NOT NULL DEFAULT 0,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS model_routes (
+      id TEXT PRIMARY KEY,
+      model_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      upstream_model TEXT NOT NULL,
+      upstream_key TEXT NOT NULL,
+      weight INTEGER NOT NULL DEFAULT 1,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS gateway_keys (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      prefix TEXT NOT NULL,
+      secret_hash TEXT NOT NULL UNIQUE,
+      owner_user_id TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      token_limit INTEGER NOT NULL DEFAULT 0,
+      rpm_limit INTEGER NOT NULL DEFAULT 0,
+      model_filter TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      last_used_at TEXT,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      total_requests INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS gateway_request_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS platform_users (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      balance REAL NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      last_login_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS platform_sessions (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT,
+      role TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS email_codes (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      code_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      consumed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS payment_orders (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      amount REAL NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      description TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      paid_at TEXT,
+      trade_no TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_usage_api_key ON usage_logs(api_key_id);
     CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_logs(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_model_routes_model ON model_routes(model_id, enabled);
+    CREATE INDEX IF NOT EXISTS idx_gateway_keys_owner ON gateway_keys(owner_user_id, is_active);
+    CREATE INDEX IF NOT EXISTS idx_gateway_events_key_time ON gateway_request_events(key_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_platform_sessions_expiry ON platform_sessions(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_email_codes_lookup ON email_codes(email, purpose, created_at);
+    CREATE INDEX IF NOT EXISTS idx_orders_user ON payment_orders(user_id, created_at);
   `);
-  return { db: drizzle(sqlite), close: () => sqlite.close() };
+  try { sqlite.exec("ALTER TABLE usage_logs ADD COLUMN cost REAL NOT NULL DEFAULT 0"); } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
+  }
+  const sessionUserId = (sqlite.pragma("table_info(platform_sessions)") as Array<{ name: string; notnull: number }>)
+    .find(column => column.name === "user_id");
+  if (sessionUserId?.notnull) {
+    sqlite.transaction(() => {
+      sqlite.exec(`DROP INDEX IF EXISTS idx_platform_sessions_expiry;
+        ALTER TABLE platform_sessions RENAME TO platform_sessions_legacy;
+        CREATE TABLE platform_sessions (
+          token_hash TEXT PRIMARY KEY,
+          user_id TEXT,
+          role TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO platform_sessions(token_hash, user_id, role, expires_at, created_at)
+          SELECT token_hash, user_id, role, expires_at, created_at FROM platform_sessions_legacy;
+        DROP TABLE platform_sessions_legacy;
+        CREATE INDEX idx_platform_sessions_expiry ON platform_sessions(expires_at);`);
+    })();
+  }
+  return { db: drizzle(sqlite), sqlite, close: () => sqlite.close() };
 }

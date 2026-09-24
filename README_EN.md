@@ -12,7 +12,7 @@
 > Free online LLM platforms are everywhere, but nearly all serve aggressively quantized models -- a downgraded version of intelligence. I have tested this firsthand: **Qwen 3.5 9B at INT8** running on a consumer GPU consistently outperforms the so-called flagship free-tier online services on logic and mathematical reasoning tasks. Free APIs compress quality for cost at scale -- what you get is merely a shadow of the same model name. When you control precision and parameters yourself, every inference runs on real weights, and the difference exceeds expectations.
 >
 > #### Beyond Solo Use: Share and Monetize
-> OpenMyModel was designed for more than personal use -- it is built for compute sharing. Distribute API keys to teammates, friends, or community users and enable, disable or delete them locally. Token quotas, billing and usage metering are not implemented; do not rely on this version for metered commercial service.
+> OpenMyModel supports personal node sharing and service-provider operations. Admins can configure model routes, node credentials and unified API keys. Provider mode adds email-code accounts, Alipay top-ups, balance deductions, and input/output token metering.
 
 **Tunnel local llama.cpp compute to the cloud via WebSocket, exposed as an OpenAI-compatible API.**
 
@@ -50,7 +50,7 @@ flowchart LR
 | **Flutter Desktop** | Flutter + Dart | UI / bundled llama-server process management (start, health check, stop) / API Key management (local-only, no cloud storage) / Chat connecting directly to the engine's OpenAI API |
 | **Bundled Engine** | llama.cpp b10909 (pinned Git submodule) | Official OpenAI-compatible HTTP API; CPU/CUDA backends built from source, Vulkan backend from the official prebuilt archive (all SHA-256 verified), backend auto-selected per GPU -- no Python or any runtime installation required |
 | **Node Bridge** | Node.js + ws | Desktop stdin/stdout control / local key validation / WebSocket HTTP tunnel |
-| **Cloud Backend** | TypeScript + Node.js | WebSocket server / Request transparent proxying to llama-server / CLI management |
+| **Cloud Backend** | TypeScript + Node.js | WebSocket server / encrypted node credentials and model routing / OpenAI-compatible gateway / admin console |
 
 > Historical note: earlier versions managed llama-server through a local Python HTTP
 > bridge. The desktop app now manages the engine process directly via Dart
@@ -70,6 +70,10 @@ flowchart LR
 - **Built-in Chat**: Multi-image upload + text, streaming responses, stop-generation cuts the underlying connection
 - **Parameter Profiles**: Saved locally (compatible with profile files exported by older versions), switch with one click
 - **Public Status Page**: the cloud backend's landing page shows online nodes, concurrency capacity/utilization, throughput and per-model concurrency — public aggregates only
+- **Admin and Routing**: `/admin` configures nodes, public model aliases, upstream model names, required `llama-server --api-key` credentials, route weights, unified API keys, usage and orders. Node keys are encrypted on the server and sent only to their node over the tunnel
+- **Personal Mode**: no end-user registration; admins issue unified API keys, and `/dashboard` shows aggregate status without login. Callers may also access a node directly with its desktop-managed key
+- **Service-Provider Mode**: requires configured SMTP email plus Alipay app ID, seller ID, RSA2 private key and Alipay public key. Users register/sign in with email codes, manage their own API keys, usage and orders, and top up at `/console`. Billing uses input/output token prices; cached tokens have no separate price
+- **Separate API Key Roles**: the node key protects the local `llama-server` HTTP service. The gateway key identifies external callers for limits and metering. Gateway keys are shown once; only their hashes are stored
 - **Chinese CLI**: Wizard-driven command-line setup for the cloud backend
 - **Real-Time Status**: Engine start/loading/ready/error states and cloud connection status tracked live
 
@@ -234,17 +238,14 @@ Then click "Restart" in Baota Node Projects.
 ## Security Design
 
 ```
-API Key Validation Flow:
-  User Request -> Cloud Backend -> Extract API Key
-                                 -> Look up WebSocket node
-                                 -> Send { action: "validate_key", key: "sk-xxx" }
-                                 -> Local Node bridge checks keys supplied by Flutter
-                                 -> Returns validation result
-                                 -> If passed, transparently proxy to llama-server
+Direct node call: desktop API key -> node bridge validation -> llama-server
+Unified gateway call: gateway API key -> backend auth/limits/metering -> public model route
+  -> decrypt that route's node key -> tunnel relay -> node bridge calls llama-server with Bearer key
 
-Core principle: Cloud backend NEVER stores API keys.
-All key management is controlled by the compute provider.
+The node key protects the node's HTTP service and is managed separately from caller gateway keys. Node keys are encrypted with a local server secret in the database; gateway keys are stored as hashes. Use HTTPS/WSS in production and protect the server data directory and secret file.
 ```
+
+Admin console: `/admin`; public personal-mode dashboard: `/dashboard`; provider user console: `/console`. Configure SMTP and Alipay credentials in the admin console before enabling provider mode.
 
 ---
 

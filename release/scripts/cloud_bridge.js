@@ -161,7 +161,12 @@ class CloudBridge {
       target.search = split < 0 ? "" : path.slice(split);
       const body = typeof message.body === "string" ? message.body : "{}";
       const headers = { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), "Accept-Encoding": "identity" };
-      if (this.llamaApiKey) headers.Authorization = `Bearer ${this.llamaApiKey}`;
+      if (message.upstreamApiKey !== undefined) {
+        if (typeof message.upstreamApiKey !== "string" || message.upstreamApiKey.length > 4096 || /[\r\n]/.test(message.upstreamApiKey)) {
+          throw new Error("无效的上游 API Key");
+        }
+        if (message.upstreamApiKey) headers.Authorization = `Bearer ${message.upstreamApiKey}`;
+      } else if (this.llamaApiKey) headers.Authorization = `Bearer ${this.llamaApiKey}`;
       request = (target.protocol === "https:" ? https : http).request(target, { method: "POST", headers }, (response) => {
         entry.response = response;
         if (entry.done) return response.destroy();

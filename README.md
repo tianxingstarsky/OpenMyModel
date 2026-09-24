@@ -12,7 +12,7 @@
 > 免费在线大模型虽触手可及，却几乎都经过过度量化——提供给你的是智力"降级版"。我实测对比：一台消费级显卡上跑 **Qwen 3.5 9B INT8**，在逻辑推理和数学推导上明显优于所谓"旗舰级"的免费在线服务。免费 API 为了成本极致压缩，你拿到的其实只是同名模型的一张影子。而当你自己掌控精度和参数，每一轮推理都在真实权重上完成，体验的差距会超出你的预期。
 >
 > #### 不止自用，更可共享与变现
-> OpenMyModel 的设计初衷不止于"自己用"——它同时为算力共享而生。你可以为团队成员、朋友或社区用户分发 API Key，并在本机启用、停用或删除。当前版本不实现 Token 配额、计费或用量统计，不应将其用于需要精确计量的收费服务。
+> OpenMyModel 同时支持个人节点共享与服务商运营：管理员可配置模型路由、节点凭据和统一 API Key；服务商模式提供邮箱验证码登录、支付宝充值、余额扣费以及按输入/输出 Token 统计。
 
 **将本地 llama.cpp 算力通过 WebSocket 隧道暴露到云端，以 OpenAI 兼容 API 供外部调用。**
 
@@ -50,7 +50,7 @@ flowchart LR
 | **Flutter 桌面端** | Flutter + Dart | UI 界面 / 内置 llama-server 进程管理（启动、健康检查、停止）/ API Key 管理（本地存储+本地验证）/ 模型对话（直连引擎 OpenAI API） |
 | **内置引擎** | llama.cpp b10909（Git submodule 固定版本） | 官方 OpenAI 兼容 HTTP API；CPU/CUDA 后端源码构建，Vulkan 后端官方预编译（均经 SHA-256 校验），按显卡自动选择，无需安装 Python 或任何运行环境 |
 | **Node Bridge** | Node.js + ws | Flutter stdin/stdout 控制 / 本地 Key 验证 / WebSocket HTTP 隧道 |
-| **云后端** | TypeScript + Node.js | WebSocket 服务端 / 请求透明转发到 llama-server / CLI 管理工具 |
+| **云后端** | TypeScript + Node.js | WebSocket 服务端 / 节点密钥加密托管与模型调度 / OpenAI 兼容网关 / 管理面板 |
 
 > 历史说明：早期版本通过一个本地 Python HTTP 桥管理 llama-server；当前版本已由 Dart 的
 > `InferenceService` 直接管理引擎进程，无需安装 Python，旧桥代码已从仓库移除
@@ -69,6 +69,10 @@ flowchart LR
 - **💬 内置对话界面**：多图上传 + 文字，流式响应，停止生成即断开底层连接
 - **📦 参数档案**：配置档案本地保存（兼容旧版本导出的档案文件），一键切换
 - **📊 公共状态页**：访问云后端首页即见在线节点、并发容量/使用率、吞吐速度和各模型并发，仅公开聚合信息
+- **🧭 管理与调度**：`/admin` 配置节点、模型别名、上游模型名、必填的 `llama-server --api-key`、调度权重、统一 API Key、调用统计和用户订单；节点 Key 在服务器加密保存并只经隧道发送给对应节点
+- **📈 个人模式**：不开放用户注册；管理员创建统一 API Key，`/dashboard` 无需登录即可查看聚合状态；也可继续用桌面端节点 Key 直接访问节点
+- **💼 服务商模式**：管理员完成 SMTP 邮箱及支付宝应用 ID、商户 ID、RSA2 私钥/支付宝公钥配置后才能启用；用户通过邮箱验证码注册/登录，在 `/console` 管理自己的 API Key、用量和订单并充值。按输入/输出 Token 单价计费，不包含缓存 Token 单独定价
+- **🔐 分层 API Key**：节点 Key 由 `llama-server --api-key` 保护本机 HTTP；网关 Key 用来识别外部调用者、限流和计量。网关 Key 只显示一次，服务器保存其哈希
 - **🛠 中文 CLI**：云后端通过向导式命令行完成初始化和管理
 - **⚡ 实时状态**：引擎启动/加载/就绪/错误状态、云端连接状态实时跟踪
 
@@ -289,16 +293,14 @@ git pull && npm install && npm run build
 ## 🔐 安全设计
 
 ```
-API Key 验证流程:
-  用户请求 → 云后端 → 提取 API Key
-                      → 查找对应 WebSocket 节点
-                      → 发送 { action: "validate_key", key: "sk-xxx" }
-                      → 本机 Node Bridge 检查 Flutter 同步的密钥
-                      → 返回验证结果
-                      → 通过后透明转发请求到 llama-server
+直接节点调用：桌面端 API Key → 节点桥接校验 → llama-server
+统一网关调用：网关 API Key → 云后端鉴权/限流/计量 → 选择公开模型路由
+  → 解密该路由的节点 Key → 隧道转发 → 节点桥接以 Bearer Key 调用 llama-server
 
-关键原则：云后端 NEVER 存储 API Key，全权由算力提供者控制
+节点 Key 是保护节点 HTTP 服务的凭据，与调用者的网关 Key 分开管理。节点 Key 使用服务器本地密钥加密后保存在数据库；网关 Key 只保存哈希。生产环境应使用 HTTPS/WSS，并保护服务器数据目录和密钥文件。
 ```
+
+管理入口：`/admin`；个人模式公开仪表盘：`/dashboard`；服务商用户控制台：`/console`。服务商模式须先在管理端配置 SMTP 和支付宝应用参数，配置完整后才能启用。
 
 ---
 

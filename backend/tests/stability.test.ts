@@ -3,16 +3,19 @@ import { test, TestContext } from "node:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createHash } from "node:crypto";
+import { createHash, createSign, createVerify, generateKeyPairSync } from "node:crypto";
 import { request as httpRequest, createServer, Server, IncomingMessage } from "node:http";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocket } from "ws";
+import Database from "better-sqlite3";
 import { buildApp, AppOptions } from "../src/index";
 import { ConfigStore } from "../src/config";
 import { hashPassword, verifyPassword, verifyAdminPassword } from "../src/services/auth";
 import { WebSocketTunnel } from "../src/services/websocket";
 import { relayHeaders } from "../src/routes/openai";
+import { createDatabase } from "../src/db/schema";
+import { PlatformService } from "../src/services/platform";
 
 const PASSWORD = "test-only-admin-password";
 const passwordHash = hashPassword(PASSWORD);
@@ -125,6 +128,105 @@ test("startup uses isolated env configuration and requires explicit initializati
     assert.equal(existing.load().passwordHash, store.load().passwordHash);
     assert.throws(() => new ConfigStore(directory, { PORT: "bad" }).load(), /Invalid PORT/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("database migration makes administrator sessions nullable and preserves existing sessions", () => {
+  const directory = mkdtempSync(join(tmpdir(), "openmymodel-session-migration-"));
+  const path = join(directory, "openmymodel.db");
+  const oldDatabase = new Database(path);
+  oldDatabase.exec(`CREATE TABLE platform_sessions (
+    token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, role TEXT NOT NULL,
+    expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+  ); CREATE INDEX idx_platform_sessions_expiry ON platform_sessions(expires_at);
+  INSERT INTO platform_sessions VALUES('existing-session', 'user-1', 'user', '2999-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');`);
+  oldDatabase.close();
+  const database = createDatabase(directory);
+  try {
+    const columns = database.sqlite.pragma("table_info(platform_sessions)") as Array<{ name: string; notnull: number }>;
+    assert.equal(columns.find(column => column.name === "user_id")?.notnull, 0);
+    assert.equal(database.sqlite.prepare("SELECT token_hash FROM platform_sessions WHERE token_hash='existing-session'").get()?.token_hash,
+      "existing-session");
+  } finally {
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("personal mode exposes only its public dashboard and blocks provider signup until configured", async t => {
+  const { app } = await fixture(t);
+  const dashboard = await app.inject({ method: "GET", url: "/api/public/dashboard" });
+  assert.equal(dashboard.statusCode, 200);
+  assert.equal(dashboard.json().onlineNodes, 0);
+  const signup = await app.inject({ method: "POST", url: "/api/auth/email-code", payload: { email: "person@example.com", purpose: "register" } });
+  assert.equal(signup.statusCode, 400);
+
+  const login = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
+  const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+  const enable = await app.inject({ method: "PUT", url: "/api/admin/settings", headers: { cookie },
+    payload: { mode: "provider" } });
+  assert.equal(enable.statusCode, 400);
+  assert.match(enable.json().error, /SMTP/);
+  const config = await app.inject({ method: "GET", url: "/api/public/config" });
+  assert.equal(config.json().mode, "personal");
+});
+
+test("Alipay settings validate RSA keys and signed payments credit an order once", () => {
+  const directory = mkdtempSync(join(tmpdir(), "openmymodel-alipay-test-"));
+  const database = createDatabase(directory);
+  try {
+    const appKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const alipayKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const appPrivateKey = appKeys.privateKey.export({ type: "pkcs1", format: "der" }).toString("base64");
+    const alipayPrivateKey = alipayKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const alipayPublicKey = alipayKeys.publicKey.export({ type: "pkcs1", format: "der" }).toString("base64");
+    const platform = new PlatformService(database.sqlite, directory,
+      new WebSocketTunnel({ authenticate: async () => "ok" }), "https://api.example.test");
+    assert.throws(() => platform.saveAdminSettings({
+      mode: "provider", mailHost: "smtp.example.test", mailPort: 465, mailUser: "mail-user",
+      mailFrom: "billing@example.test", mailPassword: "mail-pass", alipayAppId: "2026000000000001",
+      alipayPrivateKey: appPrivateKey, alipayPublicKey,
+    }), /支付宝/);
+    const settings = platform.saveAdminSettings({
+      mode: "provider", mailHost: "smtp.example.test", mailPort: 465, mailUser: "mail-user",
+      mailFrom: "billing@example.test", mailPassword: "mail-pass", alipayAppId: "2026000000000001",
+      alipaySellerId: "2088000000000000", alipayPrivateKey: appPrivateKey, alipayPublicKey,
+    });
+    assert.equal(settings.providerReady, true);
+
+    const userId = "payer-1";
+    database.sqlite.prepare("INSERT INTO platform_users(id, email, created_at) VALUES(?, ?, ?)")
+      .run(userId, "payer@example.test", new Date().toISOString());
+    const order = platform.createOrder(userId, 10, "https://api.example.test/console?payment=return");
+    const payment = new URL(order.paymentUrl);
+    assert.equal(payment.searchParams.get("app_id"), "2026000000000001");
+    assert.equal(payment.searchParams.get("notify_url"), "https://api.example.test/api/payments/alipay/notify");
+    const paymentFields = Object.fromEntries(payment.searchParams.entries());
+    const paymentSignature = paymentFields.sign;
+    delete paymentFields.sign;
+    const paymentCanonical = Object.keys(paymentFields).sort().map(key => `${key}=${paymentFields[key]}`).join("&");
+    assert.equal(createVerify("RSA-SHA256").update(paymentCanonical).verify(appKeys.publicKey, paymentSignature, "base64"), true);
+
+    const signNotification = (fields: Record<string, string>) => ({ ...fields,
+      sign: createSign("RSA-SHA256").update(Object.keys(fields).sort().map(key => `${key}=${fields[key]}`).join("&"))
+        .sign(alipayPrivateKey, "base64") });
+    const notification = signNotification({ app_id: "2026000000000001", auth_app_id: "2026000000000001",
+      seller_id: "2088000000000000", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: order.orderId,
+      total_amount: "10.00", trade_status: "TRADE_SUCCESS", trade_no: "2026092400000001" });
+    assert.equal(platform.processAlipayNotification(notification), true);
+    assert.equal(platform.processAlipayNotification(notification), true, "duplicate notifications must be idempotent");
+    assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(userId) as { balance: number }).balance, 10);
+    assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001", auth_app_id: "2026000000000001",
+      seller_id: "2088000000000000", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: order.orderId,
+      total_amount: "100.00", trade_status: "TRADE_SUCCESS", trade_no: "2026092400000001" })), false,
+    "signed callbacks with an amount that does not match the order must be rejected");
+    assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001", auth_app_id: "2026000000000001",
+      seller_id: "wrong-seller", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: order.orderId,
+      total_amount: "10.00", trade_status: "TRADE_SUCCESS", trade_no: "2026092400000001" })), false,
+    "notifications for another seller must be rejected");
+  } finally {
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("JSON validation rejects malformed, non-JSON, and bodies exceeding 32 MiB", async t => {
@@ -428,11 +530,12 @@ test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, aut
   const { CloudBridge } = require("../../scripts/cloud_bridge.js");
   const { url, post, tunnel } = await fixture(t);
   let mode = "stream";
+  let expectedAuthorization = "Bearer llama-secret";
   let upstreamClosed = false;
   const upstream = createServer((req, res) => {
     assert.equal(req.method, "POST");
     assert.equal(req.url, "/v1/chat/completions");
-    assert.equal(req.headers.authorization, "Bearer llama-secret");
+    assert.equal(req.headers.authorization, expectedAuthorization);
     assert.equal(req.headers["accept-encoding"], "identity");
     req.resume();
     req.on("end", () => {
@@ -462,7 +565,17 @@ test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, aut
   await until(() => bridge.connected);
   const streamed = await post('{ "stream" : true, "model": "model-a" }').response;
   assert.equal(await text(streamed), 'data: {"text":"\u4f60\u597d  "}\n\n');
+  mode = "override";
+  expectedAuthorization = "Bearer managed-node-secret";
+  let relayStatus = 0;
+  let relayBody = "";
+  await tunnel.relayHttp(tunnel.routeToNode("production-bridge"), {
+    path: "/v1/chat/completions", body: "{}", upstreamApiKey: "managed-node-secret",
+  }, { onHeaders: status => { relayStatus = status; }, onChunk: chunk => { relayBody += chunk; } });
+  assert.equal(relayStatus, 200);
+  assert.match(relayBody, /你好/);
   mode = "error";
+  expectedAuthorization = "Bearer llama-secret";
   const failed = await post().response;
   assert.equal(failed.statusCode, 429);
   assert.equal(failed.headers["retry-after"], "3");
@@ -573,4 +686,73 @@ test("requests beyond slot capacity surface as queued; loading nodes contribute 
   assert.equal(snapshot.totals.capacitySlots, 2, "loading node slots excluded");
   assert.equal(snapshot.models.find(m => m.model === "loading-model")?.slots, null);
   loading.socket.terminate();
+});
+
+test("managed gateway routes with the configured llama-server key and meters usage", async t => {
+  const { app, node, post } = await fixture(t);
+  const nodeKey = "node-secret-for-llama-server";
+  let relayed = false;
+  await node({ modelName: "internal-model" }, (msg, send) => {
+    if (msg.type !== "http_relay") return;
+    relayed = true;
+    assert.equal(msg.upstreamApiKey, nodeKey);
+    const requestBody = JSON.parse(msg.body);
+    assert.equal(requestBody.model, "internal-model-v2");
+    const streaming = requestBody.stream === true;
+    if (streaming) assert.equal(requestBody.stream_options.include_usage, true);
+    const body = streaming
+      ? 'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\ndata: [DONE]\n\n'
+      : JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 11, completion_tokens: 7 } });
+    send(headers(msg.requestId, 200, { "content-type": streaming ? "text/event-stream" : "application/json" }));
+    send({ type: "http_chunk", requestId: msg.requestId, data: body });
+    send({ type: "http_done", requestId: msg.requestId });
+  });
+
+  const login = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
+  assert.equal(login.statusCode, 200);
+  const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+  const adminHeaders = { cookie, "content-type": "application/json" };
+  const modelResponse = await app.inject({ method: "POST", url: "/api/admin/models", headers: adminHeaders,
+    payload: { publicName: "public-chat", remark: "调度验证", inputPrice: 2, outputPrice: 4 } });
+  assert.equal(modelResponse.statusCode, 200, modelResponse.body);
+  const modelId = modelResponse.json().id;
+  const routeResponse = await app.inject({ method: "POST", url: `/api/admin/models/${modelId}/routes`, headers: adminHeaders,
+    payload: { nodeId: "node-1", upstreamModel: "internal-model-v2", upstreamKey: nodeKey, weight: 1 } });
+  assert.equal(routeResponse.statusCode, 200, routeResponse.body);
+  assert.equal(routeResponse.json().routes[0].keyConfigured, true);
+  assert.equal(routeResponse.body.includes(nodeKey), false, "admin route listing must not disclose the node key");
+
+  const keyResponse = await app.inject({ method: "POST", url: "/api/admin/keys", headers: adminHeaders,
+    payload: { name: "integration key", tokenLimit: 100, rpmLimit: 3 } });
+  assert.equal(keyResponse.statusCode, 200, keyResponse.body);
+  const gatewayKey = keyResponse.json().key as string;
+  const models = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${gatewayKey}` } });
+  assert.equal(models.statusCode, 200);
+  assert.equal(models.json().data[0].id, "public-chat");
+
+  const response = await post({ model: "public-chat", messages: [{ role: "user", content: "hello" }] }, gatewayKey).response;
+  assert.equal(response.statusCode, 200);
+  const responseBody = JSON.parse(await text(response));
+  assert.equal(responseBody.usage.prompt_tokens, 11);
+  assert.equal(responseBody.usage.completion_tokens, 7);
+  assert.equal(relayed, true);
+
+  const streamed = await post({ model: "public-chat", stream: true, stream_options: { include_usage: false }, messages: [] }, gatewayKey).response;
+  assert.equal(streamed.statusCode, 200);
+  assert.match(await text(streamed), /"prompt_tokens":3/);
+
+  const limited = await post({ model: "public-chat", messages: [] }, gatewayKey).response;
+  assert.equal(limited.statusCode, 429);
+  await text(limited);
+  const usage = await app.inject({ method: "GET", url: "/api/admin/usage", headers: adminHeaders });
+  assert.equal(usage.statusCode, 200);
+  const nonstreamUsage = usage.json().find((row: Message) => row.prompt_tokens === 11);
+  assert.equal(nonstreamUsage.model, "public-chat");
+  assert.equal(nonstreamUsage.completion_tokens, 7);
+  assert.equal(nonstreamUsage.cost, 0.00005);
+  const streamUsage = usage.json().find((row: Message) => row.prompt_tokens === 3);
+  assert.equal(streamUsage.completion_tokens, 2);
+  assert.equal(streamUsage.cost, 0.000014);
+  const keys = await app.inject({ method: "GET", url: "/api/admin/keys", headers: adminHeaders });
+  assert.equal(keys.json()[0].requestsLastMinute, 3);
 });

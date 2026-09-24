@@ -72,6 +72,7 @@ export interface RelayTarget {
 export interface RelayOptions {
   requestId?: string;
   signal?: AbortSignal;
+  upstreamApiKey?: string;
   onHeaders: (statusCode: number, headers: Record<string, unknown>) => void;
   onChunk?: (chunk: string) => void;
 }
@@ -347,7 +348,15 @@ export class WebSocketTunnel {
     throw new RelayError("Invalid API Key", 401);
   }
 
-  relayHttp(target: RelayTarget, request: { path: string; body: string }, options: RelayOptions): Promise<string> {
+  routeToNode(nodeId: string): RelayTarget {
+    const conn = this.connections.get(nodeId);
+    if (!conn || conn.retired || !conn.authenticated || conn.ws.readyState !== WebSocket.OPEN || !conn.node.serverRunning) {
+      throw new RelayError("Configured compute node is offline", 503);
+    }
+    return { nodeId: conn.node.id, connectionId: conn.connectionId };
+  }
+
+  relayHttp(target: RelayTarget, request: { path: string; body: string; upstreamApiKey?: string }, options: RelayOptions): Promise<string> {
     const conn = this.connections.get(target.nodeId);
     if (!conn || conn.connectionId !== target.connectionId || conn.retired || !conn.node.serverRunning) {
       return Promise.reject(new RelayError("Compute node unavailable or replaced"));
@@ -379,7 +388,8 @@ export class WebSocketTunnel {
       conn.stats.activeRequests++;
       this.globalStats.activeRequests++;
       this.addPending(conn, requestId, pending, options.signal);
-      if (conn.pending.has(requestId) && !this.send(conn, { type: "http_relay", requestId, path: request.path, body: request.body, method: "POST" })) {
+      if (conn.pending.has(requestId) && !this.send(conn, { type: "http_relay", requestId, path: request.path, body: request.body,
+        ...(request.upstreamApiKey ? { upstreamApiKey: request.upstreamApiKey } : {}), method: "POST" })) {
         this.fail(conn, requestId, new RelayError("Compute node send failed"));
       }
     });

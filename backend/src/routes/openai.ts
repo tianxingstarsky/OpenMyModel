@@ -1,6 +1,8 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { OutgoingHttpHeaders, validateHeaderName, validateHeaderValue } from "http";
+import { createHash } from "crypto";
 import { WebSocketTunnel, RelayError } from "../services/websocket";
+import { PlatformService } from "../services/platform";
 
 const MAX_WRITE_QUEUE = 8 * 1024 * 1024;
 
@@ -29,8 +31,63 @@ export function relayHeaders(headers: Record<string, unknown>): OutgoingHttpHead
   return result;
 }
 
-export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunnel): void {
-  app.get("/v1/models", async () => {
+class UsageCapture {
+  private buffer = "";
+  prompt = 0;
+  completion = 0;
+
+  private take(value: unknown): void {
+    if (!value || typeof value !== "object") return;
+    const item = value as Record<string, any>;
+    const usage = item.usage && typeof item.usage === "object" ? item.usage : item;
+    const prompt = usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokens;
+    const completion = usage.completion_tokens ?? usage.output_tokens ?? usage.completionTokens;
+    if (Number.isFinite(Number(prompt)) && Number(prompt) >= 0) this.prompt = Math.floor(Number(prompt));
+    if (Number.isFinite(Number(completion)) && Number(completion) >= 0) this.completion = Math.floor(Number(completion));
+  }
+
+  consume(chunk: string, streaming: boolean): void {
+    if (!streaming) {
+      this.buffer = (this.buffer + chunk).slice(-4 * 1024 * 1024);
+      return;
+    }
+    this.buffer += chunk;
+    if (this.buffer.length > 1024 * 1024) this.buffer = this.buffer.slice(-256 * 1024);
+    let newline: number;
+    while ((newline = this.buffer.indexOf("\n")) >= 0) {
+      const line = this.buffer.slice(0, newline).replace(/\r$/, "");
+      this.buffer = this.buffer.slice(newline + 1);
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      try { this.take(JSON.parse(data)); } catch { /* Ignore non-JSON SSE event lines. */ }
+    }
+  }
+
+  finish(streaming: boolean): { prompt: number; completion: number } {
+    if (streaming && this.buffer.startsWith("data:")) {
+      try { this.take(JSON.parse(this.buffer.slice(5).trim())); } catch { /* Incomplete final event. */ }
+    }
+    if (!streaming) {
+      try { this.take(JSON.parse(this.buffer)); } catch { /* Upstream may return a non-JSON error. */ }
+    }
+    return { prompt: this.prompt, completion: this.completion };
+  }
+}
+
+export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunnel, platform: PlatformService): void {
+  app.get("/v1/models", async (request, reply) => {
+    const authorization = request.headers.authorization;
+    const rawKey = authorization?.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+    const managedKey = rawKey ? platform.findGatewayKey(rawKey) : null;
+    if (managedKey) {
+      try { platform.checkGatewayKey(managedKey); }
+      catch (error) { const status = error instanceof RelayError ? error.statusCode : 401; return reply.status(status).send({ error: { message: (error as Error).message, type: "authentication_error" } }); }
+      return { object: "list", data: platform.publicModels(platform.allowedModels(managedKey)) };
+    }
+    if (platform.isProviderMode() || /^sk-oom-gw-/.test(rawKey)) {
+      return reply.status(401).send({ error: { message: "Invalid API Key", type: "authentication_error" } });
+    }
     const nodes = tunnel.getOnlineNodes().filter(node => node.serverRunning);
     const data = nodes.length > 0
       ? nodes.map(node => ({ id: node.modelName || "local-model", object: "model", created: Math.floor(Date.now() / 1000), owned_by: node.name }))
@@ -50,6 +107,14 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
       return reply.status(401).send({ error: { message: "Missing API Key", type: "authentication_error" } });
     }
 
+    const rawKey = auth.slice(7).trim();
+    const managedKey = platform.findGatewayKey(rawKey);
+    if (platform.isProviderMode() && !managedKey) {
+      return reply.status(401).send({ error: { message: "Use an API Key issued by this service", type: "authentication_error" } });
+    }
+    if (/^sk-oom-gw-/.test(rawKey) && !managedKey) {
+      return reply.status(401).send({ error: { message: "Invalid API Key", type: "authentication_error" } });
+    }
     const controller = new AbortController();
     const disconnect = () => {
       if (!reply.raw.writableFinished) controller.abort();
@@ -58,12 +123,42 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     reply.raw.on("close", disconnect);
     reply.raw.on("error", disconnect);
     if (request.raw.aborted || reply.raw.destroyed) controller.abort();
+    let publicModel = typeof body.model === "string" && body.model ? body.model : "local-model";
+    let inputPrice = 0;
+    let outputPrice = 0;
+    let targetKeyId = `direct-${createHash("sha256").update(rawKey).digest("hex").slice(0, 40)}`;
 
     try {
-      const node = await tunnel.findNode(auth.slice(7), body.model as string | undefined, controller.signal);
-      await tunnel.relayHttp(node, { path: request.url, body: JSON.stringify(body) }, {
+      let node;
+      let upstreamApiKey: string | undefined;
+      let relayBody = body;
+      if (managedKey) {
+        platform.checkGatewayKey(managedKey);
+        const allowed = platform.allowedModels(managedKey);
+        if (allowed.length && !allowed.includes(publicModel)) throw new RelayError("Model is not allowed for this API Key", 403);
+        const route = await platform.selectManagedRoute(publicModel, controller.signal);
+        node = { nodeId: route.nodeId, connectionId: route.connectionId };
+        upstreamApiKey = route.upstreamKey;
+        inputPrice = route.inputPrice;
+        outputPrice = route.outputPrice;
+        publicModel = route.publicName;
+        targetKeyId = managedKey.id;
+        relayBody = { ...body, model: route.upstreamModel };
+      } else {
+        node = await tunnel.findNode(rawKey, body.model as string | undefined, controller.signal);
+        platform.recordDirectRequest(targetKeyId);
+      }
+      if (body.stream === true) {
+        const streamOptions = body.stream_options && typeof body.stream_options === "object" && !Array.isArray(body.stream_options)
+          ? body.stream_options as Record<string, unknown> : {};
+        relayBody = { ...relayBody, stream_options: { ...streamOptions, include_usage: true } };
+      }
+      const capture = new UsageCapture();
+      let upstreamStatus = 200;
+      await tunnel.relayHttp(node, { path: request.url, body: JSON.stringify(relayBody), upstreamApiKey }, {
         signal: controller.signal,
         onHeaders: (statusCode, headers) => {
+          upstreamStatus = statusCode;
           const safeHeaders = relayHeaders(headers);
           if (!safeHeaders["content-type"]) safeHeaders["content-type"] = body.stream === true && statusCode < 400
             ? "text/event-stream; charset=utf-8" : "application/json; charset=utf-8";
@@ -78,9 +173,16 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
           if (reply.raw.writableLength + Buffer.byteLength(chunk) > MAX_WRITE_QUEUE) {
             throw new RelayError("Downstream response is too slow");
           }
+          capture.consume(chunk, body.stream === true);
           reply.raw.write(chunk, "utf8");
         },
       });
+      const usage = capture.finish(body.stream === true);
+      try {
+        platform.recordUsage(targetKeyId, publicModel, "/v1/chat/completions",
+          upstreamStatus < 400 ? usage.prompt : 0, upstreamStatus < 400 ? usage.completion : 0,
+          request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice);
+      } catch (error) { request.log.error({ err: error }, "Usage could not be recorded"); }
       if (!reply.raw.destroyed) reply.raw.end();
     } catch (error) {
       if (reply.raw.destroyed || controller.signal.aborted) return;

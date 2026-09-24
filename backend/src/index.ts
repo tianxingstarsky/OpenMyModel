@@ -8,6 +8,11 @@ import { registerAdminRoutes } from "./routes/admin";
 import { TunnelOptions, WebSocketTunnel } from "./services/websocket";
 import { AdminAuthenticator } from "./services/auth";
 import { renderStatusPage } from "./statusPage";
+import { registerPlatformRoutes } from "./routes/platform";
+import { PlatformService } from "./services/platform";
+import { readFileSync } from "fs";
+import { join } from "path";
+import { parse as parseUrlEncoded } from "querystring";
 
 export interface AppOptions {
   dataDir?: string;
@@ -18,6 +23,7 @@ export interface AppOptions {
   tunnel?: WebSocketTunnel;
   authLimit?: number;
   heartbeat?: boolean;
+  publicUrl?: string;
 }
 
 export async function buildApp(options: AppOptions = {}) {
@@ -39,11 +45,14 @@ export async function buildApp(options: AppOptions = {}) {
       database.db.insert(nodes).values(record).onConflictDoUpdate({ target: nodes.id, set: update }).run();
     },
   });
+  const platformService = new PlatformService(database.sqlite, store.directory, tunnel,
+    options.publicUrl ?? process.env.PUBLIC_BASE_URL ?? "");
   const app = Fastify({
     bodyLimit: 32 * 1024 * 1024,
     logger: options.logger ?? {
       level: "info",
-      redact: ["req.headers.authorization", "req.headers['x-admin-password']", "password", "body.password"],
+      redact: ["req.headers.authorization", "req.headers['x-admin-password']", "password", "body.password", "body.code",
+        "body.mailPassword", "body.alipayPrivateKey", "body.alipayPublicKey", "body.upstreamKey"],
     },
   });
   app.decorate("tunnel", tunnel);
@@ -57,19 +66,32 @@ export async function buildApp(options: AppOptions = {}) {
       allowedHeaders: ["Content-Type", "Authorization", "x-admin-password"],
     });
     app.addContentTypeParser(/^application\/[\w.+-]+\+json(?:;.*)?$/, { parseAs: "string" }, app.getDefaultJsonParser("error", "error"));
+    app.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string" }, (_request, body, done) => {
+      try { done(null, parseUrlEncoded(body as string)); } catch (error) { done(error as Error); }
+    });
     await app.register(fastifyWebsocket, { options: { maxPayload: 40 * 1024 * 1024 } });
-    registerOpenAIRoutes(app, tunnel);
+    registerOpenAIRoutes(app, tunnel, platformService);
     registerAdminRoutes(app, tunnel, auth);
+    registerPlatformRoutes(app, platformService, auth);
     tunnel.registerRoutes(app);
     if (options.heartbeat !== false) tunnel.startHeartbeat();
     // Public status page (non-sensitive aggregates only) + machine-readable data.
     app.get("/", async (_request, reply) => {
       reply.type("text/html; charset=utf-8").send(renderStatusPage());
     });
+    app.get("/admin", async (_request, reply) => {
+      reply.type("text/html; charset=utf-8").send(readFileSync(join(__dirname, "../public/admin.html"), "utf8"));
+    });
+    app.get("/dashboard", async (_request, reply) => {
+      reply.type("text/html; charset=utf-8").send(readFileSync(join(__dirname, "../public/dashboard.html"), "utf8"));
+    });
+    app.get("/console", async (_request, reply) => {
+      reply.type("text/html; charset=utf-8").send(readFileSync(join(__dirname, "../public/console.html"), "utf8"));
+    });
     app.get("/status.json", async () => tunnel.statusSnapshot());
     app.get("/api", async request => ({
       name: "OpenMyModel Cloud API", version: "1.0.0", domain: request.hostname || "localhost",
-      endpoints: { status: "/", statusData: "/status.json", models: "/v1/models", chat: "/v1/chat/completions", admin: "/admin/*", websocket: "/ws/node" },
+      endpoints: { status: "/", statusData: "/status.json", models: "/v1/models", chat: "/v1/chat/completions", admin: "/admin", console: "/console", websocket: "/ws/node" },
     }));
     return app;
   } catch (error) {

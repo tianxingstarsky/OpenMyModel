@@ -6,10 +6,13 @@
 - 引擎来源固定：`third_party/llama.cpp` Git submodule 锁定 b10909（提交 `a2878d30df0130dde503a7d9ba30d3d21bd71b9f`），元数据在 `third_party/llama.cpp.lock.json`（含官方预编译包 SHA-256 备选）。
 - 本地聊天由 Flutter 直连引擎官方 OpenAI 兼容 API（`/v1/chat/completions` SSE），不再经过任何本地 HTTP 代理；停止生成即关闭底层连接。
 - 配置档案由 Dart `ProfileStore` 直接读写 `%USERPROFILE%\.openmymodel\profiles`，兼容旧版本导出的档案文件（旧布尔字段自动映射为三态 `auto/on/off`）。
-- Node Bridge 从 Flutter 接收配置和密钥，通过 WebSocket 连接云后端。云端不持久化 API Key，但认证请求中的 Key 会经过云端内存。
-- 云后端使用 Fastify，并按 Key 所属在线节点选择转发目标。不会把用户对话广播到其他节点。
+- Node Bridge 从 Flutter 接收桌面端调用密钥和连接配置，通过 WebSocket 连接云后端。桌面端 Key 仍由本机桥接校验；认证请求中的 Key 会经过云端内存。
+- 管理端为模型路由保存与 `llama-server --api-key` 一致的节点 Key，并以服务器数据目录中的 AES 密钥加密。统一网关 Key 只保存 HMAC 哈希，原始 Key 创建时仅显示一次。
+- 云后端使用 Fastify；统一网关调用按公开模型别名选择在线节点路由，将该路由的上游模型名和节点 Key 经隧道转发。不会把用户对话广播到其他节点。
+- `/admin` 是管理员面板；个人模式的 `/dashboard` 无需登录并只展示聚合数据；服务商模式的 `/console` 需要邮箱验证码登录。
 - 云端只承诺 `/v1/models` 和 `/v1/chat/completions`，不是完整 OpenAI API 实现。引擎本地的其他端点（`/props`、`/slots`、`/metrics` 等）属于引擎原生能力，未全部透出云端。
-- Token 配额、用量计费、持久聊天历史尚未实现。聊天记录只在当前应用会话中保留。
+- 服务端网关会记录上游返回的输入/输出 Token、费用、请求次数和每分钟频率；服务商模式按输入/输出每百万 Token 计价并从账户余额扣除，流式请求会启用 `stream_options.include_usage` 获取 usage。个人模式也显示公共聚合仪表盘；节点桌面 Key 直连调用不做余额计费。
+- 服务商模式需要管理员先配置 SMTP、支付宝应用 ID、商户 ID、应用私钥和支付宝公钥；支付宝异步通知校验 RSA2 签名、应用/商户身份、订单金额并按订单状态幂等入账。完整会话历史仍只保留在当前桌面应用会话中。
 - 旧 Python Bridge 代码已从仓库移除（历史实现见 Git 历史）；桌面运行链路不使用 Python。
 
 ## 中继协议 v2
@@ -18,7 +21,7 @@
 
 1. Bridge 发送 `auth`（包含 `protocolVersion: 2`、节点信息和可选 `serverRunning`），云端回复 `auth_ok`。
 2. 请求认证使用 `validate_key` / `key_valid`；密钥由本机校验。
-3. 转发使用 `http_relay { requestId, path, method, body }`。
+3. 转发使用 `http_relay { requestId, path, method, body, upstreamApiKey? }`。个人模式的桌面 Key 调用不发送覆盖值，Bridge 沿用本机配置的 llama-server Key；管理端路由则传入该节点加密保存的上游 Key。
 4. 上游响应先发送 `http_headers { requestId, statusCode, headers }`，再发送任意数量的 `http_chunk { requestId, data }`，最后发送 `http_done`。
 5. 转发错误使用 `http_error { requestId, statusCode, message }`。响应头尚未发送时返回对应 HTTP 错误；响应开始后发生错误，中断连接，不伪造成功结束。
 6. 客户端取消、空闲超时或节点断线都会关闭上游请求。取消消息为 `cancel_request { requestId }`。
