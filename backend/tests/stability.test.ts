@@ -676,6 +676,10 @@ test("gateway token limits reserve concurrent prompt and output budgets atomical
     const second = platform.reserveGatewayTokenUsage(key.id, 20, 50, 1);
     assert.equal(first.maxTokens, 50);
     assert.equal(second.maxTokens, 10, "the second request is capped by the tokens left after the first reservation");
+    const firstExpiry = (database.sqlite.prepare("SELECT expires_at FROM gateway_token_reservations WHERE id=?")
+      .get(first.id) as { expires_at: string }).expires_at;
+    assert.ok(Date.parse(firstExpiry) <= Date.now() + 16 * 60_000,
+      "abandoned token reservations expire soon after a server restart");
     assert.equal((database.sqlite.prepare("SELECT SUM(reserved_tokens) AS total FROM gateway_token_reservations")
       .get() as { total: number }).total, 100);
     assert.throws(() => platform.reserveGatewayTokenUsage(key.id, 1, 1, 1),

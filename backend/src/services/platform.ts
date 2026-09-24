@@ -34,7 +34,7 @@ const isoNow = () => new Date().toISOString();
 const DEFAULT_PROVIDER_MAX_TOKENS = 4096;
 const MAX_PROVIDER_MAX_TOKENS = 65_536;
 const PROVIDER_RESERVATION_MS = 15 * 60_000;
-const TOKEN_RESERVATION_MS = 24 * 60 * 60_000;
+const TOKEN_RESERVATION_MS = 15 * 60_000;
 const RESERVATION_RENEW_INTERVAL_MS = 5 * 60_000;
 const validEmail = (value: unknown): value is string => typeof value === "string" && value.length <= 254
   && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
