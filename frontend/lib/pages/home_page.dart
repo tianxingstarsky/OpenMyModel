@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:fluent_ui/fluent_ui.dart' as ft;
@@ -42,6 +43,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
   final TextEditingController tcMmproj = TextEditingController();
   final TextEditingController tcProfile = TextEditingController();
   final TextEditingController tcExtraArgs = TextEditingController();
+  final TextEditingController tcApiKey = TextEditingController();
   final Map<String, TextEditingController> _numCtrls = {};
   final Map<String, FocusNode> _numFocus = {};
   final Map<String, String> _numErrors = {};
@@ -53,6 +55,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
   bool _starting = false;
   bool _stopping = false;
   bool _closing = false;
+  bool _showNodeApiKey = false;
   int _currentIndex = 0;
   int _scanGeneration = 0;
 
@@ -115,6 +118,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
     tcModel.text = config.modelPath;
     tcMmproj.text = config.mmprojPath;
     tcExtraArgs.text = config.extraArgs;
+    tcApiKey.text = config.apiKey;
     for (final entry in _numCtrls.entries) {
       final value = _numberValue(entry.key, config);
       if (value != null) entry.value.text = value.toString();
@@ -162,7 +166,8 @@ class _HomePageState extends State<HomePage> with WindowListener {
       _cfg
         ..modelPath = tcModel.text.trim()
         ..mmprojPath = tcMmproj.text.trim()
-        ..extraArgs = tcExtraArgs.text.trim();
+        ..extraArgs = tcExtraArgs.text.trim()
+        ..apiKey = tcApiKey.text.trim();
       await _inference.start(_cfg);
       await _savePrefs();
       if (mounted && _inference.isReady) _msg('模型已就绪', ok: true);
@@ -220,7 +225,8 @@ class _HomePageState extends State<HomePage> with WindowListener {
     _cfg
       ..modelPath = tcModel.text.trim()
       ..mmprojPath = tcMmproj.text.trim()
-      ..extraArgs = tcExtraArgs.text.trim();
+      ..extraArgs = tcExtraArgs.text.trim()
+      ..apiKey = tcApiKey.text.trim();
     try {
       await _profileStore.save(name, _cfg);
       tcProfile.clear();
@@ -230,6 +236,31 @@ class _HomePageState extends State<HomePage> with WindowListener {
       if (mounted) _msg(error.message);
     } catch (error) {
       if (mounted) _msg('保存档案失败: $error');
+    }
+  }
+
+  void _generateNodeApiKey() {
+    final random = math.Random.secure();
+    final bytes = List.generate(
+      32,
+      (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
+    final value = 'sk-oom-node-$bytes';
+    setState(() {
+      tcApiKey.text = value;
+      _cfg.apiKey = value;
+      _showNodeApiKey = false;
+    });
+  }
+
+  Future<void> _copyNodeApiKey() async {
+    final value = tcApiKey.text.trim();
+    if (value.isEmpty) return _msg('请先设置或生成节点 API Key');
+    try {
+      await Clipboard.setData(ClipboardData(text: value));
+      if (mounted && !_closing) _msg('节点 API Key 已复制', ok: true);
+    } catch (error) {
+      if (mounted && !_closing) _msg('复制失败: $error');
     }
   }
 
@@ -688,6 +719,42 @@ class _HomePageState extends State<HomePage> with WindowListener {
           min: 1,
           max: 65535,
         ),
+        const SizedBox(height: 8),
+        _section('节点 API 安全'),
+        const SizedBox(height: 4),
+        SizedBox(
+          width: 560,
+          child: Text(
+            '设置后，llama-server 将要求 Bearer API Key。云端管理端的对应节点路由也要填写同一密钥；直接访问节点时使用此密钥。修改后需重启模型生效。留空表示节点 HTTP 接口不启用密钥校验。',
+            style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+          ),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          width: 560,
+          child: ft.TextBox(
+            controller: tcApiKey,
+            obscureText: !_showNodeApiKey,
+            placeholder: '节点保护密钥（留空则不启用）',
+            onChanged: (value) => _cfg.apiKey = value,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          children: [
+            ft.Button(
+              onPressed: _generateNodeApiKey,
+              child: const Text('生成随机密钥'),
+            ),
+            ft.Button(onPressed: _copyNodeApiKey, child: const Text('复制密钥')),
+            ft.Button(
+              onPressed: () =>
+                  setState(() => _showNodeApiKey = !_showNodeApiKey),
+              child: Text(_showNodeApiKey ? '隐藏密钥' : '显示密钥'),
+            ),
+          ],
+        ),
         const SizedBox(height: 16),
         _section('缓存量化'),
         const SizedBox(height: 10),
@@ -1119,6 +1186,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
     tcMmproj.dispose();
     tcProfile.dispose();
     tcExtraArgs.dispose();
+    tcApiKey.dispose();
     _scrollCtrl.dispose();
     if (_ownsInference) _inference.dispose();
     super.dispose();

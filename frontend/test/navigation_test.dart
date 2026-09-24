@@ -58,6 +58,50 @@ class _ReadyEngineFixture extends InferenceService {
 }
 
 void main() {
+  testWidgets('Home exposes a protected node API key with secure generation', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      ft.FluentApp(
+        home: HomePage(
+          manageRuntime: false,
+          inference: _ReadyEngineFixture(),
+          profiles: ProfileStore(dir: Directory.systemTemp.path),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('推理参数'));
+    await tester.pumpAndSettle();
+    expect(find.text('节点 API 安全'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('生成随机密钥'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('生成随机密钥'));
+    await tester.pumpAndSettle();
+    final keyFinder = find.byWidgetPredicate(
+      (widget) =>
+          widget is ft.TextBox && widget.placeholder == '节点保护密钥（留空则不启用）',
+    );
+    final hiddenField = tester.widget<ft.TextBox>(keyFinder);
+    expect(
+      hiddenField.controller!.text,
+      matches(RegExp(r'^sk-oom-node-[0-9a-f]{64}$')),
+    );
+    expect(hiddenField.obscureText, isTrue);
+
+    await tester.tap(find.text('显示密钥'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<ft.TextBox>(keyFinder).obscureText, isFalse);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+  });
+
   testWidgets('Real Home navigation preserves chat and cloud state', (
     tester,
   ) async {
