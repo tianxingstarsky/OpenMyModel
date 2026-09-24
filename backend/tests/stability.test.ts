@@ -835,6 +835,13 @@ test("managed gateway routes with the configured llama-server key and meters usa
   assert.equal(routeResponse.statusCode, 200, routeResponse.body);
   assert.equal(routeResponse.json().routes[0].keyConfigured, true);
   assert.equal(routeResponse.body.includes(nodeKey), false, "admin route listing must not disclose the node key");
+  const existingRoute = routeResponse.json().routes[0];
+  const editedRouteResponse = await app.inject({ method: "POST", url: `/api/admin/models/${modelId}/routes`, headers: adminHeaders,
+    payload: { id: existingRoute.id, nodeId: existingRoute.nodeId, upstreamModel: "internal-model-v2", upstreamKey: "", weight: 3 } });
+  assert.equal(editedRouteResponse.statusCode, 200, editedRouteResponse.body);
+  assert.equal(editedRouteResponse.json().routes[0].weight, 3);
+  assert.equal(editedRouteResponse.json().routes[0].keyConfigured, true, "leaving the node key blank keeps the encrypted value");
+  assert.equal(editedRouteResponse.body.includes(nodeKey), false, "editing a route still never returns the node key");
 
   const keyResponse = await app.inject({ method: "POST", url: "/api/admin/keys", headers: adminHeaders,
     payload: { name: "integration key", tokenLimit: 100, rpmLimit: 3 } });
