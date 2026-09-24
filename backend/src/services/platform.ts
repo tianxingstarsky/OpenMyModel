@@ -484,10 +484,16 @@ export class PlatformService {
     this.sqlite.prepare("DELETE FROM provider_usage_reservations WHERE id=?").run(id);
   }
 
-  createUserKey(userId: string, name: unknown) {
-    const active = this.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_keys WHERE owner_user_id=? AND is_active=1").get(userId) as { count: number };
-    if (active.count >= 20) throw new Error("最多可同时持有 20 个有效密钥");
-    return this.createGatewayKey(name, userId, 0, 0);
+  createUserKey(userId: string, name: unknown, tokenLimit: unknown = 0, rpmLimit: unknown = 0) {
+    const create = this.sqlite.transaction(() => {
+      const user = this.sqlite.prepare("SELECT is_active FROM platform_users WHERE id=?").get(userId) as { is_active: number } | undefined;
+      if (!user || user.is_active !== 1) throw new Error("账号不存在或已停用");
+      const active = this.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_keys WHERE owner_user_id=? AND is_active=1")
+        .get(userId) as { count: number };
+      if (active.count >= 20) throw new Error("最多可同时持有 20 个有效密钥");
+      return this.createGatewayKey(name, userId, tokenLimit, rpmLimit);
+    });
+    return create.immediate();
   }
 
   listKeys(ownerUserId?: string) {
@@ -510,12 +516,14 @@ export class PlatformService {
     return result.changes > 0;
   }
 
-  updateKeyLimits(id: string, tokenLimitInput: unknown, rpmLimitInput: unknown) {
+  updateKeyLimits(id: string, tokenLimitInput: unknown, rpmLimitInput: unknown, ownerUserId?: string) {
     const tokenLimit = Math.floor(safeNumber(tokenLimitInput, "Token 限额", 0, 1_000_000_000_000));
     const rpmLimit = Math.floor(safeNumber(rpmLimitInput, "每分钟请求上限", 0, 100_000));
-    const result = this.sqlite.prepare("UPDATE gateway_keys SET token_limit=?, rpm_limit=? WHERE id=?")
-      .run(tokenLimit, rpmLimit, id);
-    return result.changes > 0 ? this.listKeys().find(key => key.id === id) ?? null : null;
+    const result = ownerUserId === undefined
+      ? this.sqlite.prepare("UPDATE gateway_keys SET token_limit=?, rpm_limit=? WHERE id=?").run(tokenLimit, rpmLimit, id)
+      : this.sqlite.prepare("UPDATE gateway_keys SET token_limit=?, rpm_limit=? WHERE id=? AND owner_user_id=?")
+        .run(tokenLimit, rpmLimit, id, ownerUserId);
+    return result.changes > 0 ? this.listKeys(ownerUserId).find(key => key.id === id) ?? null : null;
   }
 
   private addBalanceEntry(userId: string, type: "topup" | "usage" | "adjustment", amount: number,

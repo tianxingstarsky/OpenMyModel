@@ -203,6 +203,8 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
       .run("user-alpha", "alpha@example.test", 12.5, createdAt);
     database.prepare("INSERT INTO platform_users(id,email,balance,created_at) VALUES(?,?,?,?)")
       .run("user-beta", "beta@example.test", 91, createdAt);
+    database.prepare("INSERT INTO platform_users(id,email,balance,created_at) VALUES(?,?,?,?)")
+      .run("user-gamma", "gamma@example.test", 0, createdAt);
     const knownRegister = await app.inject({ method: "POST", url: "/api/auth/email-code",
       payload: { email: "alpha@example.test", purpose: "register" } });
     const unknownLogin = await app.inject({ method: "POST", url: "/api/auth/email-code",
@@ -213,6 +215,7 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     const sessions = new PlatformService(database, directory, new WebSocketTunnel({ authenticate: async () => "ok" }));
     const alphaCookie = `omm_session=${sessions.createSession("user", "user-alpha")}`;
     const betaCookie = `omm_session=${sessions.createSession("user", "user-beta")}`;
+    const gammaCookie = `omm_session=${sessions.createSession("user", "user-gamma")}`;
     const adjustmentWithoutReason = await app.inject({ method: "PATCH", url: "/api/admin/users/user-beta",
       headers: { cookie: adminCookie }, payload: { balance: 92 } });
     assert.equal(adjustmentWithoutReason.statusCode, 400);
@@ -226,16 +229,35 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.equal(betaBalanceEntries.json().length, 1);
     assert.deepEqual([betaBalanceEntries.json()[0].type, betaBalanceEntries.json()[0].amount,
       betaBalanceEntries.json()[0].balanceAfter, betaBalanceEntries.json()[0].actor], ["adjustment", 1, 92, "admin"]);
-    const alphaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: alphaCookie }, payload: { name: "alpha-private" } });
+    const alphaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: alphaCookie },
+      payload: { name: "alpha-private", rpmLimit: 2, tokenLimit: 100 } });
     const betaKeyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: betaCookie }, payload: { name: "beta-private" } });
     assert.equal(alphaKeyResponse.statusCode, 200);
     assert.equal(betaKeyResponse.statusCode, 200);
     const alphaKey = alphaKeyResponse.json();
     const betaKey = betaKeyResponse.json();
+    assert.deepEqual([alphaKey.rpmLimit, alphaKey.tokenLimit], [2, 100]);
     assert.equal("ownerEmail" in alphaKey, false, "a user's key response must not include another account's owner details");
     const adminKeys = await app.inject({ method: "GET", url: "/api/admin/keys", headers: { cookie: adminCookie } });
     assert.equal(adminKeys.json().find((key: Message) => key.id === alphaKey.id).ownerEmail, "alpha@example.test");
     assert.equal(adminKeys.json().find((key: Message) => key.id === betaKey.id).ownerEmail, "beta@example.test");
+    const updatedByOwner = await app.inject({ method: "PATCH", url: `/api/user/keys/${alphaKey.id}`, headers: { cookie: alphaCookie },
+      payload: { rpmLimit: 7, tokenLimit: 250 } });
+    assert.equal(updatedByOwner.statusCode, 200, updatedByOwner.body);
+    assert.deepEqual([updatedByOwner.json().rpmLimit, updatedByOwner.json().tokenLimit], [7, 250]);
+    assert.equal(updatedByOwner.body.includes(alphaKey.key), false, "changing key limits never returns the secret");
+    const foreignKeyLimitUpdate = await app.inject({ method: "PATCH", url: `/api/user/keys/${betaKey.id}`, headers: { cookie: alphaCookie },
+      payload: { rpmLimit: 1, tokenLimit: 1 } });
+    assert.equal(foreignKeyLimitUpdate.statusCode, 404, "a user cannot inspect or edit another account's key");
+    assert.deepEqual([foreignKeyLimitUpdate.json().error,
+      (await app.inject({ method: "GET", url: "/api/user/keys", headers: { cookie: betaCookie } })).json()[0].rpmLimit],
+      ["API Key not found", 0]);
+    const concurrentKeyCreations = await Promise.all(Array.from({ length: 21 }, (_, index) => app.inject({
+      method: "POST", url: "/api/user/keys", headers: { cookie: gammaCookie }, payload: { name: `gamma-${index}` },
+    })));
+    assert.equal(concurrentKeyCreations.filter(response => response.statusCode === 200).length, 20);
+    assert.equal(concurrentKeyCreations.filter(response => response.statusCode === 400).length, 1,
+      "the active key ceiling stays enforced when requests arrive concurrently");
     const updatedAlphaKey = await app.inject({ method: "PATCH", url: `/api/admin/keys/${alphaKey.id}`, headers: { cookie: adminCookie },
       payload: { rpmLimit: 7, tokenLimit: 250 } });
     assert.equal(updatedAlphaKey.statusCode, 200, updatedAlphaKey.body);

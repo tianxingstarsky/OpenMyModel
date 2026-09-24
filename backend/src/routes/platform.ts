@@ -209,7 +209,18 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   });
   app.post("/api/user/keys", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;
-    try { return platform.createUserKey(userId, bodyOf(request).name); } catch (error) { return apiError(reply, error); }
+    try {
+      const body = bodyOf(request);
+      return platform.createUserKey(userId, body.name, body.tokenLimit, body.rpmLimit);
+    } catch (error) { return apiError(reply, error); }
+  });
+  app.patch<{ Params: { keyId: string } }>("/api/user/keys/:keyId", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    try {
+      const body = bodyOf(request);
+      const key = platform.updateKeyLimits(request.params.keyId, body.tokenLimit, body.rpmLimit, userId);
+      return key ?? reply.status(404).send({ error: "API Key not found" });
+    } catch (error) { return apiError(reply, error); }
   });
   app.delete<{ Params: { keyId: string } }>("/api/user/keys/:keyId", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;
