@@ -31,6 +31,30 @@ async function until(predicate: () => boolean, timeout = 2000): Promise<void> {
   }
 }
 
+function simulateUsageReservationHeartbeat(platform: PlatformService, providerReservationId: string | undefined,
+  tokenReservationId: string | undefined, now: number): void {
+  const originalDateNow = Date.now;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let heartbeatCallback: (() => void) | undefined;
+  (globalThis as any).setInterval = (callback: () => void) => {
+    heartbeatCallback = callback;
+    return { unref() {} };
+  };
+  (globalThis as any).clearInterval = () => undefined;
+  const stop = platform.startUsageReservationHeartbeat(providerReservationId, tokenReservationId);
+  try {
+    Date.now = () => now;
+    assert.ok(heartbeatCallback, "reservation heartbeat timer is installed for active holds");
+    heartbeatCallback();
+  } finally {
+    stop();
+    Date.now = originalDateNow;
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+}
+
 async function fixture(t: TestContext, options: AppOptions = {}) {
   const directory = mkdtempSync(join(tmpdir(), "openmymodel-backend-test-"));
   const store = new ConfigStore(directory, {});
@@ -600,15 +624,12 @@ test("provider usage reservations serialize balance holds and settle on actual t
     assert.equal(reservation.maxTokens, 5, "omitted output limits are capped to what the balance can cover");
     assert.equal(reservation.reservedCost, 0.00001);
     const reservationStartedAt = Date.now();
-    const originalDateNow = Date.now;
-    Date.now = () => reservationStartedAt + 6 * 60_000;
-    try {
-      platform.refreshUsageReservations(reservation.id, reservation.tokenReservationId);
-    } finally { Date.now = originalDateNow; }
+    simulateUsageReservationHeartbeat(platform, reservation.id, reservation.tokenReservationId,
+      reservationStartedAt + 6 * 60_000);
     const renewedReservation = database.sqlite.prepare("SELECT expires_at FROM provider_usage_reservations WHERE id=?")
       .get(reservation.id) as { expires_at: string };
     assert.ok(Date.parse(renewedReservation.expires_at) > reservationStartedAt + 6 * 60_000,
-      "active provider reservations are renewed when a long stream continues producing chunks");
+      "active provider reservations renew even while an upstream response has produced no chunks");
     const otherReservation = platform.reserveProviderUsage(otherGatewayKey.id, 5, undefined, 1, 1, 1);
     assert.equal(otherReservation.reservedCost, 0.00001, "one account's hold cannot reduce another account's available balance");
     assert.throws(() => platform.reserveProviderUsage(gatewayKey.id, 5, 1, 1, 1, 1),
@@ -642,15 +663,11 @@ test("provider usage reservations serialize balance holds and settle on actual t
     assert.equal(quota.maxTokens, 3, "provider output is capped by the key token limit");
     assert.ok(quota.tokenReservationId);
     const quotaStartedAt = Date.now();
-    const quotaOriginalDateNow = Date.now;
-    Date.now = () => quotaStartedAt + 6 * 60_000;
-    try {
-      platform.refreshUsageReservations(quota.id, quota.tokenReservationId);
-    } finally { Date.now = quotaOriginalDateNow; }
+    simulateUsageReservationHeartbeat(platform, quota.id, quota.tokenReservationId, quotaStartedAt + 6 * 60_000);
     const renewedTokenReservation = database.sqlite.prepare("SELECT expires_at FROM gateway_token_reservations WHERE id=?")
       .get(quota.tokenReservationId) as { expires_at: string };
     assert.ok(Date.parse(renewedTokenReservation.expires_at) > quotaStartedAt + 6 * 60_000,
-      "active token quota reservations are renewed for long-running streams");
+      "active token quota reservations renew during quiet periods in long-running requests");
     assert.equal((database.sqlite.prepare("SELECT reserved_tokens FROM gateway_token_reservations WHERE id=?")
       .get(quota.tokenReservationId) as { reserved_tokens: number }).reserved_tokens, 8);
     assert.throws(() => platform.reserveProviderUsage(quotaKey.id, 1, 1, 1, 1, 1),

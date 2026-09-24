@@ -297,6 +297,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     let targetKeyId = platform.directKeyId(rawKey);
     let usageReservationId: string | undefined;
     let tokenReservationId: string | undefined;
+    let stopUsageReservationHeartbeat: (() => void) | undefined;
     let reservedPromptTokens = 0;
     let upstreamHeadersReceived = false;
     let upstreamStatus = 200;
@@ -356,6 +357,10 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
               tokenReservationId = reservation.id;
               maxTokens = reservation.maxTokens;
             }
+          }
+          if (usageReservationId || tokenReservationId) {
+            stopUsageReservationHeartbeat = platform.startUsageReservationHeartbeat(usageReservationId, tokenReservationId,
+              error => request.log.error({ err: error }, "Usage reservation heartbeat failed"));
           }
           if (maxTokens !== undefined || platform.isProviderMode()) {
             relayBody = { ...relayBody, ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }), n: budget.completionCount };
@@ -437,6 +442,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
         type,
       } });
     } finally {
+      stopUsageReservationHeartbeat?.();
       if (usageReservationId) platform.releaseProviderUsage(usageReservationId);
       if (tokenReservationId) platform.releaseGatewayTokenUsage(tokenReservationId);
       request.raw.off("aborted", disconnect);

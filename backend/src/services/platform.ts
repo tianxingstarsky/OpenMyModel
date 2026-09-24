@@ -639,6 +639,20 @@ export class PlatformService {
     if (refreshToken) this.reservationLastRenewedAt.set(tokenReservationId!, now);
   }
 
+  startUsageReservationHeartbeat(providerReservationId?: string, tokenReservationId?: string,
+    onError?: (error: unknown) => void): () => void {
+    if (!providerReservationId && !tokenReservationId) return () => undefined;
+    const heartbeat = setInterval(() => {
+      try {
+        this.refreshUsageReservations(providerReservationId, tokenReservationId);
+      } catch (error) {
+        onError?.(error);
+      }
+    }, RESERVATION_RENEW_INTERVAL_MS);
+    heartbeat.unref?.();
+    return () => clearInterval(heartbeat);
+  }
+
   releaseProviderUsage(id: string): void {
     this.sqlite.prepare("DELETE FROM provider_usage_reservations WHERE id=?").run(id);
     this.reservationLastRenewedAt.delete(id);
