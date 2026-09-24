@@ -945,6 +945,13 @@ test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, aut
   bridge.command({ cmd: "set_keys", keys: [{ key: "valid-key", isActive: true }] });
   bridge.command({ cmd: "connect", url, password: PASSWORD, nodeId: "production-bridge", modelName: "model-a", llamaUrl: `http://127.0.0.1:${port}`, llamaApiKey: "llama-secret" });
   await until(() => bridge.connected);
+  const anonymousModels = await app.inject({ method: "GET", url: "/v1/models" });
+  assert.equal(anonymousModels.statusCode, 401, "model discovery must require a valid node or gateway key");
+  const invalidModels = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: "Bearer invalid-key" } });
+  assert.equal(invalidModels.statusCode, 401, "an invalid key cannot enumerate node models");
+  const directModels = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: "Bearer llama-secret" } });
+  assert.equal(directModels.statusCode, 200);
+  assert.deepEqual(directModels.json().data.map((model: Message) => model.id), ["model-a"]);
   const streamed = await post('{ "stream" : true, "model": "model-a" }').response;
   assert.equal(await text(streamed), 'data: {"text":"\u4f60\u597d  "}\n\n');
   const directNodeKey = await post({ stream: true, model: "model-a" }, "llama-secret").response;

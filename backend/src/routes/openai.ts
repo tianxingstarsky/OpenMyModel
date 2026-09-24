@@ -239,14 +239,24 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
       catch (error) { const status = error instanceof RelayError ? error.statusCode : 401; return reply.status(status).send({ error: { message: (error as Error).message, type: "authentication_error" } }); }
       return { object: "list", data: platform.publicModels(platform.allowedModels(managedKey)) };
     }
+    if (!rawKey) {
+      return reply.status(401).send({ error: { message: "Missing API Key", type: "authentication_error" } });
+    }
     if (platform.isProviderMode() || /^sk-oom-gw-/.test(rawKey)) {
       return reply.status(401).send({ error: { message: "Invalid API Key", type: "authentication_error" } });
     }
-    const nodes = tunnel.getOnlineNodes().filter(node => node.serverRunning);
-    const data = nodes.length > 0
-      ? nodes.map(node => ({ id: node.modelName || "local-model", object: "model", created: Math.floor(Date.now() / 1000), owned_by: node.name }))
-      : [{ id: "local-model", object: "model", created: Math.floor(Date.now() / 1000), owned_by: "openmymodel" }];
-    return { object: "list", data };
+    try {
+      const target = await tunnel.findNode(rawKey);
+      platform.recordDirectRequest(platform.directKeyId(rawKey));
+      const node = tunnel.getOnlineNodes().find(candidate => candidate.id === target.nodeId);
+      if (!node?.serverRunning) throw new RelayError("Compute node unavailable", 503);
+      return { object: "list", data: [{ id: node.modelName || "local-model", object: "model",
+        created: Math.floor(Date.now() / 1000), owned_by: node.name }] };
+    } catch (error) {
+      const status = error instanceof RelayError ? error.statusCode : 502;
+      return reply.status(status).send({ error: { message: error instanceof RelayError ? error.message : "Node authentication failed",
+        type: status === 401 ? "authentication_error" : "server_error" } });
+    }
   });
 
   const relayHandler = async (request: FastifyRequest, reply: FastifyReply) => {
