@@ -59,6 +59,14 @@ export function initDatabase(): void {
   db = defaultDatabase.db;
 }
 
+export function revokeAdminSessions(database?: Database.Database): number {
+  if (!database) {
+    initDatabase();
+    database = defaultDatabase!.sqlite;
+  }
+  return database.prepare("DELETE FROM platform_sessions WHERE role='admin'").run().changes;
+}
+
 export function createDatabase(directory: string): { db: BetterSQLite3Database; sqlite: Database.Database; close: () => void } {
   mkdirSync(directory, { recursive: true });
   const sqlite = new Database(join(directory, "openmymodel.db"));

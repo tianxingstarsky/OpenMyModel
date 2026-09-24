@@ -79,6 +79,7 @@ npm --prefix backend ci
 - 引擎命令行在 Dart 侧构建（`InferenceService.buildArgs`）：`-ngl` 支持 `all/auto/精确层数`，`-lm` 承载 mlock/no-mmap，`extra_args` 禁止覆盖 `--host/--port/--api-key`。
 - 日志环形缓冲有界（500 行 × 2000 字符），API Key 在日志中脱敏。
 - 云端断线由桌面页执行有界指数退避重连（2/4/8/16/32 秒，最多 5 次）；用户主动断开后不自动重连。
+- 管理员通过 CLI 重置密码或重新初始化凭据时，先撤销全部管理员会话；服务商用户会话保持不变。
 - 密码和 API Key 仍属于本地敏感用户数据，不是操作系统密钥库加密存储；应保护 Windows 用户目录。
 
 ## 自动化门禁

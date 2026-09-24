@@ -1,7 +1,7 @@
 import * as readline from "readline";
 import { loadConfig, saveConfig } from "./config";
 import { hashPassword, verifyAdminPassword } from "./services/auth";
-import { initDatabase, nodes, db } from "./db/schema";
+import { initDatabase, nodes, db, revokeAdminSessions } from "./db/schema";
 import { eq } from "drizzle-orm";
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -54,6 +54,7 @@ async function resetPassword() {
   const pw2 = await q("确认新密码: ");
   if (pw !== pw2) { console.log("两次不一致"); return; }
   cfg.passwordHash = await hashPassword(pw);
+  revokeAdminSessions();
   saveConfig(cfg);
   console.log("密码已重置");
 }
@@ -83,6 +84,7 @@ async function setupWizard() {
   cfg.passwordHash = await hashPassword(password);
   cfg.port = port;
   cfg.setupComplete = true;
+  revokeAdminSessions();
   saveConfig(cfg);
 
   console.log("");

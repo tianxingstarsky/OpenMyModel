@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "fs";
 import { join, resolve } from "path";
 import { config as dotenv } from "dotenv";
 
@@ -12,15 +12,24 @@ export interface AppConfig {
 
 export class ConfigStore {
   private cached?: AppConfig;
+  private cachedSignature?: string;
   readonly directory: string;
 
   constructor(directory?: string, private readonly env: NodeJS.ProcessEnv = process.env) {
     this.directory = resolve(directory || env.OPENMYMODEL_DATA_DIR || env.DATA_DIR || join(process.cwd(), "data"));
   }
 
+  private fileSignature(file: string): string {
+    try {
+      const stat = statSync(file, { bigint: true });
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    } catch { return "missing"; }
+  }
+
   load(): AppConfig {
-    if (this.cached) return this.cached;
     const file = join(this.directory, "config.json");
+    const signature = this.fileSignature(file);
+    if (this.cached && this.cachedSignature === signature) return this.cached;
     const port = Number(this.env.PORT || 3000);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid PORT");
     const config: AppConfig = existsSync(file)
@@ -31,6 +40,7 @@ export class ConfigStore {
       throw new Error("Invalid backend configuration");
     }
     this.cached = config;
+    this.cachedSignature = signature;
     return config;
   }
 
@@ -45,8 +55,10 @@ export class ConfigStore {
 
   save(config: AppConfig): void {
     mkdirSync(this.directory, { recursive: true });
-    writeFileSync(join(this.directory, "config.json"), JSON.stringify(config, null, 2), { encoding: "utf8", mode: 0o600 });
+    const file = join(this.directory, "config.json");
+    writeFileSync(file, JSON.stringify(config, null, 2), { encoding: "utf8", mode: 0o600 });
     this.cached = config;
+    this.cachedSignature = this.fileSignature(file);
   }
 }
 

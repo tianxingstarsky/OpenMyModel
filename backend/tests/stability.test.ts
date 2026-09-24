@@ -14,7 +14,7 @@ import { ConfigStore } from "../src/config";
 import { hashPassword, verifyPassword, verifyAdminPassword } from "../src/services/auth";
 import { WebSocketTunnel } from "../src/services/websocket";
 import { relayHeaders } from "../src/routes/openai";
-import { createDatabase } from "../src/db/schema";
+import { createDatabase, revokeAdminSessions } from "../src/db/schema";
 import { PlatformService } from "../src/services/platform";
 import { getPlatformSecret, hashPlatformValue } from "../src/services/secrets";
 
@@ -127,6 +127,15 @@ test("startup uses isolated env configuration and requires explicit initializati
     const existing = new ConfigStore(directory, { ADMIN_PASSWORD: "replacement" });
     await existing.initialize();
     assert.equal(existing.load().passwordHash, store.load().passwordHash);
+    const liveProcessStore = new ConfigStore(directory, {});
+    await liveProcessStore.initialize();
+    const passwordResetProcess = new ConfigStore(directory, {});
+    const rotatedHash = await hashPassword("rotated-admin-password");
+    passwordResetProcess.save({ ...passwordResetProcess.load(), passwordHash: rotatedHash });
+    assert.equal(liveProcessStore.load().passwordHash, rotatedHash,
+      "a running backend reloads administrator credentials changed by the CLI process");
+    assert.equal(await verifyAdminPassword("rotated-admin-password", liveProcessStore), true);
+    assert.equal(await verifyAdminPassword(PASSWORD, liveProcessStore), false);
     assert.throws(() => new ConfigStore(directory, { PORT: "bad" }).load(), /Invalid PORT/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
@@ -156,6 +165,28 @@ test("database migrations preserve sessions and add encrypted node-key storage",
     assert.ok(nodeColumns.some(column => column.name === "upstream_api_key"));
     assert.equal(database.sqlite.prepare("SELECT model_name, upstream_api_key FROM nodes WHERE id='old-node'").get()?.model_name,
       "old-model", "existing node records survive credential-storage migration");
+  } finally {
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("administrator credential rotation revokes admin sessions without signing users out", () => {
+  const directory = mkdtempSync(join(tmpdir(), "openmymodel-session-rotation-test-"));
+  const database = createDatabase(directory);
+  try {
+    const createdAt = new Date().toISOString();
+    database.sqlite.prepare("INSERT INTO platform_users(id,email,created_at) VALUES(?,?,?)")
+      .run("session-user", "session@example.test", createdAt);
+    const platform = new PlatformService(database.sqlite, directory, new WebSocketTunnel({ authenticate: async () => "ok" }));
+    const adminToken = platform.createSession("admin", null);
+    const userToken = platform.createSession("user", "session-user");
+    assert.equal(platform.getSession(adminToken)?.role, "admin");
+    assert.equal(platform.getSession(userToken)?.userId, "session-user");
+
+    assert.equal(revokeAdminSessions(database.sqlite), 1);
+    assert.equal(platform.getSession(adminToken), null, "stale administrator sessions must stop authorizing after password rotation");
+    assert.equal(platform.getSession(userToken)?.userId, "session-user", "admin password changes do not revoke customer sessions");
   } finally {
     database.close();
     rmSync(directory, { recursive: true, force: true });
