@@ -1578,6 +1578,7 @@ test("provider gateway preflights node tokens and reserves no more than the avai
   const relayedPaths: string[] = [];
   let inferenceCalls = 0;
   let cancelledStream = false;
+  let oversizedResponse = false;
   await node({ modelName: "internal-model" }, (msg, send) => {
     if (msg.type === "cancel_request") { cancelledStream = true; return; }
     if (msg.type !== "http_relay") return;
@@ -1607,8 +1608,15 @@ test("provider gateway preflights node tokens and reserves no more than the avai
         send({ type: "http_chunk", requestId: msg.requestId, data: 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n' });
         return;
       }
-      assert.equal(body.max_tokens, 5, "the output cap is reduced to the remaining affordable balance");
-      value = { choices: [{ message: { content: "ok" } }] };
+      if (oversizedResponse) {
+        oversizedResponse = false;
+        assert.equal(body.max_tokens, 15, "the large response uses the balance-bounded output cap");
+        value = { choices: [{ message: { content: "x".repeat(4 * 1024 * 1024 + 128) } }],
+          usage: { prompt_tokens: 5, completion_tokens: 7 } };
+      } else {
+        assert.equal(body.max_tokens, 5, "the output cap is reduced to the remaining affordable balance");
+        value = { choices: [{ message: { content: "ok" } }] };
+      }
     }
     send(headers(msg.requestId, 200, { "content-type": "application/json" }));
     send({ type: "http_chunk", requestId: msg.requestId, data: JSON.stringify(value) });
@@ -1664,6 +1672,19 @@ test("provider gateway preflights node tokens and reserves no more than the avai
     assert.equal(insufficient.statusCode, 402);
     await text(insufficient);
     assert.equal(inferenceCalls, 1, "an unaffordable prompt must not reach inference");
+
+    database.prepare("UPDATE platform_users SET balance=0.00002 WHERE id='provider-user'").run();
+    oversizedResponse = true;
+    const oversized = await post({ model: "public-chat", messages: [{ role: "user", content: "hello" }] }, gatewayKey).response;
+    assert.equal(oversized.statusCode, 200);
+    const oversizedBody = await text(oversized);
+    assert.ok(Buffer.byteLength(oversizedBody) > 4 * 1024 * 1024);
+    const oversizedUsage = database.prepare("SELECT prompt_tokens, completion_tokens, cost FROM usage_logs ORDER BY id DESC LIMIT 1")
+      .get() as { prompt_tokens: number; completion_tokens: number; cost: number };
+    assert.deepEqual(oversizedUsage, { prompt_tokens: 5, completion_tokens: 7, cost: 0.000012 },
+      "usage at the end of a nonstream JSON response remains billable when the bounded capture buffer truncates its prefix");
+    assert.equal((database.prepare("SELECT balance FROM platform_users WHERE id='provider-user'").get() as { balance: number }).balance,
+      0.000008);
 
     database.prepare("UPDATE platform_users SET balance=0.00002 WHERE id='provider-user'").run();
     const stream = post({ model: "public-chat", stream: true, messages: [{ role: "user", content: "hello" }] }, gatewayKey);

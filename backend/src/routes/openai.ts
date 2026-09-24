@@ -122,6 +122,7 @@ async function managedCompletionTokenCount(tunnel: WebSocketTunnel, node: { node
 
 class UsageCapture {
   private buffer = "";
+  private bufferTruncated = false;
   private readonly completionText = new Map<string, string>();
   private completionTextLength = 0;
   prompt = 0;
@@ -200,9 +201,57 @@ class UsageCapture {
     });
   }
 
+  private takeTrailingUsage(): boolean {
+    const marker = '"usage"';
+    let match = this.buffer.lastIndexOf(marker);
+    while (match >= 0) {
+      let precedingBackslashes = 0;
+      for (let index = match - 1; index >= 0 && this.buffer[index] === "\\"; index--) precedingBackslashes++;
+      if (precedingBackslashes % 2 === 0) {
+        let cursor = match + marker.length;
+        while (/\s/.test(this.buffer[cursor] || "")) cursor++;
+        if (this.buffer[cursor] === ":") {
+          cursor++;
+          while (/\s/.test(this.buffer[cursor] || "")) cursor++;
+          if (this.buffer[cursor] === "{") {
+            const start = cursor;
+            let depth = 0;
+            let inString = false;
+            let escaped = false;
+            for (; cursor < this.buffer.length; cursor++) {
+              const character = this.buffer[cursor];
+              if (inString) {
+                if (escaped) escaped = false;
+                else if (character === "\\") escaped = true;
+                else if (character === '"') inString = false;
+              } else if (character === '"') inString = true;
+              else if (character === "{") depth++;
+              else if (character === "}" && --depth === 0) {
+                try {
+                  const usage = JSON.parse(this.buffer.slice(start, cursor + 1));
+                  if (usage && typeof usage === "object" && !Array.isArray(usage)) {
+                    this.take({ usage });
+                    return true;
+                  }
+                } catch { /* Try an earlier usage key if this occurrence was inside unrelated JSON text. */ }
+                break;
+              }
+            }
+          }
+        }
+      }
+      match = this.buffer.lastIndexOf(marker, match - 1);
+    }
+    return false;
+  }
+
   consume(chunk: string, streaming: boolean): void {
     if (!streaming) {
-      this.buffer = (this.buffer + chunk).slice(-4 * 1024 * 1024);
+      const joined = this.buffer + chunk;
+      if (joined.length > 4 * 1024 * 1024) {
+        this.bufferTruncated = true;
+        this.buffer = joined.slice(-4 * 1024 * 1024);
+      } else this.buffer = joined;
       return;
     }
     this.buffer += chunk;
@@ -223,7 +272,8 @@ class UsageCapture {
       try { this.take(JSON.parse(this.buffer.slice(5).trim())); } catch { /* Incomplete final event. */ }
     }
     if (!streaming) {
-      try { this.take(JSON.parse(this.buffer)); } catch { /* Upstream may return a non-JSON error. */ }
+      if (this.bufferTruncated) this.takeTrailingUsage();
+      else try { this.take(JSON.parse(this.buffer)); } catch { /* Upstream may return a non-JSON error. */ }
     }
     return { prompt: this.prompt, completion: this.completion };
   }
