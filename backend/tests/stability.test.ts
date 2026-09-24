@@ -892,6 +892,13 @@ test("admin node management keeps disconnected nodes visible with their last rep
   const login = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
   const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
 
+  const model = await app.inject({ method: "POST", url: "/api/admin/models", headers: { cookie },
+    payload: { publicName: "retained-model", inputPrice: 0, outputPrice: 0 } });
+  assert.equal(model.statusCode, 200);
+  const route = await app.inject({ method: "POST", url: `/api/admin/models/${model.json().id}/routes`, headers: { cookie },
+    payload: { nodeId: "retained-node", upstreamModel: "last-model", upstreamKey: "node-secret" } });
+  assert.equal(route.statusCode, 200, route.body);
+
   const online = await app.inject({ method: "GET", url: "/api/admin/nodes", headers: { cookie } });
   assert.deepEqual(online.json().map((entry: Message) => [entry.id, entry.isOnline, entry.serverRunning, entry.modelName]),
     [["retained-node", true, true, "last-model"]]);
@@ -901,6 +908,9 @@ test("admin node management keeps disconnected nodes visible with their last rep
   const offline = await app.inject({ method: "GET", url: "/api/admin/nodes", headers: { cookie } });
   assert.deepEqual(offline.json().map((entry: Message) => [entry.id, entry.isOnline, entry.serverRunning, entry.modelName]),
     [["retained-node", false, false, "last-model"]]);
+  const offlineModels = await app.inject({ method: "GET", url: "/api/admin/models", headers: { cookie } });
+  assert.deepEqual(offlineModels.json()[0].routes.map((entry: Message) => [entry.nodeName, entry.nodeModel, entry.nodeOnline]),
+    [["Retained node", "last-model", false]]);
 });
 
 test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, auth, and cancellation", async t => {

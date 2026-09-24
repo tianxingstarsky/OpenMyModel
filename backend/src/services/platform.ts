@@ -317,15 +317,18 @@ export class PlatformService {
 
   adminModels() {
     const online = new Map(this.tunnel.getOnlineNodes().map(node => [node.id, node]));
+    const knownNodes = new Map((this.sqlite.prepare("SELECT id, name, model_name AS modelName FROM nodes").all() as Array<Record<string, any>>)
+      .map(node => [node.id, node]));
     const models = this.sqlite.prepare("SELECT * FROM platform_models ORDER BY public_name COLLATE NOCASE").all() as Array<Record<string, any>>;
     const routes = this.sqlite.prepare("SELECT * FROM model_routes ORDER BY weight DESC").all() as Array<Record<string, any>>;
     return models.map(model => ({
       id: model.id, publicName: model.public_name, remark: model.remark,
       inputPrice: model.input_price, outputPrice: model.output_price, enabled: model.enabled === 1,
       routes: routes.filter(route => route.model_id === model.id).map(route => {
-        const node = online.get(route.node_id);
+        const liveNode = online.get(route.node_id);
+        const node = liveNode || knownNodes.get(route.node_id);
         return { id: route.id, nodeId: route.node_id, nodeName: node?.name || route.node_id, nodeModel: node?.modelName || "",
-          nodeOnline: !!node?.serverRunning, upstreamModel: route.upstream_model, weight: route.weight,
+          nodeOnline: !!liveNode?.serverRunning, upstreamModel: route.upstream_model, weight: route.weight,
           enabled: route.enabled === 1, keyConfigured: !!route.upstream_key };
       }),
     }));
