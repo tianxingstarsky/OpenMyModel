@@ -17,6 +17,8 @@ type ModelRoute = {
 };
 
 const isoNow = () => new Date().toISOString();
+const DEFAULT_PROVIDER_MAX_TOKENS = 4096;
+const MAX_PROVIDER_MAX_TOKENS = 65_536;
 const validEmail = (value: unknown): value is string => typeof value === "string" && value.length <= 254
   && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 const safeNumber = (value: unknown, label: string, min = 0, max = 1_000_000_000): number => {
@@ -386,6 +388,69 @@ export class PlatformService {
     try { return JSON.parse(key.model_filter) as string[]; } catch { return []; }
   }
 
+  reserveProviderUsage(keyId: string, promptTokens: number, requestedMaxTokens: number | undefined, completionCount: number,
+    inputPrice: number, outputPrice: number): { id: string; maxTokens: number; reservedCost: number } {
+    if (!Number.isSafeInteger(promptTokens) || promptTokens < 0 || !Number.isInteger(completionCount)
+      || completionCount < 1 || completionCount > 8) {
+      throw new RelayError("Could not determine a safe token budget for this request", 400);
+    }
+    if (requestedMaxTokens !== undefined && (!Number.isInteger(requestedMaxTokens)
+      || requestedMaxTokens < 0 || requestedMaxTokens > MAX_PROVIDER_MAX_TOKENS)) {
+      throw new RelayError(`max_tokens must be an integer from 0 to ${MAX_PROVIDER_MAX_TOKENS}`, 400);
+    }
+    if (![inputPrice, outputPrice].every(price => Number.isFinite(price) && price >= 0)) {
+      throw new RelayError("Model pricing is invalid", 503);
+    }
+
+    const id = uuidv4();
+    const now = Date.now();
+    const createdAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + 15 * 60_000).toISOString();
+    const reserve = this.sqlite.transaction(() => {
+      if (!this.isProviderMode()) throw new RelayError("Service-provider mode is disabled", 403);
+      const key = this.sqlite.prepare("SELECT owner_user_id FROM gateway_keys WHERE id=? AND is_active=1")
+        .get(keyId) as { owner_user_id: string | null } | undefined;
+      if (!key?.owner_user_id) throw new RelayError("API Key is not associated with a provider account", 403);
+      const user = this.sqlite.prepare("SELECT balance, is_active FROM platform_users WHERE id=?")
+        .get(key.owner_user_id) as { balance: number; is_active: number } | undefined;
+      if (!user || !user.is_active) throw new RelayError("Account disabled", 403);
+
+      this.sqlite.prepare("DELETE FROM provider_usage_reservations WHERE expires_at <= ?").run(createdAt);
+      const held = this.sqlite.prepare("SELECT COALESCE(SUM(reserved_cost), 0) AS amount FROM provider_usage_reservations WHERE user_id=? AND expires_at > ?")
+        .get(key.owner_user_id, createdAt) as { amount: number };
+      const available = Math.max(0, user.balance - held.amount);
+      const promptCost = (promptTokens * inputPrice) / 1_000_000;
+      if (promptCost > available + 1e-12) throw new RelayError("Insufficient balance for this prompt", 402);
+
+      let maxTokens = requestedMaxTokens;
+      if (maxTokens === undefined) {
+        const affordable = outputPrice > 0
+          ? Math.floor(((available - promptCost) * 1_000_000) / (outputPrice * completionCount))
+          : DEFAULT_PROVIDER_MAX_TOKENS;
+        maxTokens = Math.min(DEFAULT_PROVIDER_MAX_TOKENS, Math.max(0, affordable));
+      }
+      if (maxTokens * completionCount > MAX_PROVIDER_MAX_TOKENS) {
+        throw new RelayError(`The total output limit cannot exceed ${MAX_PROVIDER_MAX_TOKENS} tokens`, 400);
+      }
+      if (outputPrice > 0 && maxTokens === 0 && requestedMaxTokens === undefined) {
+        throw new RelayError("Insufficient balance for one output token", 402);
+      }
+
+      const rawCost = promptCost + (maxTokens * completionCount * outputPrice) / 1_000_000;
+      const reservedCost = Number(rawCost.toFixed(8));
+      if (reservedCost > available + 1e-12) throw new RelayError("Insufficient balance for the requested output limit", 402);
+      this.sqlite.prepare(`INSERT INTO provider_usage_reservations(id, key_id, user_id, reserved_cost, created_at, expires_at)
+        VALUES(?, ?, ?, ?, ?, ?)`)
+        .run(id, keyId, key.owner_user_id, reservedCost, createdAt, expiresAt);
+      return { id, maxTokens, reservedCost };
+    });
+    return reserve.immediate();
+  }
+
+  releaseProviderUsage(id: string): void {
+    this.sqlite.prepare("DELETE FROM provider_usage_reservations WHERE id=?").run(id);
+  }
+
   createUserKey(userId: string, name: unknown) {
     const active = this.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_keys WHERE owner_user_id=? AND is_active=1").get(userId) as { count: number };
     if (active.count >= 20) throw new Error("最多可同时持有 20 个有效密钥");
@@ -420,7 +485,8 @@ export class PlatformService {
     return result.changes > 0 ? this.listKeys().find(key => key.id === id) ?? null : null;
   }
 
-  recordUsage(keyId: string, publicModel: string, endpoint: string, prompt: number, completion: number, ip: string, userAgent: string, inputPrice = 0, outputPrice = 0): void {
+  recordUsage(keyId: string, publicModel: string, endpoint: string, prompt: number, completion: number, ip: string,
+    userAgent: string, inputPrice = 0, outputPrice = 0, reservationId?: string): void {
     const input = Math.max(0, Math.floor(prompt));
     const output = Math.max(0, Math.floor(completion));
     const total = input + output;
@@ -433,9 +499,13 @@ export class PlatformService {
       this.sqlite.prepare(`UPDATE gateway_keys SET last_used_at=?, total_tokens=total_tokens+?, total_requests=total_requests+1
         WHERE id=?`).run(now, total, keyId);
       const key = this.sqlite.prepare("SELECT owner_user_id FROM gateway_keys WHERE id=?").get(keyId) as { owner_user_id: string | null } | undefined;
-      if (key?.owner_user_id && this.isProviderMode() && cost > 0) {
+      const reservation = reservationId
+        ? this.sqlite.prepare("SELECT user_id FROM provider_usage_reservations WHERE id=? AND key_id=?").get(reservationId, keyId) as { user_id: string } | undefined
+        : undefined;
+      if (key?.owner_user_id && (this.isProviderMode() || reservation?.user_id === key.owner_user_id) && cost > 0) {
         this.sqlite.prepare("UPDATE platform_users SET balance=round(balance-?, 8) WHERE id=?").run(cost, key.owner_user_id);
       }
+      if (reservationId) this.sqlite.prepare("DELETE FROM provider_usage_reservations WHERE id=? AND key_id=?").run(reservationId, keyId);
     });
     transaction();
   }

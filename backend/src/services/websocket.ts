@@ -72,6 +72,7 @@ export interface RelayTarget {
 export interface RelayOptions {
   requestId?: string;
   signal?: AbortSignal;
+  trackStats?: boolean;
   upstreamApiKey?: string;
   onHeaders: (statusCode: number, headers: Record<string, unknown>) => void;
   onChunk?: (chunk: string) => void;
@@ -89,6 +90,7 @@ interface PendingRequest {
   onChunk?: RelayOptions["onChunk"];
   /** Output bytes relayed for this request (approximated by UTF-8 length). */
   bytes: number;
+  trackStats: boolean;
   startedAt: number;
 }
 
@@ -309,7 +311,7 @@ export class WebSocketTunnel {
       const requestId = randomUUID();
       this.addPending(conn, requestId, {
         kind: "key", resolve: value => resolve(value === true), reject, cleanup: () => {}, headersReceived: false,
-        bytes: 0, startedAt: Date.now(),
+        bytes: 0, trackStats: false, startedAt: Date.now(),
       }, signal);
       if (conn.pending.has(requestId) && !this.send(conn, { type: "validate_key", requestId, key: apiKey })) {
         this.fail(conn, requestId, new RelayError("Compute node send failed"));
@@ -363,6 +365,7 @@ export class WebSocketTunnel {
     }
     return new Promise((resolve, reject) => {
       const requestId = options.requestId ?? randomUUID();
+      const trackStats = options.trackStats !== false;
       let settled = false;
       const pending: PendingRequest = {
         kind: "http",
@@ -370,23 +373,27 @@ export class WebSocketTunnel {
         reject: error => { recordSettle(); reject(error); },
         cleanup: () => {}, headersReceived: false,
         chunks: options.onChunk ? undefined : [], onHeaders: options.onHeaders, onChunk: options.onChunk,
-        bytes: 0, startedAt: Date.now(),
+        bytes: 0, trackStats, startedAt: Date.now(),
       };
       const recordSettle = () => {
         if (settled) return;
         settled = true;
         const seconds = Math.max((Date.now() - pending.startedAt) / 1000, 0.001);
         const instant = pending.bytes / seconds;
-        for (const stats of [conn.stats, this.globalStats]) {
-          stats.activeRequests--;
-          stats.totalRequests++;
-          stats.totalBytes += pending.bytes;
-          stats.ewmaBytesPerSec = stats.known ? 0.3 * instant + 0.7 * stats.ewmaBytesPerSec : instant;
-          stats.known = true;
+        if (pending.trackStats) {
+          for (const stats of [conn.stats, this.globalStats]) {
+            stats.activeRequests--;
+            stats.totalRequests++;
+            stats.totalBytes += pending.bytes;
+            stats.ewmaBytesPerSec = stats.known ? 0.3 * instant + 0.7 * stats.ewmaBytesPerSec : instant;
+            stats.known = true;
+          }
         }
       };
-      conn.stats.activeRequests++;
-      this.globalStats.activeRequests++;
+      if (trackStats) {
+        conn.stats.activeRequests++;
+        this.globalStats.activeRequests++;
+      }
       this.addPending(conn, requestId, pending, options.signal);
       if (conn.pending.has(requestId) && !this.send(conn, { type: "http_relay", requestId, path: request.path, body: request.body,
         ...(request.upstreamApiKey ? { upstreamApiKey: request.upstreamApiKey } : {}), method: "POST" })) {

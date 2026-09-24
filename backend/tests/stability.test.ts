@@ -354,6 +354,49 @@ test("Alipay settings validate RSA keys and signed payments credit an order once
   }
 });
 
+test("provider usage reservations serialize balance holds and settle on actual token usage", () => {
+  const directory = mkdtempSync(join(tmpdir(), "openmymodel-reservation-test-"));
+  const database = createDatabase(directory);
+  try {
+    const setting = database.sqlite.prepare("INSERT INTO platform_settings(key,value) VALUES(?,?)");
+    for (const [name, value] of [
+      ["mode", "provider"], ["mail_host", "smtp.example.test"], ["mail_port", "465"], ["mail_user", "mail-user"],
+      ["mail_from", "billing@example.test"], ["mail_password", "configured"], ["alipay_app_id", "app"],
+      ["alipay_seller_id", "seller"], ["alipay_private_key", "configured"], ["alipay_public_key", "configured"],
+    ]) setting.run(name, value);
+    database.sqlite.prepare("INSERT INTO platform_users(id,email,balance,created_at) VALUES(?,?,?,?)")
+      .run("reserve-user", "reserve@example.test", 0.00001, new Date().toISOString());
+    database.sqlite.prepare("INSERT INTO platform_users(id,email,balance,created_at) VALUES(?,?,?,?)")
+      .run("other-user", "other@example.test", 0.00001, new Date().toISOString());
+    const platform = new PlatformService(database.sqlite, directory, new WebSocketTunnel({ authenticate: async () => "ok" }));
+    const key = platform.createUserKey("reserve-user", "reserve test");
+    const otherKey = platform.createUserKey("other-user", "other reserve test");
+    const gatewayKey = platform.findGatewayKey(key.key)!;
+    const otherGatewayKey = platform.findGatewayKey(otherKey.key)!;
+
+    const reservation = platform.reserveProviderUsage(gatewayKey.id, 5, undefined, 1, 1, 1);
+    assert.equal(reservation.maxTokens, 5, "omitted output limits are capped to what the balance can cover");
+    assert.equal(reservation.reservedCost, 0.00001);
+    const otherReservation = platform.reserveProviderUsage(otherGatewayKey.id, 5, undefined, 1, 1, 1);
+    assert.equal(otherReservation.reservedCost, 0.00001, "one account's hold cannot reduce another account's available balance");
+    assert.throws(() => platform.reserveProviderUsage(gatewayKey.id, 5, 1, 1, 1, 1),
+      (error: any) => error.statusCode === 402, "concurrent calls cannot reserve the same balance twice");
+    assert.equal((database.sqlite.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count, 2);
+
+    platform.recordUsage(gatewayKey.id, "reserve-model", "/v1/chat/completions", 5, 3, "127.0.0.1", "test", 1, 1, reservation.id);
+    assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id='reserve-user'").get() as any).balance, 0.000002);
+    assert.equal((database.sqlite.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count, 1,
+      "settlement releases the unused portion of a reservation");
+    assert.equal((database.sqlite.prepare("SELECT cost FROM usage_logs").get() as any).cost, 0.000008);
+    assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id='other-user'").get() as any).balance, 0.00001);
+    platform.releaseProviderUsage(otherReservation.id);
+    assert.equal((database.sqlite.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count, 0);
+  } finally {
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("JSON validation rejects malformed, non-JSON, and bodies exceeding 32 MiB", async t => {
   const { app } = await fixture(t);
   for (const contentType of [undefined, "text/plain", "application/x-www-form-urlencoded"]) {
@@ -888,4 +931,101 @@ test("managed gateway routes with the configured llama-server key and meters usa
   assert.equal(streamUsage.cost, 0.000014);
   const keys = await app.inject({ method: "GET", url: "/api/admin/keys", headers: adminHeaders });
   assert.equal(keys.json()[0].requestsLastMinute, 3);
+});
+
+test("provider gateway preflights node tokens and reserves no more than the available balance", async t => {
+  const { app, tunnel, node, post, directory } = await fixture(t);
+  const nodeKey = "provider-node-api-key";
+  const relayedPaths: string[] = [];
+  let inferenceCalls = 0;
+  let cancelledStream = false;
+  await node({ modelName: "internal-model" }, (msg, send) => {
+    if (msg.type === "cancel_request") { cancelledStream = true; return; }
+    if (msg.type !== "http_relay") return;
+    relayedPaths.push(msg.path);
+    assert.equal(msg.upstreamApiKey, nodeKey);
+    let value: unknown;
+    if (msg.path === "/apply-template") {
+      const body = JSON.parse(msg.body);
+      assert.equal(body.model, "internal-model-v2");
+      value = { prompt: "formatted prompt" };
+    } else if (msg.path === "/tokenize") {
+      const body = JSON.parse(msg.body);
+      assert.equal(body.content, "formatted prompt");
+      assert.equal(body.add_special, true);
+      value = { tokens: [1, 2, 3, 4, 5] };
+    } else {
+      inferenceCalls++;
+      const body = JSON.parse(msg.body);
+      assert.equal(body.n, 1);
+      if (body.stream === true) {
+        assert.equal(body.max_tokens, 15);
+        send(headers(msg.requestId, 200, { "content-type": "text/event-stream" }));
+        send({ type: "http_chunk", requestId: msg.requestId, data: 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n' });
+        return;
+      }
+      assert.equal(body.max_tokens, 5, "the output cap is reduced to the remaining affordable balance");
+      value = { choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 5, completion_tokens: 3 } };
+    }
+    send(headers(msg.requestId, 200, { "content-type": "application/json" }));
+    send({ type: "http_chunk", requestId: msg.requestId, data: JSON.stringify(value) });
+    send({ type: "http_done", requestId: msg.requestId });
+  });
+
+  const adminLogin = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
+  const adminCookie = String(adminLogin.headers["set-cookie"]).split(";", 1)[0];
+  const appKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const alipayKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const settings = await app.inject({ method: "PUT", url: "/api/admin/settings", headers: { cookie: adminCookie }, payload: {
+    mode: "provider", publicUrl: "https://api.example.test", mailHost: "smtp.example.test", mailPort: 465,
+    mailUser: "mail-user", mailFrom: "billing@example.test", mailPassword: "mail-pass",
+    alipayAppId: "2026000000000001", alipaySellerId: "2088000000000000",
+    alipayPrivateKey: appKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    alipayPublicKey: alipayKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+  } });
+  assert.equal(settings.statusCode, 200, settings.body);
+  const adminHeaders = { cookie: adminCookie, "content-type": "application/json" };
+  const model = await app.inject({ method: "POST", url: "/api/admin/models", headers: adminHeaders,
+    payload: { publicName: "public-chat", inputPrice: 1, outputPrice: 1 } });
+  const route = await app.inject({ method: "POST", url: `/api/admin/models/${model.json().id}/routes`, headers: adminHeaders,
+    payload: { nodeId: "node-1", upstreamModel: "internal-model-v2", upstreamKey: nodeKey, weight: 1 } });
+  assert.equal(route.statusCode, 200, route.body);
+
+  const database = new Database(join(directory, "openmymodel.db"));
+  try {
+    database.prepare("INSERT INTO platform_users(id,email,balance,created_at) VALUES(?,?,?,?)")
+      .run("provider-user", "provider@example.test", 0.00001, new Date().toISOString());
+    const sessions = new PlatformService(database, directory, tunnel);
+    const userCookie = `omm_session=${sessions.createSession("user", "provider-user")}`;
+    const keyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: userCookie }, payload: { name: "budgeted" } });
+    assert.equal(keyResponse.statusCode, 200, keyResponse.body);
+    const gatewayKey = keyResponse.json().key;
+
+    const response = await post({ model: "public-chat", messages: [{ role: "user", content: "hello" }] }, gatewayKey).response;
+    assert.equal(response.statusCode, 200);
+    await text(response);
+    assert.equal(inferenceCalls, 1);
+    assert.deepEqual(relayedPaths, ["/apply-template", "/tokenize", "/v1/chat/completions"]);
+    assert.equal(tunnel.statusSnapshot().totals.totalRequests, 1,
+      "internal billing tokenization calls do not inflate public inference request statistics");
+    const balance = database.prepare("SELECT balance FROM platform_users WHERE id='provider-user'").get() as { balance: number };
+    assert.equal(balance.balance, 0.000002);
+    assert.equal((database.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count, 0);
+
+    const insufficient = await post({ model: "public-chat", messages: [{ role: "user", content: "hello" }] }, gatewayKey).response;
+    assert.equal(insufficient.statusCode, 402);
+    await text(insufficient);
+    assert.equal(inferenceCalls, 1, "an unaffordable prompt must not reach inference");
+
+    database.prepare("UPDATE platform_users SET balance=0.00002 WHERE id='provider-user'").run();
+    const stream = post({ model: "public-chat", stream: true, messages: [{ role: "user", content: "hello" }] }, gatewayKey);
+    const streamResponse = await stream.response;
+    streamResponse.on("error", () => {});
+    await once(streamResponse, "data");
+    stream.req.destroy();
+    await until(() => cancelledStream &&
+      (database.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count === 0);
+    const afterCancel = database.prepare("SELECT balance FROM platform_users WHERE id='provider-user'").get() as { balance: number };
+    assert.equal(afterCancel.balance, 0.000015, "cancelled streaming requests charge the exact input prompt cost");
+  } finally { database.close(); }
 });

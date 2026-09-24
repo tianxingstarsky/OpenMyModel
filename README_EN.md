@@ -247,6 +247,8 @@ The node key protects the node's HTTP service and is managed separately from cal
 
 Admin console: `/admin`; public personal-mode dashboard: `/dashboard`; provider user console: `/console`. Configure SMTP and Alipay credentials in the admin console before enabling provider mode.
 
+Provider requests use the selected node's `/apply-template` and `/tokenize` endpoints before inference to count text input tokens and atomically reserve input cost plus the output limit. Settlement deducts the node's reported usage and releases the unused balance. When `max_tokens` is omitted, the output limit is reduced to what the balance can cover, up to 4,096 tokens per choice; explicit limits are capped at 65,536 total output tokens. Prebilling currently accepts text-only chat messages and rejects multimodal messages before inference. Nodes need a llama-server version that supports both endpoints.
+
 ---
 
 ## Usage Examples

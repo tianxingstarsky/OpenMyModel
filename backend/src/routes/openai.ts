@@ -5,6 +5,7 @@ import { WebSocketTunnel, RelayError } from "../services/websocket";
 import { PlatformService } from "../services/platform";
 
 const MAX_WRITE_QUEUE = 8 * 1024 * 1024;
+const MAX_PROVIDER_OUTPUT_TOKENS = 65_536;
 
 export function relayHeaders(headers: Record<string, unknown>): OutgoingHttpHeaders {
   const blocked = new Set([
@@ -29,6 +30,78 @@ export function relayHeaders(headers: Record<string, unknown>): OutgoingHttpHead
     result[lower] = value;
   }
   return result;
+}
+
+function requestCompletionBudget(body: Record<string, unknown>): { requestedMaxTokens?: number; completionCount: number } {
+  const maxTokenValues = [body.max_tokens, body.max_completion_tokens, body.n_predict]
+    .filter(value => value !== undefined && value !== null);
+  if (maxTokenValues.some(value => typeof value !== "number" || !Number.isInteger(value)
+    || value < 0 || value > MAX_PROVIDER_OUTPUT_TOKENS)) {
+    throw new RelayError("max_tokens must be a non-negative integer", 400);
+  }
+  const requestedMaxTokens = maxTokenValues.length ? Math.min(...maxTokenValues as number[]) : undefined;
+  const completionValues = [body.n, body.n_cmpl].filter(value => value !== undefined && value !== null);
+  if (completionValues.some(value => typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 8)) {
+    throw new RelayError("n must be an integer from 1 to 8", 400);
+  }
+  const completionCount = completionValues.length ? Math.min(...completionValues as number[]) : 1;
+  if (requestedMaxTokens !== undefined && requestedMaxTokens * completionCount > MAX_PROVIDER_OUTPUT_TOKENS) {
+    throw new RelayError(`The total output limit cannot exceed ${MAX_PROVIDER_OUTPUT_TOKENS} tokens`, 400);
+  }
+  return { requestedMaxTokens, completionCount };
+}
+
+function hasTextOnlyMessages(body: Record<string, unknown>): boolean {
+  if (!Array.isArray(body.messages)) return false;
+  return body.messages.every(message => {
+    if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+    const content = (message as Record<string, unknown>).content;
+    if (content === undefined || content === null || typeof content === "string") return true;
+    return Array.isArray(content) && content.every(part => !!part && typeof part === "object" && !Array.isArray(part)
+      && (part as Record<string, unknown>).type === "text" && typeof (part as Record<string, unknown>).text === "string");
+  });
+}
+
+async function relayJson(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string }, path: string,
+  body: Record<string, unknown>, upstreamApiKey: string, signal: AbortSignal): Promise<Record<string, unknown>> {
+  let statusCode = 0;
+  let raw: string;
+  try {
+    raw = await tunnel.relayHttp(node, { path, body: JSON.stringify(body), upstreamApiKey }, {
+      signal, trackStats: false, onHeaders: status => { statusCode = status; },
+    });
+  } catch (error) {
+    if (error instanceof RelayError) throw error;
+    throw new RelayError("Node billing preflight failed", 503);
+  }
+  if (statusCode === 404) throw new RelayError("The compute node does not support balance-safe token billing", 503);
+  if (statusCode === 429 || statusCode >= 500 || statusCode < 200) {
+    throw new RelayError("Node is temporarily unable to calculate the request token budget", 503);
+  }
+  if (statusCode >= 400) throw new RelayError("Node could not calculate the request token budget", 400);
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid JSON object");
+    return parsed as Record<string, unknown>;
+  } catch {
+    throw new RelayError("Node returned an invalid token budget response", 503);
+  }
+}
+
+async function managedPromptTokenCount(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string },
+  body: Record<string, unknown>, upstreamApiKey: string, signal: AbortSignal): Promise<number> {
+  if (!hasTextOnlyMessages(body)) {
+    throw new RelayError("Service-provider billing currently supports text-only chat messages", 400);
+  }
+  const templated = await relayJson(tunnel, node, "/apply-template", body, upstreamApiKey, signal);
+  if (typeof templated.prompt !== "string") throw new RelayError("Node did not return the formatted prompt", 503);
+  const tokenized = await relayJson(tunnel, node, "/tokenize", {
+    content: templated.prompt, add_special: true, parse_special: true,
+  }, upstreamApiKey, signal);
+  if (!Array.isArray(tokenized.tokens) || tokenized.tokens.some(token => !Number.isInteger(token))) {
+    throw new RelayError("Node did not return valid prompt tokens", 503);
+  }
+  return tokenized.tokens.length;
 }
 
 class UsageCapture {
@@ -127,6 +200,11 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     let inputPrice = 0;
     let outputPrice = 0;
     let targetKeyId = `direct-${createHash("sha256").update(rawKey).digest("hex").slice(0, 40)}`;
+    let usageReservationId: string | undefined;
+    let reservedPromptTokens = 0;
+    let upstreamHeadersReceived = false;
+    let upstreamStatus = 200;
+    let capture: UsageCapture | undefined;
 
     try {
       let node;
@@ -144,6 +222,17 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
         publicModel = route.publicName;
         targetKeyId = managedKey.id;
         relayBody = { ...body, model: route.upstreamModel };
+        if (platform.isProviderMode()) {
+          const budget = requestCompletionBudget(body);
+          reservedPromptTokens = await managedPromptTokenCount(tunnel, node, relayBody, upstreamApiKey, controller.signal);
+          const reservation = platform.reserveProviderUsage(targetKeyId, reservedPromptTokens, budget.requestedMaxTokens,
+            budget.completionCount, inputPrice, outputPrice);
+          usageReservationId = reservation.id;
+          relayBody = { ...relayBody, max_tokens: reservation.maxTokens, n: budget.completionCount };
+          delete relayBody.max_completion_tokens;
+          delete relayBody.n_predict;
+          delete relayBody.n_cmpl;
+        }
       } else {
         node = await tunnel.findNode(rawKey, body.model as string | undefined, controller.signal);
         platform.recordDirectRequest(targetKeyId);
@@ -153,12 +242,12 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
           ? body.stream_options as Record<string, unknown> : {};
         relayBody = { ...relayBody, stream_options: { ...streamOptions, include_usage: true } };
       }
-      const capture = new UsageCapture();
-      let upstreamStatus = 200;
+      capture = new UsageCapture();
       await tunnel.relayHttp(node, { path: request.url, body: JSON.stringify(relayBody), upstreamApiKey }, {
         signal: controller.signal,
         onHeaders: (statusCode, headers) => {
           upstreamStatus = statusCode;
+          upstreamHeadersReceived = true;
           const safeHeaders = relayHeaders(headers);
           if (!safeHeaders["content-type"]) safeHeaders["content-type"] = body.stream === true && statusCode < 400
             ? "text/event-stream; charset=utf-8" : "application/json; charset=utf-8";
@@ -173,18 +262,28 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
           if (reply.raw.writableLength + Buffer.byteLength(chunk) > MAX_WRITE_QUEUE) {
             throw new RelayError("Downstream response is too slow");
           }
-          capture.consume(chunk, body.stream === true);
+          capture!.consume(chunk, body.stream === true);
           reply.raw.write(chunk, "utf8");
         },
       });
       const usage = capture.finish(body.stream === true);
       try {
         platform.recordUsage(targetKeyId, publicModel, "/v1/chat/completions",
-          upstreamStatus < 400 ? usage.prompt : 0, upstreamStatus < 400 ? usage.completion : 0,
-          request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice);
+          upstreamStatus < 400 ? (usage.prompt || reservedPromptTokens) : 0, upstreamStatus < 400 ? usage.completion : 0,
+          request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId);
+        usageReservationId = undefined;
       } catch (error) { request.log.error({ err: error }, "Usage could not be recorded"); }
       if (!reply.raw.destroyed) reply.raw.end();
     } catch (error) {
+      if (usageReservationId && upstreamHeadersReceived && upstreamStatus < 400) {
+        const partialUsage = capture?.finish(body.stream === true);
+        try {
+          platform.recordUsage(targetKeyId, publicModel, "/v1/chat/completions",
+            partialUsage?.prompt || reservedPromptTokens, partialUsage?.completion || 0,
+            request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId);
+          usageReservationId = undefined;
+        } catch (recordError) { request.log.error({ err: recordError }, "Partial usage could not be recorded"); }
+      }
       if (reply.raw.destroyed || controller.signal.aborted) return;
       if (reply.raw.headersSent) {
         // Once upstream headers have been forwarded an error must abort the body.
@@ -192,11 +291,17 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
         return;
       }
       const statusCode = error instanceof RelayError ? error.statusCode : 502;
+      const type = statusCode === 401 ? "authentication_error"
+        : statusCode === 400 ? "invalid_request_error"
+          : statusCode === 402 ? "billing_error"
+            : statusCode === 403 ? "permission_error"
+              : statusCode === 429 ? "rate_limit_error" : "server_error";
       return reply.status(statusCode).send({ error: {
         message: error instanceof RelayError ? error.message : "Upstream request failed",
-        type: statusCode === 401 ? "authentication_error" : "server_error",
+        type,
       } });
     } finally {
+      if (usageReservationId) platform.releaseProviderUsage(usageReservationId);
       request.raw.off("aborted", disconnect);
       reply.raw.off("close", disconnect);
       reply.raw.off("error", disconnect);

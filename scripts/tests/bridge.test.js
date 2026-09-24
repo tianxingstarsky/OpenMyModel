@@ -99,6 +99,28 @@ test("forwards non-stream upstream error status and body", async (t) => {
   assert.equal(f.bridge.activeRequests.size, 0);
 });
 
+test("allows only the two internal token billing paths outside the OpenAI API", async (t) => {
+  const paths = [];
+  const f = await fixture(t, (req, res) => {
+    paths.push(req.url);
+    assert.equal(req.headers.authorization, "Bearer upstream-test");
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(req.url === "/apply-template" ? '{"prompt":"hello"}' : '{"tokens":[1,2,3]}');
+    });
+  });
+  f.send({ type: "http_relay", requestId: "template", path: "/apply-template", body: "{}", upstreamApiKey: "upstream-test" });
+  f.send({ type: "http_relay", requestId: "tokenize", path: "/tokenize", body: "{}", upstreamApiKey: "upstream-test" });
+  f.send({ type: "http_relay", requestId: "private", path: "/admin/settings", body: "{}", upstreamApiKey: "upstream-test" });
+  await until(() => f.messages.filter((m) => m.type === "http_done").length === 2 &&
+    f.messages.some((m) => m.requestId === "private" && m.type === "http_error"));
+  assert.deepEqual(paths.sort(), ["/apply-template", "/tokenize"]);
+  assert.equal(f.messages.find((m) => m.requestId === "template" && m.type === "http_chunk").data, '{"prompt":"hello"}');
+  assert.equal(f.messages.find((m) => m.requestId === "tokenize" && m.type === "http_chunk").data, '{"tokens":[1,2,3]}');
+  assert.equal(f.bridge.activeRequests.size, 0);
+});
+
 test("cancels before headers without error/done or active-request leaks", async (t) => {
   let started = false;
   let closed = false;

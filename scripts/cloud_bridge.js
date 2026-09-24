@@ -156,7 +156,9 @@ class CloudBridge {
     try {
       const path = typeof message.path === "string" ? message.path : "/v1/chat/completions";
       // A tunnel request may choose an API path, never another origin.
-      if (!path.startsWith("/v1/") || path.includes("\\") || /[\r\n]/.test(path) ||
+      const pathname = path.split("?", 1)[0];
+      const allowedPath = pathname.startsWith("/v1/") || ["/apply-template", "/tokenize"].includes(pathname);
+      if (!allowedPath || path.includes("\\") || /[\r\n]/.test(path) ||
           (message.method && message.method !== "POST")) {
         throw new Error("不支持的中继请求路径或方法");
       }
