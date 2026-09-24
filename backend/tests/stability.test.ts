@@ -1039,7 +1039,10 @@ test("relay headers reject injection and remove transport/private headers", () =
 
 test("admin node management keeps disconnected nodes visible with their last reported model", async t => {
   const { app, node, tunnel } = await fixture(t);
-  const connected = await node({ nodeId: "retained-node", nodeName: "Retained node", modelName: "last-model" });
+  const connected = await node({ nodeId: "retained-node", nodeName: "Retained node", modelName: "last-model" }, (msg, send) => {
+    if (msg.type === "validate_upstream_key") send({ type: "upstream_key_valid", requestId: msg.requestId,
+      valid: msg.key === "retained-node-secret" });
+  });
   const login = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
   const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
   const headers = { cookie, "content-type": "application/json" };
@@ -1050,6 +1053,18 @@ test("admin node management keeps disconnected nodes visible with their last rep
   const savedNodeKey = await app.inject({ method: "PUT", url: "/api/admin/nodes/retained-node/api-key", headers,
     payload: { apiKey: "retained-node-secret" } });
   assert.equal(savedNodeKey.statusCode, 200, savedNodeKey.body);
+  const unauthenticatedKeyVerify = await app.inject({ method: "POST", url: "/api/admin/nodes/retained-node/api-key/verify", payload: {} });
+  assert.equal(unauthenticatedKeyVerify.statusCode, 401, "checking a stored node credential requires administrator authentication");
+  const verifiedNodeKey = await app.inject({ method: "POST", url: "/api/admin/nodes/retained-node/api-key/verify", headers, payload: {} });
+  assert.deepEqual(verifiedNodeKey.json(), { nodeId: "retained-node", valid: true });
+  assert.equal(verifiedNodeKey.body.includes("retained-node-secret"), false, "verification never returns the stored secret");
+  const incorrectNodeKey = await app.inject({ method: "PUT", url: "/api/admin/nodes/retained-node/api-key", headers,
+    payload: { apiKey: "incorrect-node-secret" } });
+  assert.equal(incorrectNodeKey.statusCode, 200);
+  const rejectedNodeKey = await app.inject({ method: "POST", url: "/api/admin/nodes/retained-node/api-key/verify", headers, payload: {} });
+  assert.deepEqual(rejectedNodeKey.json(), { nodeId: "retained-node", valid: false });
+  await app.inject({ method: "PUT", url: "/api/admin/nodes/retained-node/api-key", headers,
+    payload: { apiKey: "retained-node-secret" } });
   const nodeDetails = await app.inject({ method: "GET", url: "/api/admin/nodes", headers });
   assert.equal(nodeDetails.json()[0].keyConfigured, true);
   assert.equal(nodeDetails.body.includes("retained-node-secret"), false, "node keys are never returned to the admin browser");
@@ -1073,6 +1088,8 @@ test("admin node management keeps disconnected nodes visible with their last rep
   assert.deepEqual(offline.json().map((entry: Message) => [entry.id, entry.isOnline, entry.serverRunning, entry.modelName]),
     [["retained-node", false, false, "last-model"]]);
   assert.equal(offline.json()[0].keyConfigured, true, "node credentials stay available while the compute node is offline");
+  const offlineVerify = await app.inject({ method: "POST", url: "/api/admin/nodes/retained-node/api-key/verify", headers, payload: {} });
+  assert.equal(offlineVerify.statusCode, 503, "key verification explains that the node must be online");
   const offlineModels = await app.inject({ method: "GET", url: "/api/admin/models", headers: { cookie } });
   assert.deepEqual(offlineModels.json()[0].routes.map((entry: Message) => [entry.nodeName, entry.nodeModel, entry.nodeOnline]),
     [["Retained node", "last-model", false]]);

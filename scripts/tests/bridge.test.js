@@ -176,6 +176,15 @@ test("keys can be disabled/deleted without logging secret values", async (t) => 
   await until(() => f.messages.some((m) => m.requestId === "node-key"));
   assert.equal(f.messages.find((m) => m.requestId === "node-key").valid, true,
     "the configured llama-server key is a valid direct-node credential");
+  f.send({ type: "validate_upstream_key", requestId: "upstream-valid", key: "upstream-test" });
+  await until(() => f.messages.some((m) => m.requestId === "upstream-valid"));
+  assert.equal(f.messages.find((m) => m.requestId === "upstream-valid").type, "upstream_key_valid");
+  assert.equal(f.messages.find((m) => m.requestId === "upstream-valid").valid, true,
+    "upstream validation checks the configured llama-server key");
+  f.send({ type: "validate_upstream_key", requestId: "local-key-is-not-upstream", key: "test-key" });
+  await until(() => f.messages.some((m) => m.requestId === "local-key-is-not-upstream"));
+  assert.equal(f.messages.find((m) => m.requestId === "local-key-is-not-upstream").valid, false,
+    "local gateway keys cannot pass node upstream-key verification");
   f.bridge.command({ cmd: "set_keys", keys: [] });
   f.send({ type: "validate_key", requestId: "deleted", key: "test-key" });
   await until(() => f.messages.some((m) => m.requestId === "deleted"));

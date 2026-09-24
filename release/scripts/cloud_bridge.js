@@ -106,6 +106,12 @@ class CloudBridge {
                 this.localKeys.some((key) => key.isActive === true && matchesKey(key.key, message.key)),
             });
             break;
+          case "validate_upstream_key":
+            this.send(socket, {
+              type: "upstream_key_valid", requestId: message.requestId,
+              valid: this.llamaApiKey !== "" && matchesKey(this.llamaApiKey, message.key),
+            });
+            break;
           case "http_relay":
             if (!this.connected) break;
             this.relay(socket, message);

@@ -20,7 +20,7 @@
 后端和桌面 Node Bridge 必须一起更新。`scripts/cloud_bridge.js` 是事实源，`release/scripts/cloud_bridge.js` 是受一致性测试保护的发布副本。
 
 1. Bridge 发送 `auth`（包含 `protocolVersion: 2`、节点信息和可选 `serverRunning`），云端回复 `auth_ok`。
-2. 请求认证使用 `validate_key` / `key_valid`；密钥由本机校验。
+2. 网关调用者认证使用 `validate_key` / `key_valid`；它可匹配本地用户 Key 或节点自己的 llama-server Key。管理员验证已保存的节点上游凭据时使用 `validate_upstream_key` / `upstream_key_valid`，只检查当前节点配置的 llama-server Key，不接受本地用户 Key，且 API 响应不返回密钥。
 3. 转发使用 `http_relay { requestId, path, method, body, upstreamApiKey? }`。个人模式的桌面 Key 调用不发送覆盖值，Bridge 沿用本机配置的 llama-server Key；管理端路由则传入该节点加密保存的上游 Key；历史版本逐路由保存的 Key 仍可用作回退。
 4. 上游响应先发送 `http_headers { requestId, statusCode, headers }`，再发送任意数量的 `http_chunk { requestId, data }`，最后发送 `http_done`。
 5. 转发错误使用 `http_error { requestId, statusCode, message }`。响应头尚未发送时返回对应 HTTP 错误；响应开始后发生错误，中断连接，不伪造成功结束。

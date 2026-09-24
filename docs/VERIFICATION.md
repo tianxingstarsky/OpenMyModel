@@ -7,8 +7,8 @@
 | 检查 | 结果 |
 | --- | --- |
 | `npm --prefix backend run build` | TypeScript 编译通过 |
-| `npm --prefix backend test` | 37 项通过；覆盖服务商账户隔离、支付宝回调、Token 结算、节点级 Key 加密/轮换、拒绝清除仍被启用路由依赖的 Key，以及无凭据路由不公开/不转发 |
-| `npm --prefix scripts test` | 13 项通过 |
+| `npm --prefix backend test` | 37 项通过；覆盖服务商账户隔离、支付宝回调、Token 结算、节点级 Key 加密/轮换与管理员验证、拒绝清除仍被启用路由依赖的 Key，以及无凭据路由不公开/不转发 |
+| `npm --prefix scripts test` | 13 项通过；覆盖节点上游 Key 验证与本地用户 Key 的隔离 |
 | `npm --prefix scripts run check:release` | 发布 Bridge 与源码一致 |
 | `flutter analyze` | No issues found |
 | `flutter test` | 30 项通过 |

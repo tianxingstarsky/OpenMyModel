@@ -79,7 +79,7 @@ export interface RelayOptions {
 }
 
 interface PendingRequest {
-  kind: "key" | "http";
+  kind: "key" | "upstream-key" | "http";
   resolve: (value: boolean | string) => void;
   reject: (error: Error) => void;
   timeout?: NodeJS.Timeout;
@@ -214,8 +214,9 @@ export class WebSocketTunnel {
     const pending = conn.pending.get(msg.requestId);
     if (!pending) return;
     const fail = (message: string) => this.fail(conn, msg.requestId as string, new RelayError(message), true);
-    if (pending.kind === "key") {
-      if (msg.type === "key_valid") this.finish(conn, msg.requestId, msg.valid === true);
+    if (pending.kind === "key" || pending.kind === "upstream-key") {
+      const responseType = pending.kind === "key" ? "key_valid" : "upstream_key_valid";
+      if (msg.type === responseType) this.finish(conn, msg.requestId, msg.valid === true);
       return;
     }
     switch (msg.type) {
@@ -270,7 +271,7 @@ export class WebSocketTunnel {
     if (conn.pending.get(requestId) !== pending) return;
     pending.timeout = setTimeout(() => {
       this.fail(conn, requestId, new RelayError("Upstream request timed out", 504), true);
-    }, pending.kind === "key" ? this.options.keyTimeoutMs ?? 10000 : this.options.requestTimeoutMs ?? 120000);
+    }, pending.kind !== "http" ? this.options.keyTimeoutMs ?? 10000 : this.options.requestTimeoutMs ?? 120000);
   }
 
   private take(conn: TunnelConnection, requestId: string): PendingRequest | undefined {
@@ -315,6 +316,21 @@ export class WebSocketTunnel {
       }, signal);
       if (conn.pending.has(requestId) && !this.send(conn, { type: "validate_key", requestId, key: apiKey })) {
         this.fail(conn, requestId, new RelayError("Compute node send failed"));
+      }
+    });
+  }
+
+  async validateUpstreamKey(apiKey: string, nodeId: string, signal?: AbortSignal): Promise<boolean> {
+    const conn = this.connections.get(nodeId);
+    if (!conn || conn.retired || !conn.node.serverRunning) throw new RelayError("Compute node is offline", 503);
+    return new Promise<boolean>((resolve, reject) => {
+      const requestId = randomUUID();
+      this.addPending(conn, requestId, {
+        kind: "upstream-key", resolve: value => resolve(value === true), reject, cleanup: () => {}, headersReceived: false,
+        bytes: 0, trackStats: false, startedAt: Date.now(),
+      }, signal);
+      if (conn.pending.has(requestId) && !this.send(conn, { type: "validate_upstream_key", requestId, key: apiKey })) {
+        this.fail(conn, requestId, new RelayError("Compute node send failed", 503));
       }
     });
   }

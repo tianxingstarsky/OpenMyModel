@@ -912,6 +912,23 @@ export class PlatformService {
     return { nodeId, keyConfigured: true };
   }
 
+  async verifyNodeApiKey(nodeIdInput: unknown): Promise<{ nodeId: string; valid: boolean }> {
+    const nodeId = typeof nodeIdInput === "string" ? nodeIdInput.trim() : "";
+    if (!nodeId || nodeId.length > 256) throw new Error("节点 ID 无效");
+    const row = this.sqlite.prepare("SELECT upstream_api_key FROM nodes WHERE id=?")
+      .get(nodeId) as { upstream_api_key: string | null } | undefined;
+    if (!row) throw new Error("节点不存在");
+    if (!row.upstream_api_key) throw new Error("请先为节点配置 llama-server API Key");
+    let valid: boolean;
+    try {
+      valid = await this.tunnel.validateUpstreamKey(decryptSecret(row.upstream_api_key, this.secret), nodeId);
+    } catch (error) {
+      if (error instanceof RelayError && error.statusCode === 503) throw error;
+      throw new RelayError("节点未响应 Key 验证，请确认节点在线并更新桌面端桥接程序", 503);
+    }
+    return { nodeId, valid };
+  }
+
   clearNodeApiKey(nodeIdInput: unknown): boolean {
     const nodeId = typeof nodeIdInput === "string" ? nodeIdInput.trim() : "";
     if (!nodeId || nodeId.length > 256) return false;

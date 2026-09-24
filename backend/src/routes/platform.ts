@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { AdminAuthenticator } from "../services/auth";
 import { NodeKeyInUseError, PlatformService } from "../services/platform";
+import { RelayError } from "../services/websocket";
 
 const bodyOf = (request: FastifyRequest): Record<string, unknown> =>
   request.body && typeof request.body === "object" && !Array.isArray(request.body) ? request.body as Record<string, unknown> : {};
@@ -121,6 +122,11 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
     if (!await requireAdmin(request, reply, platform, auth)) return;
     try { return platform.saveNodeApiKey(request.params.nodeId, bodyOf(request).apiKey); }
     catch (error) { return apiError(reply, error); }
+  });
+  app.post<{ Params: { nodeId: string } }>("/api/admin/nodes/:nodeId/api-key/verify", async (request, reply) => {
+    if (!await requireAdmin(request, reply, platform, auth)) return;
+    try { return await platform.verifyNodeApiKey(request.params.nodeId); }
+    catch (error) { return apiError(reply, error, error instanceof RelayError ? error.statusCode : 400); }
   });
   app.delete<{ Params: { nodeId: string } }>("/api/admin/nodes/:nodeId/api-key", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
