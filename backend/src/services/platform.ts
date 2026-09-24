@@ -914,7 +914,15 @@ export class PlatformService {
 
   createOrder(userId: string, amountInput: unknown, returnUrl: string): { orderId: string; amount: number; paymentUrl: string } {
     if (!this.isProviderMode()) throw new Error("服务商模式尚未启用");
-    const amount = Number(safeNumber(amountInput, "充值金额", 1, 100_000).toFixed(2));
+    const amountText = typeof amountInput === "number" && Number.isFinite(amountInput)
+      ? String(amountInput) : typeof amountInput === "string" ? amountInput.trim() : "";
+    const match = /^(0|[1-9]\d{0,5})(?:\.(\d{1,2}))?$/.exec(amountText);
+    if (!match) throw new Error("充值金额必须为 1 至 100000 元，且最多保留两位小数");
+    const amountCents = Number(match[1]) * 100 + Number((match[2] || "").padEnd(2, "0"));
+    if (!Number.isSafeInteger(amountCents) || amountCents < 100 || amountCents > 10_000_000) {
+      throw new Error("充值金额必须为 1 至 100000 元，且最多保留两位小数");
+    }
+    const amount = amountCents / 100;
     const id = `OM${Date.now()}${randomBytes(6).toString("hex").toUpperCase()}`;
     const paymentUrl = this.alipayPaymentUrl(id, amount, returnUrl);
     this.sqlite.prepare(`INSERT INTO payment_orders(id, user_id, amount, description, created_at) VALUES(?, ?, ?, ?, ?)`)

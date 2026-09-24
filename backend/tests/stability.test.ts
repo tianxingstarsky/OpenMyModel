@@ -557,6 +557,8 @@ test("Alipay settings validate RSA keys and official signed callback fields cred
     const userId = "payer-1";
     database.sqlite.prepare("INSERT INTO platform_users(id, email, created_at) VALUES(?, ?, ?)")
       .run(userId, "payer@example.test", new Date().toISOString());
+    assert.throws(() => platform.createOrder(userId, 10.001, "https://api.example.test/console?payment=return"),
+      /最多保留两位小数/, "checkout rejects amounts that cannot be represented in cents instead of silently rounding them");
     const order = platform.createOrder(userId, 10, "https://api.example.test/console?payment=return");
     const payment = new URL(order.paymentUrl);
     assert.equal(payment.searchParams.get("app_id"), "2026000000000001");
