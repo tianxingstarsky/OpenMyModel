@@ -959,25 +959,32 @@ export class PlatformService {
     catch { /* Malformed signatures are rejected below. */ }
     if (!verified) return false;
     const orderId = typeof fields.out_trade_no === "string" ? fields.out_trade_no : "";
-    if (!orderId) return false;
+    if (!orderId || orderId.length > 128) return false;
     if (fields.trade_status === "TRADE_CLOSED") {
       this.sqlite.prepare("UPDATE payment_orders SET status='closed' WHERE id=? AND status='pending'").run(orderId);
       return true;
     }
     if (fields.trade_status !== "TRADE_SUCCESS" && fields.trade_status !== "TRADE_FINISHED") return true;
-    const order = this.sqlite.prepare("SELECT id, user_id, amount, status FROM payment_orders WHERE id=?").get(orderId) as
-      { id: string; user_id: string; amount: number; status: string } | undefined;
+    const tradeNo = typeof fields.trade_no === "string" ? fields.trade_no : "";
     const paidAmount = fields.total_amount;
     const paidCents = typeof paidAmount === "string" && /^(?:0|[1-9]\d{0,5})\.\d{2}$/.test(paidAmount)
       ? Number(paidAmount.replace(".", "")) : Number.NaN;
-    if (!order || typeof fields.trade_no !== "string" || !fields.trade_no || !Number.isSafeInteger(paidCents)
-      || paidCents !== Math.round(Number(order.amount) * 100)) return false;
-    if (order.status === "paid") return true;
+    if (!tradeNo || tradeNo.length > 128 || !Number.isSafeInteger(paidCents)) return false;
     const transaction = this.sqlite.transaction(() => {
+      const order = this.sqlite.prepare("SELECT id, user_id, amount, status, trade_no FROM payment_orders WHERE id=?").get(orderId) as
+        { id: string; user_id: string; amount: number; status: string; trade_no: string | null } | undefined;
+      if (!order || paidCents !== Math.round(Number(order.amount) * 100)) return false;
+      if (order.status === "paid") return order.trade_no === tradeNo;
+      if (order.status !== "pending") return false;
+
+      const existingTrade = this.sqlite.prepare("SELECT id FROM payment_orders WHERE trade_no=? AND id<>? LIMIT 1")
+        .get(tradeNo, order.id) as { id: string } | undefined;
+      if (existingTrade) return false;
+
       const user = this.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(order.user_id) as { balance: number } | undefined;
       if (!user) return false;
       const updated = this.sqlite.prepare("UPDATE payment_orders SET status='paid', paid_at=?, trade_no=? WHERE id=? AND status='pending'")
-        .run(isoNow(), String(fields.trade_no || "").slice(0, 128), order.id);
+        .run(isoNow(), tradeNo, order.id);
       if (updated.changes) {
         this.sqlite.prepare("UPDATE platform_users SET balance=round(balance+?, 8) WHERE id=?").run(order.amount, order.user_id);
         const balance = this.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(order.user_id) as { balance: number };

@@ -587,6 +587,15 @@ test("Alipay settings validate RSA keys and official signed callback fields cred
     assert.equal(topups.length, 1, "duplicate Alipay notifications must not duplicate balance ledger entries");
     assert.deepEqual([topups[0].type, topups[0].amount, topups[0].balanceAfter, topups[0].referenceId],
       ["topup", 10, 10, order.orderId]);
+    const reusedTradeOrder = platform.createOrder(userId, 10, "https://api.example.test/console?payment=return");
+    assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001",
+      seller_id: "2088000000000000", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: reusedTradeOrder.orderId,
+      total_amount: "10.00", trade_status: "TRADE_SUCCESS", trade_no: "2026092400000001" })), false,
+    "a signed Alipay trade number cannot credit a second internal order");
+    assert.equal((database.sqlite.prepare("SELECT status FROM payment_orders WHERE id=?").get(reusedTradeOrder.orderId) as { status: string }).status,
+      "pending", "reusing a paid trade number leaves the second order pending");
+    assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id=?").get(userId) as { balance: number }).balance, 10,
+      "reusing a paid trade number cannot credit the account twice");
     const precisionOrder = platform.createOrder(userId, 10, "https://api.example.test/console?payment=return");
     assert.equal(platform.processAlipayNotification(signNotification({ app_id: "2026000000000001",
       seller_id: "2088000000000000", sign_type: "RSA2", notify_type: "trade_status_sync", out_trade_no: precisionOrder.orderId,
