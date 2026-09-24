@@ -293,6 +293,12 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
       payload: { amount: 2, userId: "user-beta" } });
     assert.equal(spoofedOrder.statusCode, 200);
     assert.equal(database.prepare("SELECT user_id FROM payment_orders WHERE id=?").get(spoofedOrder.json().orderId)?.user_id, "user-alpha");
+    const injectedHostOrder = await app.inject({ method: "POST", url: "/api/user/orders",
+      headers: { cookie: alphaCookie, host: "attacker.example.test" }, payload: { amount: 2 } });
+    assert.equal(injectedHostOrder.statusCode, 200);
+    const checkout = new URL(injectedHostOrder.json().paymentUrl);
+    assert.equal(checkout.searchParams.get("notify_url"), "https://api.example.test/api/payments/alipay/notify");
+    assert.equal(checkout.searchParams.get("return_url"), "https://api.example.test/console?payment=return");
     const unauthenticated = await app.inject({ method: "GET", url: "/api/user/dashboard" });
     assert.equal(unauthenticated.statusCode, 401);
     const personalMode = await app.inject({ method: "PUT", url: "/api/admin/settings", headers: { cookie: adminCookie }, payload: { mode: "personal" } });
@@ -310,7 +316,7 @@ test("provider email codes are single-use and lock after five failed attempts", 
   try {
     const settings = database.sqlite.prepare("INSERT INTO platform_settings(key, value) VALUES(?, ?)");
     for (const [key, value] of Object.entries({
-      mode: "provider", mail_host: "smtp.example.test", mail_port: "465", mail_user: "mailer",
+      mode: "provider", public_url: "https://api.example.test", mail_host: "smtp.example.test", mail_port: "465", mail_user: "mailer",
       mail_from: "support@example.test", mail_password: "encrypted-placeholder", alipay_app_id: "app",
       alipay_seller_id: "seller", alipay_private_key: "private", alipay_public_key: "public",
     })) settings.run(key, value);
@@ -364,12 +370,20 @@ test("Alipay settings validate RSA keys and signed payments credit an order once
     const platform = new PlatformService(database.sqlite, directory,
       new WebSocketTunnel({ authenticate: async () => "ok" }), "https://api.example.test");
     assert.throws(() => platform.saveAdminSettings({
-      mode: "provider", mailHost: "smtp.example.test", mailPort: 465, mailUser: "mail-user",
+      mode: "provider", publicUrl: "http://api.example.test", mailHost: "smtp.example.test", mailPort: 465,
+      mailUser: "mail-user", mailFrom: "billing@example.test", mailPassword: "mail-pass",
+      alipayAppId: "2026000000000001", alipaySellerId: "2088000000000000",
+      alipayPrivateKey: appPrivateKey, alipayPublicKey,
+    }), /HTTPS 公网地址/);
+    assert.equal(platform.getPublicConfig().mode, "personal", "an insecure or incomplete provider setup must not appear enabled");
+    database.sqlite.prepare("DELETE FROM platform_settings WHERE key='alipay_seller_id'").run();
+    assert.throws(() => platform.saveAdminSettings({
+      mode: "provider", publicUrl: "https://api.example.test", mailHost: "smtp.example.test", mailPort: 465, mailUser: "mail-user",
       mailFrom: "billing@example.test", mailPassword: "mail-pass", alipayAppId: "2026000000000001",
       alipayPrivateKey: appPrivateKey, alipayPublicKey,
     }), /支付宝/);
     const settings = platform.saveAdminSettings({
-      mode: "provider", mailHost: "smtp.example.test", mailPort: 465, mailUser: "mail-user",
+      mode: "provider", publicUrl: "https://api.example.test", mailHost: "smtp.example.test", mailPort: 465, mailUser: "mail-user",
       mailFrom: "billing@example.test", mailPassword: "mail-pass", alipayAppId: "2026000000000001",
       alipaySellerId: "2088000000000000", alipayPrivateKey: appPrivateKey, alipayPublicKey,
     });
@@ -417,7 +431,7 @@ test("provider usage reservations serialize balance holds and settle on actual t
   try {
     const setting = database.sqlite.prepare("INSERT INTO platform_settings(key,value) VALUES(?,?)");
     for (const [name, value] of [
-      ["mode", "provider"], ["mail_host", "smtp.example.test"], ["mail_port", "465"], ["mail_user", "mail-user"],
+      ["mode", "provider"], ["public_url", "https://api.example.test"], ["mail_host", "smtp.example.test"], ["mail_port", "465"], ["mail_user", "mail-user"],
       ["mail_from", "billing@example.test"], ["mail_password", "configured"], ["alipay_app_id", "app"],
       ["alipay_seller_id", "seller"], ["alipay_private_key", "configured"], ["alipay_public_key", "configured"],
     ]) setting.run(name, value);

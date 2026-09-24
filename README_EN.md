@@ -72,7 +72,7 @@ flowchart LR
 - **Public Status Page**: the cloud backend's landing page shows online nodes, concurrency capacity/utilization, throughput and per-model concurrency — public aggregates only
 - **Admin and Routing**: `/admin` configures nodes, public model aliases, upstream model names, required `llama-server --api-key` credentials, route weights, unified API keys, usage and orders. Node keys are encrypted on the server and sent only to their node over the tunnel
 - **Personal Mode**: no end-user registration; admins issue unified API keys, and `/dashboard` shows aggregate status without login. Callers may also access a node directly with its desktop-managed key
-- **Service-Provider Mode**: requires configured SMTP email plus Alipay app ID, seller ID, RSA2 private key and Alipay public key. Users register/sign in with email codes, manage their own API keys, usage and orders, and top up at `/console`. Billing uses input/output token prices; cached tokens have no separate price
+- **Service-Provider Mode**: requires an HTTPS public base URL, configured SMTP email, Alipay app ID, seller ID, RSA2 private key and Alipay public key. Payment return and notification URLs always use the configured base URL. Users register/sign in with email codes, manage their own API keys, usage and orders, and top up at `/console`. Billing uses input/output token prices; cached tokens have no separate price
 - **Separate API Key Roles**: the node key protects the local `llama-server` HTTP service. The gateway key identifies external callers for limits and metering. Gateway keys are shown once; only their hashes are stored
 - **Chinese CLI**: Wizard-driven command-line setup for the cloud backend
 - **Real-Time Status**: Engine start/loading/ready/error states and cloud connection status tracked live
@@ -245,7 +245,7 @@ Unified gateway call: gateway API key -> backend auth/limits/metering -> public 
 The node key protects the node's HTTP service and is managed separately from caller gateway keys. Node keys are encrypted with a local server secret in the database; gateway keys are stored as hashes. Use HTTPS/WSS in production and protect the server data directory and secret file.
 ```
 
-Admin console: `/admin`; public personal-mode dashboard: `/dashboard`; provider user console: `/console`. Configure SMTP and Alipay credentials in the admin console before enabling provider mode.
+Admin console: `/admin`; public personal-mode dashboard: `/dashboard`; provider user console: `/console`. Configure the HTTPS public base URL, SMTP and Alipay credentials in the admin console before enabling provider mode.
 
 Provider requests use the selected node's `/apply-template` and `/tokenize` endpoints before inference to count text input tokens and atomically reserve input cost plus the output limit. Settlement deducts the node's reported usage and releases the unused balance. When `max_tokens` is omitted, the output limit is reduced to what the balance can cover, up to 4,096 tokens per choice; explicit limits are capped at 65,536 total output tokens. Prebilling currently accepts text-only chat messages and rejects multimodal messages before inference. Nodes need a llama-server version that supports both endpoints.
 

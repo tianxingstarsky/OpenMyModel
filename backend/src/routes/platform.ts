@@ -219,7 +219,7 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   app.post("/api/user/orders", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;
     try {
-      const base = platform.getAdminSettings().publicUrl || `${request.protocol}://${request.hostname}`;
+      const base = platform.getAdminSettings().publicUrl;
       return platform.createOrder(userId, bodyOf(request).amount, `${base.replace(/\/$/, "")}/console?payment=return`);
     } catch (error) { return apiError(reply, error); }
   });

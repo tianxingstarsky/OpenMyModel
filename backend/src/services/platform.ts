@@ -21,6 +21,13 @@ const DEFAULT_PROVIDER_MAX_TOKENS = 4096;
 const MAX_PROVIDER_MAX_TOKENS = 65_536;
 const validEmail = (value: unknown): value is string => typeof value === "string" && value.length <= 254
   && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+const validPublicUrl = (value: string, httpsOnly = false): boolean => {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "https:" || (!httpsOnly && url.protocol === "http:"))
+      && !!url.hostname && !url.username && !url.password && !url.search && !url.hash && !/[?#]/.test(value);
+  } catch { return false; }
+};
 const safeNumber = (value: unknown, label: string, min = 0, max = 1_000_000_000): number => {
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed) || parsed < min || parsed > max) throw new Error(`${label} 超出有效范围`);
@@ -85,7 +92,7 @@ export class PlatformService {
   }
 
   getPublicConfig(): { mode: "personal" | "provider"; serviceName: string } {
-    return { mode: this.setting("mode") === "provider" ? "provider" : "personal", serviceName: this.setting("service_name") || "OpenMyModel" };
+    return { mode: this.isProviderMode() ? "provider" : "personal", serviceName: this.setting("service_name") || "OpenMyModel" };
   }
 
   getAdminSettings() {
@@ -109,9 +116,9 @@ export class PlatformService {
       if (input[field] !== undefined) this.setSetting(key, String(input[field]).trim().slice(0, 2048));
     }
     const publicUrl = this.setting("public_url");
-    if (publicUrl && !/^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?(?:\/[^\s]*)?$/i.test(publicUrl)) {
+    if (publicUrl && !validPublicUrl(publicUrl)) {
       this.setSetting("public_url", "");
-      throw new Error("公网地址必须以 http:// 或 https:// 开头，且不能包含账号密码");
+      throw new Error("公网地址必须是有效的 HTTP(S) 地址，且不能包含账号密码、查询参数或片段");
     }
     if (input.mailPort !== undefined) this.setSetting("mail_port", String(Math.round(safeNumber(input.mailPort, "SMTP 端口", 1, 65535))));
     const secretFields: Record<string, string> = {
@@ -132,7 +139,7 @@ export class PlatformService {
     const mode = this.setting("mode");
     if (mode === "provider" && !this.providerReady()) {
       this.setSetting("mode", "personal");
-      throw new Error("启用服务商模式前，请完整配置邮箱 SMTP、支付宝应用 ID/商户 ID 和 RSA2 密钥");
+      throw new Error("启用服务商模式前，请配置 HTTPS 公网地址、邮箱 SMTP、支付宝应用 ID/商户 ID 和 RSA2 密钥");
     }
     return this.getAdminSettings();
   }
@@ -140,7 +147,7 @@ export class PlatformService {
   private providerReady(): boolean {
     return !!(this.setting("mail_host") && this.setting("mail_port") && this.setting("mail_user") && this.setting("mail_from")
       && this.setting("mail_password") && this.setting("alipay_app_id") && this.setting("alipay_seller_id") && this.setting("alipay_private_key")
-      && this.setting("alipay_public_key"));
+      && this.setting("alipay_public_key") && validPublicUrl(this.setting("public_url") || this.publicUrl, true));
   }
 
   isProviderMode(): boolean { return this.setting("mode") === "provider" && this.providerReady(); }
