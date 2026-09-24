@@ -1,5 +1,21 @@
 # 验证记录
 
+## 第六阶段：Token 速率统计与账户隔离（分支 `feat/llama-b10909-native-bridge`，2026-09-25）
+
+### 通过的检查
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm --prefix backend run build` | TypeScript 编译通过 |
+| `npm --prefix backend test` | 44 项通过；验证管理员全站 Token/分统计、公开/服务商面板展示、用户与单 Key 最近一分钟统计，以及双账户数值隔离 |
+| `git diff --check` | 无空白错误 |
+
+### 覆盖边界
+
+- Token 速率按最近 60 秒已结算请求的 usage 汇总；仍在生成中的请求会在结算后计入。
+
+---
+
 ## 第五阶段：节点管理界面与凭据响应过滤（分支 `feat/llama-b10909-native-bridge`，2026-09-25）
 
 ### 通过的检查

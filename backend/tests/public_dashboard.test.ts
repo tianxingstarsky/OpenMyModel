@@ -11,7 +11,7 @@ test("public dashboard escapes caller-controlled model names before inserting HT
 
   const maliciousModel = '<img src=x onerror="alert(1)">';
   const data = {
-    requests: 1, input: 1, output: 1, requestsPerMinute: 1, onlineNodes: 1, totalNodes: 1,
+    requests: 1, input: 1, output: 1, requestsPerMinute: 1, tokensPerMinute: 2, onlineNodes: 1, totalNodes: 1,
     hourly: [], models: [{ model: maliciousModel, requests: 1 }],
     tunnel: { models: [{ model: maliciousModel, nodes: 1, readyNodes: 1, activeRequests: 0, totalRequests: 1 }] },
   };
@@ -46,15 +46,29 @@ test("public dashboard escapes caller-controlled model names before inserting HT
   const escaped = '&lt;img src=x onerror="alert(1)"&gt;';
   assert.ok(elements.get("models")?.innerHTML.includes(escaped));
   assert.ok(elements.get("nodes")?.innerHTML.includes(escaped));
+  assert.ok(elements.get("stats")?.innerHTML.includes("2 已结算 Token/分"));
   assert.equal(elements.get("models")?.innerHTML.includes(maliciousModel), false);
   assert.equal(elements.get("nodes")?.innerHTML.includes(maliciousModel), false);
 });
 
-test("admin panel inline scripts remain syntactically valid", () => {
-  const html = readFileSync(join(__dirname, "../public/admin.html"), "utf8");
-  const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map(match => match[1]);
-  assert.ok(scripts.length > 0, "admin panel scripts exist");
-  for (const script of scripts) assert.doesNotThrow(() => new Function(script));
+test("admin and provider dashboards expose recent request and settled-token rates", () => {
+  const admin = readFileSync(join(__dirname, "../public/admin.html"), "utf8");
+  const dashboard = readFileSync(join(__dirname, "../public/dashboard.html"), "utf8");
+  const consolePage = readFileSync(join(__dirname, "../public/console.html"), "utf8");
+  assert.match(admin, /d\.tokensPerMinute/);
+  assert.match(admin, /k\.tokensLastMinute/);
+  assert.match(dashboard, /d\.tokensPerMinute/);
+  assert.match(consolePage, /data\.tokensPerMinute/);
+  assert.match(consolePage, /k\.tokensLastMinute/);
+});
+
+test("admin, provider and public dashboard inline scripts remain syntactically valid", () => {
+  for (const file of ["admin.html", "console.html", "dashboard.html"]) {
+    const html = readFileSync(join(__dirname, "../public", file), "utf8");
+    const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map(match => match[1]);
+    assert.ok(scripts.length > 0, `${file} scripts exist`);
+    for (const script of scripts) assert.doesNotThrow(() => new Function(script), `${file} script syntax`);
+  }
 });
 
 test("admin node page distinguishes protected node keys from caller keys and supports filtering", () => {
@@ -90,7 +104,7 @@ test("admin node summary and combined search/status filters use current node sta
     document: { querySelectorAll: () => [] },
   };
   runInNewContext(`${renderers}; renderNodeStats(); renderNodes()`, context);
-  assert.match(element("#nodeStats").innerHTML, /可调度节点[\s\S]*?metric-value">1</);
+  assert.match(element("#nodeStats").innerHTML, /在线就绪节点[\s\S]*?metric-value">1</);
   assert.equal(element("#nodeResultCount").textContent, "3 个节点");
   assert.match(element("#nodesTable").innerHTML, /node-02/);
 

@@ -410,8 +410,15 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.deepEqual(dashboard.json().keys.map((key: Message) => key.name), ["alpha-private"]);
     assert.deepEqual(dashboard.json().usage.map((row: Message) => row.model), ["alpha-model"]);
     assert.equal(dashboard.json().requestsPerMinute, 1);
+    assert.equal(dashboard.json().tokensPerMinute, 7);
+    assert.equal(dashboard.json().keys[0].tokensLastMinute, 7);
     assert.equal(dashboard.body.includes("beta@example.test"), false);
     assert.equal(dashboard.body.includes("beta-private"), false);
+
+    const betaDashboard = await app.inject({ method: "GET", url: "/api/user/dashboard", headers: { cookie: betaCookie } });
+    assert.equal(betaDashboard.json().tokensPerMinute, 70);
+    assert.equal(betaDashboard.json().keys[0].tokensLastMinute, 70,
+      "per-key token rates must exclude other provider accounts");
 
     const keys = await get("/api/user/keys");
     assert.deepEqual(keys.json().map((key: Message) => key.name), ["alpha-private"]);
@@ -429,6 +436,8 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.equal(adminUsage.headers["cache-control"], "private, no-store",
       "administrator responses containing account data must not be cached");
     assert.deepEqual(adminUsage.json().map((row: Message) => [row.model, row.user_email]), [["alpha-model", "alpha@example.test"]]);
+    const adminOverview = await app.inject({ method: "GET", url: "/api/admin/overview", headers: { cookie: adminCookie } });
+    assert.equal(adminOverview.json().tokensPerMinute, 77, "administrator token throughput should aggregate both accounts");
     const adminInvalidLimit = await app.inject({ method: "GET", url: "/api/admin/usage?limit=not-a-number", headers: { cookie: adminCookie } });
     assert.equal(adminInvalidLimit.statusCode, 200);
     const userAdminUsage = await app.inject({ method: "GET", url: "/api/admin/usage?userId=user-beta", headers: { cookie: alphaCookie } });

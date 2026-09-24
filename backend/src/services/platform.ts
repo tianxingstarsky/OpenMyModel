@@ -691,6 +691,11 @@ export class PlatformService {
       ? this.sqlite.prepare("SELECT * FROM gateway_keys WHERE owner_user_id=? ORDER BY created_at DESC").all(ownerUserId)
       : this.sqlite.prepare(`SELECT k.*, u.email AS owner_email FROM gateway_keys k
         LEFT JOIN platform_users u ON u.id=k.owner_user_id ORDER BY k.created_at DESC`).all();
+    const minuteAgo = new Date(Date.now() - 60_000).toISOString();
+    const requestRates = new Map((this.sqlite.prepare(`SELECT key_id, COUNT(*) AS count FROM gateway_request_events
+      WHERE created_at >= ? GROUP BY key_id`).all(minuteAgo) as Array<{ key_id: string; count: number }>).map(row => [row.key_id, row.count]));
+    const tokenRates = new Map((this.sqlite.prepare(`SELECT api_key_id, COALESCE(SUM(total_tokens),0) AS count FROM usage_logs
+      WHERE timestamp >= ? GROUP BY api_key_id`).all(minuteAgo) as Array<{ api_key_id: string; count: number }>).map(row => [row.api_key_id, row.count]));
     return (rows as Array<Record<string, any>>).map(row => {
       const modelFilter = this.parseStoredModelFilter(row.model_filter);
       return { id: row.id, name: row.name, prefix: row.prefix,
@@ -698,8 +703,7 @@ export class PlatformService {
         modelFilter: modelFilter ?? [], modelFilterValid: modelFilter !== null,
         ...(ownerUserId === undefined ? { ownerEmail: row.owner_email ?? null } : {}),
         totalTokens: row.total_tokens, totalRequests: row.total_requests, createdAt: row.created_at, lastUsedAt: row.last_used_at,
-        requestsLastMinute: (this.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_request_events WHERE key_id=? AND created_at >= ?")
-          .get(row.id, new Date(Date.now() - 60_000).toISOString()) as { count: number }).count };
+        requestsLastMinute: requestRates.get(row.id) ?? 0, tokensLastMinute: tokenRates.get(row.id) ?? 0 };
     });
   }
 
@@ -784,7 +788,10 @@ export class PlatformService {
       .all(new Date(Date.now() - 24 * 60 * 60_000).toISOString());
     const rate = this.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_request_events WHERE created_at >= ?")
       .get(new Date(Date.now() - 60_000).toISOString()) as { count: number };
-    return { ...aggregate, requestsPerMinute: rate.count, onlineNodes: online.length, totalNodes: this.tunnel.getOnlineNodes().length,
+    const tokensPerMinute = this.sqlite.prepare("SELECT COALESCE(SUM(total_tokens),0) AS count FROM usage_logs WHERE timestamp >= ?")
+      .get(new Date(Date.now() - 60_000).toISOString()) as { count: number };
+    return { ...aggregate, requestsPerMinute: rate.count, tokensPerMinute: tokensPerMinute.count,
+      onlineNodes: online.length, totalNodes: this.tunnel.getOnlineNodes().length,
       models, hourly: hours, tunnel: this.tunnel.statusSnapshot() };
   }
 
@@ -795,6 +802,7 @@ export class PlatformService {
       input: overview.input,
       output: overview.output,
       requestsPerMinute: overview.requestsPerMinute,
+      tokensPerMinute: overview.tokensPerMinute,
       onlineNodes: overview.onlineNodes,
       totalNodes: overview.totalNodes,
       models: overview.models.map((model: any) => ({ model: model.model, requests: model.requests, tokens: model.tokens })),
@@ -832,8 +840,12 @@ export class PlatformService {
       .get(userId, new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString());
     const frequency = this.sqlite.prepare(`SELECT COUNT(*) AS count FROM gateway_request_events e JOIN gateway_keys k ON k.id=e.key_id
       WHERE k.owner_user_id=? AND e.created_at>=?`).get(userId, new Date(Date.now() - 60_000).toISOString()) as { count: number };
+    const tokenRate = this.sqlite.prepare(`SELECT COALESCE(SUM(l.total_tokens),0) AS count FROM usage_logs l
+      JOIN gateway_keys k ON k.id=l.api_key_id WHERE k.owner_user_id=? AND l.timestamp>=?`)
+      .get(userId, new Date(Date.now() - 60_000).toISOString()) as { count: number };
     return { user: { email: user.email, balance: user.balance, createdAt: user.created_at }, stats,
-      requestsPerMinute: frequency.count, keys: this.listKeys(userId), usage: this.usageRows(userId, 30), models: this.listPublicModels() };
+      requestsPerMinute: frequency.count, tokensPerMinute: tokenRate.count,
+      keys: this.listKeys(userId), usage: this.usageRows(userId, 30), models: this.listPublicModels() };
   }
 
   listPublicModels() {
