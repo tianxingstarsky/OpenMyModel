@@ -334,6 +334,7 @@ export class PlatformService {
   createGatewayKey(nameInput: unknown, ownerUserId: string | null = null, tokenLimitInput: unknown = 0, rpmInput: unknown = 0) {
     const name = typeof nameInput === "string" ? nameInput.trim().slice(0, 80) : "";
     if (!name) throw new Error("密钥名称不能为空");
+    if (this.isProviderMode() && ownerUserId === null) throw new Error("服务商模式下 API Key 必须关联用户账户");
     const tokenLimit = Math.floor(safeNumber(tokenLimitInput, "Token 限额", 0, 1_000_000_000_000));
     const rpmLimit = Math.floor(safeNumber(rpmInput, "每分钟请求上限", 0, 100_000));
     const id = uuidv4();
@@ -353,6 +354,9 @@ export class PlatformService {
 
   checkGatewayKey(key: GatewayKey): void {
     if (key.token_limit > 0 && key.total_tokens >= key.token_limit) throw new RelayError("API Key token limit exceeded", 429);
+    const providerMode = this.isProviderMode();
+    if (providerMode && !key.owner_user_id) throw new RelayError("API Key is not associated with a provider account", 403);
+    if (!providerMode && key.owner_user_id) throw new RelayError("User API Keys are only available in service-provider mode", 403);
     if (key.owner_user_id) {
       const user = this.sqlite.prepare("SELECT balance, is_active FROM platform_users WHERE id=?").get(key.owner_user_id) as
         { balance: number; is_active: number } | undefined;
@@ -391,9 +395,11 @@ export class PlatformService {
   listKeys(ownerUserId?: string) {
     const rows = ownerUserId
       ? this.sqlite.prepare("SELECT * FROM gateway_keys WHERE owner_user_id=? ORDER BY created_at DESC").all(ownerUserId)
-      : this.sqlite.prepare("SELECT * FROM gateway_keys ORDER BY created_at DESC").all();
+      : this.sqlite.prepare(`SELECT k.*, u.email AS owner_email FROM gateway_keys k
+        LEFT JOIN platform_users u ON u.id=k.owner_user_id ORDER BY k.created_at DESC`).all();
     return (rows as Array<Record<string, any>>).map(row => ({ id: row.id, name: row.name, prefix: row.prefix,
       ownerUserId: row.owner_user_id, active: row.is_active === 1, tokenLimit: row.token_limit, rpmLimit: row.rpm_limit,
+      ...(ownerUserId === undefined ? { ownerEmail: row.owner_email ?? null } : {}),
       totalTokens: row.total_tokens, totalRequests: row.total_requests, createdAt: row.created_at, lastUsedAt: row.last_used_at,
       requestsLastMinute: (this.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_request_events WHERE key_id=? AND created_at >= ?")
         .get(row.id, new Date(Date.now() - 60_000).toISOString()) as { count: number }).count }));
@@ -444,13 +450,22 @@ export class PlatformService {
   }
 
   usageRows(ownerUserId?: string, limit = 100) {
-    const bounded = Math.max(1, Math.min(Math.floor(limit), 500));
+    const bounded = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 500)) : 100;
     const rows = ownerUserId
       ? this.sqlite.prepare(`SELECT l.*, k.name AS key_name FROM usage_logs l JOIN gateway_keys k ON k.id=l.api_key_id
         WHERE k.owner_user_id=? ORDER BY l.timestamp DESC LIMIT ?`).all(ownerUserId, bounded)
       : this.sqlite.prepare(`SELECT l.*, k.name AS key_name FROM usage_logs l LEFT JOIN gateway_keys k ON k.id=l.api_key_id
         ORDER BY l.timestamp DESC LIMIT ?`).all(bounded);
     return rows;
+  }
+
+  adminUsageRows(ownerUserId?: string, limit = 200) {
+    const bounded = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 500)) : 200;
+    return this.sqlite.prepare(`SELECT l.*, k.name AS key_name, u.email AS user_email
+      FROM usage_logs l LEFT JOIN gateway_keys k ON k.id=l.api_key_id
+      LEFT JOIN platform_users u ON u.id=k.owner_user_id
+      WHERE (? IS NULL OR k.owner_user_id=?) ORDER BY l.timestamp DESC LIMIT ?`)
+      .all(ownerUserId ?? null, ownerUserId ?? null, bounded);
   }
 
   userDashboard(userId: string) {

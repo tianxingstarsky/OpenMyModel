@@ -174,6 +174,10 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
   const { app, directory } = await fixture(t);
   const adminLogin = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
   const adminCookie = String(adminLogin.headers["set-cookie"]).split(";", 1)[0];
+  const personalKeyResponse = await app.inject({ method: "POST", url: "/api/admin/keys", headers: { cookie: adminCookie },
+    payload: { name: "personal-global-key" } });
+  assert.equal(personalKeyResponse.statusCode, 200);
+  const personalKey = personalKeyResponse.json().key;
   const appKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const alipayKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const configured = await app.inject({ method: "PUT", url: "/api/admin/settings", headers: { cookie: adminCookie }, payload: {
@@ -184,6 +188,11 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     alipayPublicKey: alipayKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
   } });
   assert.equal(configured.statusCode, 200, configured.body);
+  const blockedPersonalKey = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${personalKey}` } });
+  assert.equal(blockedPersonalKey.statusCode, 403);
+  const orphanProviderKey = await app.inject({ method: "POST", url: "/api/admin/keys", headers: { cookie: adminCookie },
+    payload: { name: "unowned-provider-key" } });
+  assert.equal(orphanProviderKey.statusCode, 400);
 
   const database = new Database(join(directory, "openmymodel.db"));
   try {
@@ -201,6 +210,10 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.equal(betaKeyResponse.statusCode, 200);
     const alphaKey = alphaKeyResponse.json();
     const betaKey = betaKeyResponse.json();
+    assert.equal("ownerEmail" in alphaKey, false, "a user's key response must not include another account's owner details");
+    const adminKeys = await app.inject({ method: "GET", url: "/api/admin/keys", headers: { cookie: adminCookie } });
+    assert.equal(adminKeys.json().find((key: Message) => key.id === alphaKey.id).ownerEmail, "alpha@example.test");
+    assert.equal(adminKeys.json().find((key: Message) => key.id === betaKey.id).ownerEmail, "beta@example.test");
 
     const timestamp = new Date().toISOString();
     const addUsage = database.prepare(`INSERT INTO usage_logs(api_key_id,model,endpoint,prompt_tokens,completion_tokens,total_tokens,
@@ -231,8 +244,19 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     const usage = await get("/api/user/usage?limit=100&userId=user-beta");
     assert.deepEqual(usage.json().map((row: Message) => row.model), ["alpha-model"]);
     assert.equal(usage.body.includes("beta-model"), false);
+    const invalidLimit = await get("/api/user/usage?limit=not-a-number");
+    assert.equal(invalidLimit.statusCode, 200);
+    assert.deepEqual(invalidLimit.json().map((row: Message) => row.model), ["alpha-model"]);
     const orders = await get("/api/user/orders?userId=user-beta");
     assert.deepEqual(orders.json().map((order: Message) => order.id), ["ORDER-ALPHA"]);
+
+    const adminUsage = await app.inject({ method: "GET", url: "/api/admin/usage?limit=100&userId=user-alpha", headers: { cookie: adminCookie } });
+    assert.equal(adminUsage.statusCode, 200);
+    assert.deepEqual(adminUsage.json().map((row: Message) => [row.model, row.user_email]), [["alpha-model", "alpha@example.test"]]);
+    const adminInvalidLimit = await app.inject({ method: "GET", url: "/api/admin/usage?limit=not-a-number", headers: { cookie: adminCookie } });
+    assert.equal(adminInvalidLimit.statusCode, 200);
+    const userAdminUsage = await app.inject({ method: "GET", url: "/api/admin/usage?userId=user-beta", headers: { cookie: alphaCookie } });
+    assert.equal(userAdminUsage.statusCode, 401);
 
     const foreignDelete = await app.inject({ method: "DELETE", url: `/api/user/keys/${betaKey.id}`, headers: { cookie: alphaCookie } });
     assert.equal(foreignDelete.statusCode, 200);
@@ -250,6 +274,10 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.equal(database.prepare("SELECT user_id FROM payment_orders WHERE id=?").get(spoofedOrder.json().orderId)?.user_id, "user-alpha");
     const unauthenticated = await app.inject({ method: "GET", url: "/api/user/dashboard" });
     assert.equal(unauthenticated.statusCode, 401);
+    const personalMode = await app.inject({ method: "PUT", url: "/api/admin/settings", headers: { cookie: adminCookie }, payload: { mode: "personal" } });
+    assert.equal(personalMode.statusCode, 200);
+    const blockedProviderKey = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${alphaKey.key}` } });
+    assert.equal(blockedProviderKey.statusCode, 403);
   } finally {
     database.close();
   }
@@ -752,6 +780,7 @@ test("requests beyond slot capacity surface as queued; loading nodes contribute 
   });
   const flights = Array.from({ length: 5 }, () => post({ model: "queued-model", messages: [] }));
   await until(() => tunnel.statusSnapshot().totals.activeRequests === 5);
+  await until(() => pendingRelays.length === 5);
   let snapshot = tunnel.statusSnapshot();
   assert.equal(snapshot.totals.capacitySlots, 2);
   assert.equal(snapshot.totals.queuedRequests, 3, "5 in flight vs 2 slots -> 3 queued in the engine");

@@ -120,7 +120,8 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   });
   app.get("/api/admin/usage", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
-    return platform.usageRows(undefined, Number((request.query as any)?.limit || 100));
+    const query = request.query as { limit?: string; userId?: string };
+    return platform.adminUsageRows(query.userId || undefined, Number(query.limit || 200));
   });
   app.get("/api/admin/users", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
