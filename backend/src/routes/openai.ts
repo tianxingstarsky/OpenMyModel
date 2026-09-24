@@ -283,6 +283,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     let outputPrice = 0;
     let targetKeyId = `direct-${createHash("sha256").update(rawKey).digest("hex").slice(0, 40)}`;
     let usageReservationId: string | undefined;
+    let tokenReservationId: string | undefined;
     let reservedPromptTokens = 0;
     let upstreamHeadersReceived = false;
     let upstreamStatus = 200;
@@ -293,7 +294,8 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     const settledCompletionTokens = async (): Promise<number> => {
       if (!capture) return 0;
       const texts = capture.completionTexts();
-      if (!usageReservationId || (capture.completionReported && (capture.completion > 0 || texts.length === 0))) {
+      if ((!usageReservationId && !tokenReservationId)
+        || (capture.completionReported && (capture.completion > 0 || texts.length === 0))) {
         return capture.completion;
       }
       if (!node || !upstreamApiKey) return capture.completion;
@@ -324,16 +326,30 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
         publicModel = route.publicName;
         targetKeyId = managedKey.id;
         relayBody = { ...body, model: route.upstreamModel };
-        if (platform.isProviderMode()) {
+        if (platform.isProviderMode() || managedKey.token_limit > 0) {
           const budget = requestCompletionBudget(body);
           reservedPromptTokens = await managedPromptTokenCount(tunnel, node, relayBody, upstreamApiKey, controller.signal);
-          const reservation = platform.reserveProviderUsage(targetKeyId, reservedPromptTokens, budget.requestedMaxTokens,
-            budget.completionCount, inputPrice, outputPrice);
-          usageReservationId = reservation.id;
-          relayBody = { ...relayBody, max_tokens: reservation.maxTokens, n: budget.completionCount };
-          delete relayBody.max_completion_tokens;
-          delete relayBody.n_predict;
-          delete relayBody.n_cmpl;
+          let maxTokens = budget.requestedMaxTokens;
+          if (platform.isProviderMode()) {
+            const reservation = platform.reserveProviderUsage(targetKeyId, reservedPromptTokens, budget.requestedMaxTokens,
+              budget.completionCount, inputPrice, outputPrice);
+            usageReservationId = reservation.id;
+            tokenReservationId = reservation.tokenReservationId;
+            maxTokens = reservation.maxTokens;
+          } else {
+            const reservation = platform.reserveGatewayTokenUsage(targetKeyId, reservedPromptTokens, budget.requestedMaxTokens,
+              budget.completionCount);
+            if (reservation.id) {
+              tokenReservationId = reservation.id;
+              maxTokens = reservation.maxTokens;
+            }
+          }
+          if (maxTokens !== undefined || platform.isProviderMode()) {
+            relayBody = { ...relayBody, ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }), n: budget.completionCount };
+            delete relayBody.max_completion_tokens;
+            delete relayBody.n_predict;
+            delete relayBody.n_cmpl;
+          }
         }
       } else {
         node = await tunnel.findNode(rawKey, body.model as string | undefined, controller.signal);
@@ -344,7 +360,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
           ? body.stream_options as Record<string, unknown> : {};
         relayBody = { ...relayBody, stream_options: { ...streamOptions, include_usage: true } };
       }
-      capture = new UsageCapture(!!usageReservationId);
+      capture = new UsageCapture(!!usageReservationId || !!tokenReservationId);
       await tunnel.relayHttp(node, { path: request.url, body: JSON.stringify(relayBody), upstreamApiKey }, {
         signal: controller.signal,
         onHeaders: (statusCode, headers) => {
@@ -373,19 +389,21 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
       try {
         platform.recordUsage(targetKeyId, publicModel, "/v1/chat/completions",
           upstreamStatus < 400 ? (usage.prompt || reservedPromptTokens) : 0, upstreamStatus < 400 ? completionTokens : 0,
-          request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId);
+          request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId, tokenReservationId);
         usageReservationId = undefined;
+        tokenReservationId = undefined;
       } catch (error) { request.log.error({ err: error }, "Usage could not be recorded"); }
       if (!reply.raw.destroyed) reply.raw.end();
     } catch (error) {
-      if (usageReservationId && upstreamHeadersReceived && upstreamStatus < 400) {
+      if ((usageReservationId || tokenReservationId) && upstreamHeadersReceived && upstreamStatus < 400) {
         const partialUsage = capture?.finish(body.stream === true);
         const completionTokens = await settledCompletionTokens();
         try {
           platform.recordUsage(targetKeyId, publicModel, "/v1/chat/completions",
             partialUsage?.prompt || reservedPromptTokens, completionTokens,
-            request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId);
+            request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId, tokenReservationId);
           usageReservationId = undefined;
+          tokenReservationId = undefined;
         } catch (recordError) { request.log.error({ err: recordError }, "Partial usage could not be recorded"); }
       }
       if (reply.raw.destroyed || controller.signal.aborted) return;
@@ -406,6 +424,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
       } });
     } finally {
       if (usageReservationId) platform.releaseProviderUsage(usageReservationId);
+      if (tokenReservationId) platform.releaseGatewayTokenUsage(tokenReservationId);
       request.raw.off("aborted", disconnect);
       reply.raw.off("close", disconnect);
       reply.raw.off("error", disconnect);

@@ -157,6 +157,14 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
       expires_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS gateway_token_reservations (
+      id TEXT PRIMARY KEY,
+      key_id TEXT NOT NULL,
+      reserved_tokens INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS platform_users (
       id TEXT PRIMARY KEY,
       email TEXT NOT NULL UNIQUE,
@@ -214,6 +222,7 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
     CREATE INDEX IF NOT EXISTS idx_gateway_keys_owner ON gateway_keys(owner_user_id, is_active);
     CREATE INDEX IF NOT EXISTS idx_gateway_events_key_time ON gateway_request_events(key_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_provider_reservations_user_expiry ON provider_usage_reservations(user_id, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_gateway_token_reservations_key_expiry ON gateway_token_reservations(key_id, expires_at);
     CREATE INDEX IF NOT EXISTS idx_platform_sessions_expiry ON platform_sessions(expires_at);
     CREATE INDEX IF NOT EXISTS idx_email_codes_lookup ON email_codes(email, purpose, created_at);
     CREATE INDEX IF NOT EXISTS idx_email_codes_created ON email_codes(created_at);

@@ -532,6 +532,51 @@ test("provider usage reservations serialize balance holds and settle on actual t
     assert.equal((database.sqlite.prepare("SELECT balance FROM platform_users WHERE id='other-user'").get() as any).balance, 0.00001);
     platform.releaseProviderUsage(otherReservation.id);
     assert.equal((database.sqlite.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count, 0);
+
+    database.sqlite.prepare("INSERT INTO platform_users(id,email,balance,created_at) VALUES(?,?,?,?)")
+      .run("quota-user", "quota@example.test", 1, new Date().toISOString());
+    const quotaKey = platform.findGatewayKey(platform.createUserKey("quota-user", "token cap", 8, 0).key)!;
+    const quota = platform.reserveProviderUsage(quotaKey.id, 5, undefined, 1, 1, 1);
+    assert.equal(quota.maxTokens, 3, "provider output is capped by the key token limit");
+    assert.ok(quota.tokenReservationId);
+    assert.equal((database.sqlite.prepare("SELECT reserved_tokens FROM gateway_token_reservations WHERE id=?")
+      .get(quota.tokenReservationId) as { reserved_tokens: number }).reserved_tokens, 8);
+    assert.throws(() => platform.reserveProviderUsage(quotaKey.id, 1, 1, 1, 1, 1),
+      (error: any) => error.statusCode === 429, "provider key reservations also include in-flight token usage");
+    platform.recordUsage(quotaKey.id, "quota-model", "/v1/chat/completions", 5, 2, "127.0.0.1", "test", 1, 1,
+      quota.id, quota.tokenReservationId);
+    assert.equal((database.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_token_reservations").get() as any).count, 0);
+  } finally {
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("gateway token limits reserve concurrent prompt and output budgets atomically", () => {
+  const directory = mkdtempSync(join(tmpdir(), "openmymodel-token-reservation-test-"));
+  const database = createDatabase(directory);
+  try {
+    const platform = new PlatformService(database.sqlite, directory, new WebSocketTunnel({ authenticate: async () => "ok" }));
+    const created = platform.createGatewayKey("limited gateway key", null, 100, 0);
+    const key = platform.findGatewayKey(created.key)!;
+
+    const first = platform.reserveGatewayTokenUsage(key.id, 20, 50, 1);
+    const second = platform.reserveGatewayTokenUsage(key.id, 20, 50, 1);
+    assert.equal(first.maxTokens, 50);
+    assert.equal(second.maxTokens, 10, "the second request is capped by the tokens left after the first reservation");
+    assert.equal((database.sqlite.prepare("SELECT SUM(reserved_tokens) AS total FROM gateway_token_reservations")
+      .get() as { total: number }).total, 100);
+    assert.throws(() => platform.reserveGatewayTokenUsage(key.id, 1, 1, 1),
+      (error: any) => error.statusCode === 429, "parallel requests cannot reserve beyond a key's cumulative token limit");
+
+    platform.recordUsage(key.id, "limited-model", "/v1/chat/completions", 20, 40, "127.0.0.1", "test",
+      0, 0, undefined, first.id);
+    platform.recordUsage(key.id, "limited-model", "/v1/chat/completions", 20, 10, "127.0.0.1", "test",
+      0, 0, undefined, second.id);
+    assert.equal((database.sqlite.prepare("SELECT total_tokens FROM gateway_keys WHERE id=?").get(key.id) as { total_tokens: number }).total_tokens, 90);
+    assert.equal((database.sqlite.prepare("SELECT COUNT(*) AS count FROM gateway_token_reservations").get() as { count: number }).count, 0);
+    assert.throws(() => platform.reserveGatewayTokenUsage(key.id, 11, 1, 1),
+      (error: any) => error.statusCode === 429, "settled usage is included in later quota checks");
   } finally {
     database.close();
     rmSync(directory, { recursive: true, force: true });
@@ -1007,6 +1052,18 @@ test("managed gateway routes with the configured llama-server key and meters usa
   let relayed = false;
   await node({ modelName: "internal-model" }, (msg, send) => {
     if (msg.type !== "http_relay") return;
+    if (msg.path === "/apply-template") {
+      send(headers(msg.requestId, 200, { "content-type": "application/json" }));
+      send({ type: "http_chunk", requestId: msg.requestId, data: JSON.stringify({ prompt: "formatted prompt" }) });
+      send({ type: "http_done", requestId: msg.requestId });
+      return;
+    }
+    if (msg.path === "/tokenize") {
+      send(headers(msg.requestId, 200, { "content-type": "application/json" }));
+      send({ type: "http_chunk", requestId: msg.requestId, data: JSON.stringify({ tokens: [1, 2, 3] }) });
+      send({ type: "http_done", requestId: msg.requestId });
+      return;
+    }
     relayed = true;
     assert.equal(msg.upstreamApiKey, nodeKey);
     const requestBody = JSON.parse(msg.body);

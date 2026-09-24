@@ -422,7 +422,7 @@ export class PlatformService {
   }
 
   reserveProviderUsage(keyId: string, promptTokens: number, requestedMaxTokens: number | undefined, completionCount: number,
-    inputPrice: number, outputPrice: number): { id: string; maxTokens: number; reservedCost: number } {
+    inputPrice: number, outputPrice: number): { id: string; maxTokens: number; reservedCost: number; tokenReservationId?: string } {
     if (!Number.isSafeInteger(promptTokens) || promptTokens < 0 || !Number.isInteger(completionCount)
       || completionCount < 1 || completionCount > 8) {
       throw new RelayError("Could not determine a safe token budget for this request", 400);
@@ -436,13 +436,14 @@ export class PlatformService {
     }
 
     const id = uuidv4();
+    const tokenReservationId = uuidv4();
     const now = Date.now();
     const createdAt = new Date(now).toISOString();
     const expiresAt = new Date(now + 15 * 60_000).toISOString();
     const reserve = this.sqlite.transaction(() => {
       if (!this.isProviderMode()) throw new RelayError("Service-provider mode is disabled", 403);
-      const key = this.sqlite.prepare("SELECT owner_user_id FROM gateway_keys WHERE id=? AND is_active=1")
-        .get(keyId) as { owner_user_id: string | null } | undefined;
+      const key = this.sqlite.prepare("SELECT owner_user_id, token_limit, total_tokens FROM gateway_keys WHERE id=? AND is_active=1")
+        .get(keyId) as { owner_user_id: string | null; token_limit: number; total_tokens: number } | undefined;
       if (!key?.owner_user_id) throw new RelayError("API Key is not associated with a provider account", 403);
       const user = this.sqlite.prepare("SELECT balance, is_active FROM platform_users WHERE id=?")
         .get(key.owner_user_id) as { balance: number; is_active: number } | undefined;
@@ -455,12 +456,26 @@ export class PlatformService {
       const promptCost = (promptTokens * inputPrice) / 1_000_000;
       if (promptCost > available + 1e-12) throw new RelayError("Insufficient balance for this prompt", 402);
 
+      let remainingKeyTokens: number | undefined;
+      if (key.token_limit > 0) {
+        this.sqlite.prepare("DELETE FROM gateway_token_reservations WHERE expires_at <= ?").run(createdAt);
+        const heldTokens = this.sqlite.prepare(`SELECT COALESCE(SUM(reserved_tokens), 0) AS amount
+          FROM gateway_token_reservations WHERE key_id=? AND expires_at > ?`).get(keyId, createdAt) as { amount: number };
+        remainingKeyTokens = Math.max(0, key.token_limit - key.total_tokens - heldTokens.amount);
+        if (promptTokens > remainingKeyTokens) throw new RelayError("API Key token limit exceeded", 429);
+      }
+
       let maxTokens = requestedMaxTokens;
       if (maxTokens === undefined) {
         const affordable = outputPrice > 0
           ? Math.floor(((available - promptCost) * 1_000_000) / (outputPrice * completionCount))
           : DEFAULT_PROVIDER_MAX_TOKENS;
         maxTokens = Math.min(DEFAULT_PROVIDER_MAX_TOKENS, Math.max(0, affordable));
+      }
+      if (remainingKeyTokens !== undefined) {
+        const quotaMaxTokens = Math.floor((remainingKeyTokens - promptTokens) / completionCount);
+        if (quotaMaxTokens <= 0 && requestedMaxTokens !== 0) throw new RelayError("API Key token limit exceeded", 429);
+        maxTokens = Math.min(maxTokens, quotaMaxTokens);
       }
       if (maxTokens * completionCount > MAX_PROVIDER_MAX_TOKENS) {
         throw new RelayError(`The total output limit cannot exceed ${MAX_PROVIDER_MAX_TOKENS} tokens`, 400);
@@ -475,13 +490,58 @@ export class PlatformService {
       this.sqlite.prepare(`INSERT INTO provider_usage_reservations(id, key_id, user_id, reserved_cost, created_at, expires_at)
         VALUES(?, ?, ?, ?, ?, ?)`)
         .run(id, keyId, key.owner_user_id, reservedCost, createdAt, expiresAt);
-      return { id, maxTokens, reservedCost };
+      if (remainingKeyTokens !== undefined) {
+        this.sqlite.prepare(`INSERT INTO gateway_token_reservations(id, key_id, reserved_tokens, created_at, expires_at)
+          VALUES(?, ?, ?, ?, ?)`)
+          .run(tokenReservationId, keyId, promptTokens + maxTokens * completionCount, createdAt, expiresAt);
+      }
+      return { id, maxTokens, reservedCost, ...(remainingKeyTokens === undefined ? {} : { tokenReservationId }) };
+    });
+    return reserve.immediate();
+  }
+
+  reserveGatewayTokenUsage(keyId: string, promptTokens: number, requestedMaxTokens: number | undefined,
+    completionCount: number): { id: string; maxTokens: number } {
+    if (!Number.isSafeInteger(promptTokens) || promptTokens < 0 || !Number.isInteger(completionCount)
+      || completionCount < 1 || completionCount > 8) {
+      throw new RelayError("Could not determine a safe token budget for this request", 400);
+    }
+    if (requestedMaxTokens !== undefined && (!Number.isInteger(requestedMaxTokens)
+      || requestedMaxTokens < 0 || requestedMaxTokens > MAX_PROVIDER_MAX_TOKENS)) {
+      throw new RelayError(`max_tokens must be an integer from 0 to ${MAX_PROVIDER_MAX_TOKENS}`, 400);
+    }
+
+    const id = uuidv4();
+    const createdAt = isoNow();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+    const reserve = this.sqlite.transaction(() => {
+      const key = this.sqlite.prepare("SELECT token_limit, total_tokens FROM gateway_keys WHERE id=? AND is_active=1")
+        .get(keyId) as { token_limit: number; total_tokens: number } | undefined;
+      if (!key) throw new RelayError("API Key is no longer active", 401);
+      if (key.token_limit <= 0) return { id: "", maxTokens: requestedMaxTokens ?? MAX_PROVIDER_MAX_TOKENS };
+
+      this.sqlite.prepare("DELETE FROM gateway_token_reservations WHERE expires_at <= ?").run(createdAt);
+      const held = this.sqlite.prepare(`SELECT COALESCE(SUM(reserved_tokens), 0) AS amount
+        FROM gateway_token_reservations WHERE key_id=? AND expires_at > ?`).get(keyId, createdAt) as { amount: number };
+      const available = Math.max(0, key.token_limit - key.total_tokens - held.amount);
+      if (promptTokens > available) throw new RelayError("API Key token limit exceeded", 429);
+      const outputCapacity = Math.floor((available - promptTokens) / completionCount);
+      if (outputCapacity <= 0 && requestedMaxTokens !== 0) throw new RelayError("API Key token limit exceeded", 429);
+      const maxTokens = Math.min(requestedMaxTokens ?? MAX_PROVIDER_MAX_TOKENS, outputCapacity);
+      this.sqlite.prepare(`INSERT INTO gateway_token_reservations(id, key_id, reserved_tokens, created_at, expires_at)
+        VALUES(?, ?, ?, ?, ?)`)
+        .run(id, keyId, promptTokens + maxTokens * completionCount, createdAt, expiresAt);
+      return { id, maxTokens };
     });
     return reserve.immediate();
   }
 
   releaseProviderUsage(id: string): void {
     this.sqlite.prepare("DELETE FROM provider_usage_reservations WHERE id=?").run(id);
+  }
+
+  releaseGatewayTokenUsage(id: string): void {
+    if (id) this.sqlite.prepare("DELETE FROM gateway_token_reservations WHERE id=?").run(id);
   }
 
   createUserKey(userId: string, name: unknown, tokenLimit: unknown = 0, rpmLimit: unknown = 0) {
@@ -535,7 +595,7 @@ export class PlatformService {
   }
 
   recordUsage(keyId: string, publicModel: string, endpoint: string, prompt: number, completion: number, ip: string,
-    userAgent: string, inputPrice = 0, outputPrice = 0, reservationId?: string): void {
+    userAgent: string, inputPrice = 0, outputPrice = 0, reservationId?: string, tokenReservationId?: string): void {
     const input = Math.max(0, Math.floor(prompt));
     const output = Math.max(0, Math.floor(completion));
     const total = input + output;
@@ -560,6 +620,7 @@ export class PlatformService {
         }
       }
       if (reservationId) this.sqlite.prepare("DELETE FROM provider_usage_reservations WHERE id=? AND key_id=?").run(reservationId, keyId);
+      if (tokenReservationId) this.sqlite.prepare("DELETE FROM gateway_token_reservations WHERE id=? AND key_id=?").run(tokenReservationId, keyId);
     });
     transaction.immediate();
   }
