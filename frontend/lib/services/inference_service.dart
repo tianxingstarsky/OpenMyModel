@@ -399,13 +399,29 @@ class InferenceService {
 
   // ---------- 进程生命周期 ----------
 
+  static bool _isLoopbackHost(String host) {
+    var normalized = host.trim().toLowerCase();
+    if (normalized.startsWith('[') && normalized.endsWith(']')) {
+      normalized = normalized.substring(1, normalized.length - 1);
+    }
+    if (normalized == 'localhost' || normalized.endsWith('.localhost')) {
+      return true;
+    }
+    return InternetAddress.tryParse(normalized)?.isLoopback ?? false;
+  }
+
   /// 校验并生成 llama-server 命令行参数（暴露用于测试）。
   static List<String> buildArgs(ServerConfig config) {
     if (config.modelPath.isEmpty) {
       throw EngineException('未选择模型文件');
     }
-    if (config.host.isEmpty) {
+    final host = config.host.trim();
+    if (host.isEmpty) {
       throw EngineException('服务地址不能为空');
+    }
+    final apiKey = config.apiKey.trim();
+    if (!_isLoopbackHost(host) && apiKey.isEmpty) {
+      throw EngineException('监听地址允许其他设备访问时必须设置节点 API Key');
     }
     final port = config.port;
     if (port < 1 || port > 65535) {
@@ -469,10 +485,10 @@ class InferenceService {
         .last
         .replaceAll(RegExp(r'\.gguf$', caseSensitive: false), '');
     if (stem.isNotEmpty) args.addAll(['-a', stem]);
-    args.addAll(['--host', config.host]);
+    args.addAll(['--host', host]);
     args.addAll(['--port', '$port']);
-    if (config.apiKey.isNotEmpty) {
-      args.addAll(['--api-key', config.apiKey]);
+    if (apiKey.isNotEmpty) {
+      args.addAll(['--api-key', apiKey]);
     }
     if (config.extraArgs.trim().isNotEmpty) {
       final extra = splitCommandLine(config.extraArgs);
@@ -520,16 +536,20 @@ class InferenceService {
   }
 
   Map<String, String> _authHeaders(ServerConfig config) => {
-        if (config.apiKey.isNotEmpty) 'Authorization': 'Bearer ${config.apiKey}',
+        if (config.apiKey.trim().isNotEmpty)
+          'Authorization': 'Bearer ${config.apiKey.trim()}',
       };
 
   Future<void> start(ServerConfig config) async {
     if (_disposed) throw EngineException('推理服务已关闭');
+    final normalizedConfig = config.copy()
+      ..host = config.host.trim()
+      ..apiKey = config.apiKey.trim();
     while (_lifecycleLock != null) {
       await _lifecycleLock;
     }
     final existing = _runningConfig;
-    if (_runtime.isRunning && existing != null && _sameConfig(existing, config)) {
+    if (_runtime.isRunning && existing != null && _sameConfig(existing, normalizedConfig)) {
       return; // 幂等：相同配置重复启动无副作用。
     }
     if (_runtime.isRunning) {
@@ -542,7 +562,7 @@ class InferenceService {
     final completer = Completer<void>();
     _lifecycleLock = completer.future;
     try {
-      await _startLocked(config, engine);
+      await _startLocked(normalizedConfig, engine);
     } finally {
       _lifecycleLock = null;
       if (!completer.isCompleted) completer.complete();

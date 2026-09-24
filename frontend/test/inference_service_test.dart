@@ -194,6 +194,34 @@ void main() {
         throwsA(isA<EngineException>()),
       );
     });
+
+    test('非回环监听地址必须配置节点 API Key', () {
+      expect(
+        () => InferenceService.buildArgs(
+          ServerConfig(modelPath: 'm.gguf', host: '0.0.0.0'),
+        ),
+        throwsA(isA<EngineException>()),
+      );
+      expect(
+        () => InferenceService.buildArgs(
+          ServerConfig(modelPath: 'm.gguf', host: '192.168.1.20'),
+        ),
+        throwsA(isA<EngineException>()),
+      );
+
+      for (final host in ['localhost', '127.0.0.2', '::1', '[::1]']) {
+        expect(
+          InferenceService.buildArgs(ServerConfig(modelPath: 'm.gguf', host: host)),
+          containsAll(['--host', host]),
+          reason: '$host is a loopback listener and does not need a network key',
+        );
+      }
+
+      final protected = InferenceService.buildArgs(
+        ServerConfig(modelPath: 'm.gguf', host: '0.0.0.0', apiKey: ' node-secret '),
+      );
+      expect(protected, containsAll(['--host', '0.0.0.0', '--api-key', 'node-secret']));
+    });
   });
 
   test('启动状态机：starting → loading → ready，健康探测携带 API Key', () async {
