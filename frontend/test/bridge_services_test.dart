@@ -26,8 +26,12 @@ void main() {
 
   test('Cloud URL handles HTTPS and existing websocket paths', () {
     expect(
-      normalizeCloudUri('host.test:3000').toString(),
-      'http://host.test:3000',
+      normalizeCloudUri('https://host.test:3000').toString(),
+      'https://host.test:3000',
+    );
+    expect(
+      normalizeCloudUri('localhost:3000').toString(),
+      'http://localhost:3000',
     );
     expect(
       cloudEndpoint(
@@ -38,6 +42,8 @@ void main() {
     );
     for (final url in [
       'ftp://host.test',
+      'host.test:3000',
+      'http://host.test:3000',
       'http://user:pass@host.test',
       'http://host.test?secret=yes',
       '',
