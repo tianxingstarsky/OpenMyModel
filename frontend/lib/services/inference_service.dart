@@ -227,6 +227,7 @@ class InferenceService {
   final Map<String, Future<String>> _probeCache = {};
   bool _autoSelectedEngine = false;
   ServerConfig? _runningConfig;
+  Directory? _apiKeyDirectory;
   bool _userStopping = false;
   Future<void>? _lifecycleLock;
   http.Client? _chatClient;
@@ -410,8 +411,55 @@ class InferenceService {
     return InternetAddress.tryParse(normalized)?.isLoopback ?? false;
   }
 
+  Future<String?> _writeApiKeyFile(String apiKey) async {
+    if (apiKey.isEmpty) return null;
+    Directory? directory;
+    try {
+      directory = await Directory.systemTemp.createTemp('openmymodel-node-key-');
+      if (Platform.isWindows) {
+        final identity = await Process.run('whoami', ['/user', '/fo', 'csv', '/nh'], runInShell: false);
+        final sid = RegExp(r'S-\d+(?:-\d+)+')
+            .firstMatch('${identity.stdout}\n${identity.stderr}')?.group(0);
+        if (identity.exitCode != 0 || sid == null) {
+          throw EngineException('无法安全限制节点 API Key 临时文件的访问权限');
+        }
+        final acl = await Process.run('icacls', [
+          directory.path, '/inheritance:r', '/grant:r', '*${sid}:(OI)(CI)F',
+        ], runInShell: false);
+        if (acl.exitCode != 0) {
+          throw EngineException('无法安全限制节点 API Key 临时文件的访问权限');
+        }
+      }
+      final file = File('${directory.path}${Platform.pathSeparator}api-key');
+      await file.writeAsString('$apiKey\n', flush: true);
+      _apiKeyDirectory = directory;
+      return file.path;
+    } catch (error) {
+      if (directory != null && await directory.exists()) {
+        try { await directory.delete(recursive: true); } catch (_) {}
+      }
+      if (error is EngineException) rethrow;
+      throw EngineException('无法安全创建节点 API Key 临时文件: $error');
+    }
+  }
+
+  Future<void> _deleteApiKeyFile() async {
+    final directory = _apiKeyDirectory;
+    if (directory == null) return;
+    for (var attempt = 0; attempt < 5; attempt++) {
+      try {
+        if (await directory.exists()) await directory.delete(recursive: true);
+        _apiKeyDirectory = null;
+        return;
+      } catch (_) {
+        if (attempt < 4) await Future<void>.delayed(Duration(milliseconds: 50 * (attempt + 1)));
+      }
+    }
+    throw EngineException('无法删除节点 API Key 临时文件；服务启动已中止以避免遗留密钥');
+  }
+
   /// 校验并生成 llama-server 命令行参数（暴露用于测试）。
-  static List<String> buildArgs(ServerConfig config) {
+  static List<String> buildArgs(ServerConfig config, {String? apiKeyFile}) {
     if (config.modelPath.isEmpty) {
       throw EngineException('未选择模型文件');
     }
@@ -488,7 +536,11 @@ class InferenceService {
     args.addAll(['--host', host]);
     args.addAll(['--port', '$port']);
     if (apiKey.isNotEmpty) {
-      args.addAll(['--api-key', apiKey]);
+      if (apiKeyFile == null) {
+        args.addAll(['--api-key', apiKey]);
+      } else {
+        args.addAll(['--api-key-file', apiKeyFile]);
+      }
     }
     if (config.extraArgs.trim().isNotEmpty) {
       final extra = splitCommandLine(config.extraArgs);
@@ -575,7 +627,9 @@ class InferenceService {
   }
 
   Future<void> _startLocked(ServerConfig config, EngineInfo engine) async {
-    final args = buildArgs(config);
+    buildArgs(config); // Validate before creating a secret file.
+    final apiKeyFile = await _writeApiKeyFile(config.apiKey.trim());
+    final args = buildArgs(config, apiKeyFile: apiKeyFile);
     _logs.clear();
     _userStopping = false;
     // 全新运行时快照，避免上一次运行的 props/exitCode 残留。
@@ -599,6 +653,7 @@ class InferenceService {
       unawaited(process.exitCode.then(_onProcessExit));
     } catch (e) {
       _runningConfig = null;
+      await _deleteApiKeyFile();
       _fail('启动 llama-server 失败: $e');
       throw EngineException(_runtime.lastError);
     }
@@ -606,15 +661,17 @@ class InferenceService {
     await Future<void>.delayed(const Duration(milliseconds: 150));
     if (!_runtime.isRunning) {
       final err = _runtime.lastError.isEmpty ? 'llama-server 启动后立即退出' : _runtime.lastError;
+      await _deleteApiKeyFile();
       _fail(err);
       throw EngineException(err);
     }
     _emit(_runtime.copyWith(state: EngineState.loading));
     try {
-      await _waitUntilHealthy(config);
+      await _waitUntilHealthy(config, onListening: apiKeyFile == null ? null : _deleteApiKeyFile);
     } on EngineException {
       _runningConfig = null;
       await _killOwnedProcess();
+      await _deleteApiKeyFile();
       rethrow;
     }
     final props = await _fetchPropsSafe(config);
@@ -647,7 +704,7 @@ class InferenceService {
     }
   }
 
-  Future<void> _waitUntilHealthy(ServerConfig config) async {
+  Future<void> _waitUntilHealthy(ServerConfig config, {Future<void> Function()? onListening}) async {
     final deadline = DateTime.now().add(healthTimeout);
     final health = _baseUri(config).replace(path: '/health');
     Object? lastError;
@@ -662,6 +719,7 @@ class InferenceService {
         final response = await client
             .get(health, headers: _authHeaders(config))
             .timeout(const Duration(seconds: 3));
+        await onListening?.call();
         if (response.statusCode == 200) {
           return;
         }
@@ -671,6 +729,8 @@ class InferenceService {
           throw EngineException(
               'health 检查返回 HTTP ${response.statusCode}: ${response.body}');
         }
+      } on EngineException {
+        rethrow;
       } on TimeoutException {
         lastError = 'health 检查超时';
       } catch (e) {

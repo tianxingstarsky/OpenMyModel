@@ -35,6 +35,7 @@ class _HealthServer {
   HttpServer? _server;
   int healthHits = 0;
   int loadingHits = 0;
+  String? lastHealthAuthorization;
   Map<String, String>? lastChatHeaders;
   String? lastChatBody;
 
@@ -44,6 +45,7 @@ class _HealthServer {
     server.listen((request) async {
       if (request.uri.path == '/health') {
         healthHits++;
+        lastHealthAuthorization = request.headers.value('authorization') ?? '';
         if (loadingFirst && healthHits == 1) {
           loadingHits++;
           request.response.statusCode = 503;
@@ -96,9 +98,13 @@ final EngineInfo _engineOf = EngineInfo(
   backend: 'cpu',
 );
 
-InferenceService _serviceWith(_ScriptedProcess process, Uri base) {
+InferenceService _serviceWith(_ScriptedProcess process, Uri base,
+    {Future<void> Function(List<String>)? onStart}) {
   final service = InferenceService(
-    processFactory: (exe, args, {workingDirectory}) async => process,
+    processFactory: (exe, args, {workingDirectory}) async {
+      await onStart?.call(args);
+      return process;
+    },
     engineDirOverride: () => '',
     healthInterval: const Duration(milliseconds: 10),
   );
@@ -221,6 +227,12 @@ void main() {
         ServerConfig(modelPath: 'm.gguf', host: '0.0.0.0', apiKey: ' node-secret '),
       );
       expect(protected, containsAll(['--host', '0.0.0.0', '--api-key', 'node-secret']));
+      final protectedByFile = InferenceService.buildArgs(
+        ServerConfig(modelPath: 'm.gguf', host: '0.0.0.0', apiKey: 'node-secret'),
+        apiKeyFile: r'C:\private\api-key',
+      );
+      expect(protectedByFile, containsAll(['--api-key-file', r'C:\private\api-key']));
+      expect(protectedByFile, isNot(contains('node-secret')));
     });
   });
 
@@ -251,6 +263,36 @@ void main() {
       ServerConfig(modelPath: 'm.gguf', port: base.port, apiKey: 'sk-secret'),
     );
     expect(service.runtime.pid, pidBefore);
+  });
+
+  test('启动时通过受限临时文件传递节点 API Key，不放入进程参数', () async {
+    final process = _ScriptedProcess();
+    final health = _HealthServer();
+    final base = await health.start(loadingFirst: true);
+    addTearDown(health.close);
+    String? keyFilePath;
+    String? keyFileContents;
+    List<String>? startedArgs;
+    final service = _serviceWith(process, base, onStart: (args) async {
+      startedArgs = List<String>.from(args);
+      final fileFlag = args.indexOf('--api-key-file');
+      expect(fileFlag, greaterThanOrEqualTo(0));
+      keyFilePath = args[fileFlag + 1];
+      keyFileContents = await File(keyFilePath!).readAsString();
+    });
+    addTearDown(service.dispose);
+
+    await service.start(
+      ServerConfig(modelPath: 'm.gguf', port: base.port, apiKey: 'sk-node-secret'),
+    );
+    expect(startedArgs, isNotNull);
+    expect(startedArgs, isNot(contains('sk-node-secret')));
+    expect(startedArgs!.join(' '), isNot(contains('sk-node-secret')));
+    expect(keyFileContents, 'sk-node-secret\n');
+    expect(health.loadingHits, 1);
+    expect(health.lastHealthAuthorization, 'Bearer sk-node-secret');
+    expect(await File(keyFilePath!).exists(), isFalse,
+        reason: 'the secret file is removed as soon as llama-server accepts HTTP requests');
   });
 
   test('日志脱敏 API Key，模型别名随启动写入命令行', () async {
