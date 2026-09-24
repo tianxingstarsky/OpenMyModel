@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { AdminAuthenticator } from "../services/auth";
-import { PlatformService } from "../services/platform";
+import { NodeKeyInUseError, PlatformService } from "../services/platform";
 
 const bodyOf = (request: FastifyRequest): Record<string, unknown> =>
   request.body && typeof request.body === "object" && !Array.isArray(request.body) ? request.body as Record<string, unknown> : {};
@@ -124,9 +124,13 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   });
   app.delete<{ Params: { nodeId: string } }>("/api/admin/nodes/:nodeId/api-key", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
-    return platform.clearNodeApiKey(request.params.nodeId)
-      ? { ok: true, keyConfigured: false }
-      : reply.status(404).send({ error: "Node not found" });
+    try {
+      return platform.clearNodeApiKey(request.params.nodeId)
+        ? { ok: true, keyConfigured: false }
+        : reply.status(404).send({ error: "Node not found" });
+    } catch (error) {
+      return apiError(reply, error, error instanceof NodeKeyInUseError ? 409 : 400);
+    }
   });
   app.get("/api/admin/models", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;

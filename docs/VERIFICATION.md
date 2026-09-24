@@ -1,18 +1,18 @@
 # 验证记录
 
-## 第三阶段：节点级 llama-server Key 与全栈回归（分支 `feat/llama-b10909-native-bridge`，提交 `6095629`）
+## 第三阶段：节点级 llama-server Key 与全栈回归（分支 `feat/llama-b10909-native-bridge`，2026-09-24）
 
 ### 通过的检查
 
 | 检查 | 结果 |
 | --- | --- |
 | `npm --prefix backend run build` | TypeScript 编译通过 |
-| `npm --prefix backend test` | 36 项通过；覆盖服务商账户隔离、支付宝回调、Token 结算、节点级 Key 加密/轮换和历史路由 Key 回退 |
+| `npm --prefix backend test` | 37 项通过；覆盖服务商账户隔离、支付宝回调、Token 结算、节点级 Key 加密/轮换、拒绝清除仍被启用路由依赖的 Key，以及无凭据路由不公开/不转发 |
 | `npm --prefix scripts test` | 13 项通过 |
 | `npm --prefix scripts run check:release` | 发布 Bridge 与源码一致 |
 | `flutter analyze` | No issues found |
 | `flutter test` | 30 项通过 |
-| 管理端 Playwright 冒烟 | 使用临时模拟 API 验证节点 Key 配置、清除和状态刷新；请求体正确，页面无脚本异常 |
+| 管理端 Playwright 冒烟 | 使用临时模拟 API 验证节点 Key 配置、拒绝清除仍被路由依赖的 Key、解除依赖后清除和状态刷新；请求体正确，页面无脚本异常 |
 | `git diff --check` | 无空白错误 |
 
 ### 覆盖边界

@@ -16,6 +16,13 @@ type ModelRoute = {
   upstream_key: string; node_api_key?: string | null; weight: number; enabled: number; input_price: number; output_price: number;
 };
 
+export class NodeKeyInUseError extends Error {
+  constructor(readonly enabledRouteCount: number) {
+    super(`此节点仍有 ${enabledRouteCount} 条启用路由依赖节点级 API Key，请先禁用或移除路由，或为路由保留独立兼容 Key`);
+    this.name = "NodeKeyInUseError";
+  }
+}
+
 const isoNow = () => new Date().toISOString();
 const DEFAULT_PROVIDER_MAX_TOKENS = 4096;
 const MAX_PROVIDER_MAX_TOKENS = 65_536;
@@ -342,7 +349,9 @@ export class PlatformService {
   publicModels(modelFilter: string[] = []): Array<{ id: string; object: string; owned_by: string }> {
     const available = new Set(this.tunnel.getOnlineNodes().filter(node => node.serverRunning).map(node => node.id));
     const rows = this.sqlite.prepare(`SELECT m.public_name, r.node_id FROM platform_models m JOIN model_routes r ON r.model_id=m.id
-      WHERE m.enabled=1 AND r.enabled=1`).all() as Array<{ public_name: string; node_id: string }>;
+      LEFT JOIN nodes n ON n.id=r.node_id
+      WHERE m.enabled=1 AND r.enabled=1 AND (COALESCE(n.upstream_api_key,'')<>'' OR r.upstream_key<>'')`)
+      .all() as Array<{ public_name: string; node_id: string }>;
     const names = new Set(rows.filter(row => available.has(row.node_id) &&
       (!modelFilter.length || modelFilter.includes(row.public_name))).map(row => row.public_name));
     return [...names].sort((a, b) => a.localeCompare(b)).map(name =>
@@ -355,7 +364,7 @@ export class PlatformService {
       WHERE m.public_name=? AND m.enabled=1 AND r.enabled=1 ORDER BY r.weight DESC, r.id ASC`)
       .all(modelName) as ModelRoute[];
     const online = new Set(this.tunnel.getOnlineNodes().filter(node => node.serverRunning).map(node => node.id));
-    let candidates = rows.filter(row => online.has(row.node_id));
+    let candidates = rows.filter(row => online.has(row.node_id) && !!(row.node_api_key || row.upstream_key));
     if (!candidates.length) throw new RelayError("Requested model is not available", 404);
     const routeWeight = (route: ModelRoute) => Number.isSafeInteger(route.weight)
       ? Math.max(1, Math.min(route.weight, 100)) : 1;
@@ -744,7 +753,7 @@ export class PlatformService {
   listPublicModels() {
     const live = new Set(this.tunnel.getOnlineNodes().filter(node => node.serverRunning).map(node => node.id));
     const models = this.adminModels();
-    return models.filter(model => model.enabled && model.routes.some(route => route.enabled && live.has(route.nodeId)))
+    return models.filter(model => model.enabled && model.routes.some(route => route.enabled && route.keyConfigured && live.has(route.nodeId)))
       .map(model => ({ id: model.publicName, remark: model.remark, inputPrice: model.inputPrice, outputPrice: model.outputPrice }));
   }
 
@@ -906,7 +915,15 @@ export class PlatformService {
   clearNodeApiKey(nodeIdInput: unknown): boolean {
     const nodeId = typeof nodeIdInput === "string" ? nodeIdInput.trim() : "";
     if (!nodeId || nodeId.length > 256) return false;
-    return this.sqlite.prepare("UPDATE nodes SET upstream_api_key=NULL WHERE id=?").run(nodeId).changes > 0;
+    const clear = this.sqlite.transaction(() => {
+      const node = this.sqlite.prepare("SELECT id FROM nodes WHERE id=?").get(nodeId);
+      if (!node) return false;
+      const dependent = this.sqlite.prepare(`SELECT COUNT(*) AS count FROM model_routes
+        WHERE node_id=? AND enabled=1 AND upstream_key=''`).get(nodeId) as { count: number };
+      if (dependent.count > 0) throw new NodeKeyInUseError(dependent.count);
+      return this.sqlite.prepare("UPDATE nodes SET upstream_api_key=NULL WHERE id=?").run(nodeId).changes > 0;
+    });
+    return clear.immediate();
   }
 }
 

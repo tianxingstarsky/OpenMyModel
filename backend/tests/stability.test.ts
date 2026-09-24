@@ -941,6 +941,34 @@ test("managed route rotation is independent for each public model", async t => {
     "malformed stored permissions never reach an upstream node");
 });
 
+test("enabled routes without an upstream credential are hidden and never dispatched", async t => {
+  const { app, node, post, directory } = await fixture(t);
+  let relayCount = 0;
+  await node({ nodeId: "missing-key-node" }, msg => { if (msg.type === "http_relay") relayCount++; });
+  const login = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
+  const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+  const headers = { cookie, "content-type": "application/json" };
+  const model = await app.inject({ method: "POST", url: "/api/admin/models", headers,
+    payload: { publicName: "credential-required", inputPrice: 0, outputPrice: 0 } });
+  assert.equal(model.statusCode, 200, model.body);
+  const route = await app.inject({ method: "POST", url: `/api/admin/models/${model.json().id}/routes`, headers,
+    payload: { nodeId: "missing-key-node", upstreamModel: "internal-model", upstreamKey: "temporary-key" } });
+  assert.equal(route.statusCode, 200, route.body);
+  const key = await app.inject({ method: "POST", url: "/api/admin/keys", headers, payload: { name: "credential check" } });
+  assert.equal(key.statusCode, 200, key.body);
+
+  const database = new Database(join(directory, "openmymodel.db"));
+  try {
+    database.prepare("UPDATE model_routes SET upstream_key='' WHERE id=?").run(route.json().routes[0].id);
+  } finally { database.close(); }
+  const models = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${key.json().key}` } });
+  assert.deepEqual(models.json().data, []);
+  const response = await post({ model: "credential-required", messages: [{ role: "user", content: "hello" }] }, key.json().key).response;
+  assert.equal(response.statusCode, 404);
+  await text(response);
+  assert.equal(relayCount, 0, "a credential-less route is rejected before contacting the node");
+});
+
 test("client disconnect before upstream headers cancels both stream modes", async t => {
   const { node, post, tunnel } = await fixture(t);
   const peer = await node({}, keyOwner);
@@ -1048,6 +1076,13 @@ test("admin node management keeps disconnected nodes visible with their last rep
   const offlineModels = await app.inject({ method: "GET", url: "/api/admin/models", headers: { cookie } });
   assert.deepEqual(offlineModels.json()[0].routes.map((entry: Message) => [entry.nodeName, entry.nodeModel, entry.nodeOnline]),
     [["Retained node", "last-model", false]]);
+  const blockedClear = await app.inject({ method: "DELETE", url: "/api/admin/nodes/retained-node/api-key", headers, payload: {} });
+  assert.equal(blockedClear.statusCode, 409);
+  assert.match(blockedClear.json().error, /1 条启用路由依赖节点级 API Key/);
+  const stillConfigured = await app.inject({ method: "GET", url: "/api/admin/nodes", headers: { cookie } });
+  assert.equal(stillConfigured.json()[0].keyConfigured, true, "a rejected key removal must preserve the active route credential");
+  const removeRoute = await app.inject({ method: "DELETE", url: `/api/admin/routes/${route.json().routes[0].id}`, headers: { cookie } });
+  assert.equal(removeRoute.statusCode, 200, removeRoute.body);
   const clearedNodeKey = await app.inject({ method: "DELETE", url: "/api/admin/nodes/retained-node/api-key", headers, payload: {} });
   assert.equal(clearedNodeKey.statusCode, 200, clearedNodeKey.body);
   assert.equal(clearedNodeKey.json().keyConfigured, false);
