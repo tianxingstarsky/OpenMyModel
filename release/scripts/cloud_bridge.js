@@ -10,6 +10,12 @@ function cloudUrl(value) {
       url.username || url.password || url.search || url.hash) {
     throw new Error("请输入不含账号、查询参数的 HTTP(S) 服务器地址");
   }
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const loopback = host === "localhost" || host.endsWith(".localhost") || host === "::1" ||
+    /^127(?:\.\d{1,3}){3}$/.test(host);
+  if (["http:", "ws:"].includes(url.protocol) && !loopback) {
+    throw new Error("远程节点必须通过 HTTPS/WSS 连接；明文连接只允许用于本机回环地址");
+  }
   url.protocol = ["https:", "wss:"].includes(url.protocol) ? "wss:" : "ws:";
   url.pathname = `${url.pathname.replace(/\/(?:ws\/node)?\/?$/, "")}/ws/node`;
   return url;

@@ -341,7 +341,7 @@ python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-<rev>
 python scripts/make_installer.py --payload artifacts/OpenMyModel-win-x64-<rev>   # 可选：生成安装包
 ```
 
-Docker 首次启动前将 `.env.example` 复制为 `.env` 并填写强密码，再运行 `docker compose up -d --build`。公网部署请在反向代理终止 TLS，并使用 `https://` 地址连接桌面端；仓库内 nginx 示例本身不提供证书。
+Docker 首次启动前将 `.env.example` 复制为 `.env` 并填写强密码，再运行 `docker compose up -d --build`。公网部署请在反向代理终止 TLS，并使用 `https://` 地址连接桌面端；节点桥接只允许本机回环地址使用明文连接，远程连接必须使用 TLS，以保护节点认证信息、llama-server API key 和推理数据。仓库内 nginx 示例本身不提供证书。
 
 ## 📝 许可证
 

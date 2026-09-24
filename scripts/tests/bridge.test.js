@@ -45,10 +45,13 @@ async function fixture(t, handler, options) {
   return { bridge, messages, events, socket, send };
 }
 
-test("cloud URL normalizes HTTP(S), WS paths and rejects credentials", () => {
-  assert.equal(cloudUrl("example.test:3000").href, "ws://example.test:3000/ws/node");
+test("cloud URL requires TLS for remote nodes and normalizes loopback HTTP(S) and WS paths", () => {
+  assert.equal(cloudUrl("127.0.0.1:3000").href, "ws://127.0.0.1:3000/ws/node");
+  assert.equal(cloudUrl("http://localhost:3000").href, "ws://localhost:3000/ws/node");
   assert.equal(cloudUrl("https://example.test/prefix/").href, "wss://example.test/prefix/ws/node");
   assert.equal(cloudUrl("wss://example.test/ws/node").href, "wss://example.test/ws/node");
+  assert.throws(() => cloudUrl("example.test:3000"), /HTTPS\/WSS/);
+  assert.throws(() => cloudUrl("ws://192.168.1.20:3000"), /HTTPS\/WSS/);
   for (const value of ["ftp://example.test", "https://a:b@example.test", "https://example.test/?x=1"]) {
     assert.throws(() => cloudUrl(value));
   }

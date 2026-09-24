@@ -283,7 +283,7 @@ python scripts/build_llama_windows.py --backends cpu,cuda   # bundled engine sou
 python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-<rev>
 ```
 
-For Docker, copy `.env.example` to `.env`, set a strong password, then run `docker compose up -d --build`. Public deployments require TLS at the reverse proxy and an `https://` desktop server URL; the bundled nginx example does not supply certificates.
+For Docker, copy `.env.example` to `.env`, set a strong password, then run `docker compose up -d --build`. Public deployments require TLS at the reverse proxy and an `https://` desktop server URL. Node bridges allow plaintext only for loopback addresses; remote connections require TLS to protect node authentication, llama-server API keys, and inference data. The bundled nginx example does not supply certificates.
 
 ## License
 
