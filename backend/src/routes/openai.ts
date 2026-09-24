@@ -9,7 +9,9 @@ const MAX_PROVIDER_OUTPUT_TOKENS = 65_536;
 export function relayHeaders(headers: Record<string, unknown>): OutgoingHttpHeaders {
   const blocked = new Set([
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding",
-    "upgrade", "content-length", "content-encoding", "set-cookie",
+    "upgrade", "content-length", "content-encoding", "set-cookie", "authorization", "www-authenticate",
+    "authentication-info", "api-key", "x-api-key", "x-auth-token", "x-access-token", "x-goog-api-key",
+    "x-llama-api-key", "x-node-api-key", "x-upstream-api-key",
   ]);
   for (const [name, value] of Object.entries(headers)) {
     if (name.toLowerCase() === "content-encoding" && value !== "identity") throw new RelayError("Unsupported upstream content encoding");

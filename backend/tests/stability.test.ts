@@ -1169,7 +1169,13 @@ test("admin authentication is bounded and malformed passwords fail safely", asyn
 });
 
 test("relay headers reject injection and remove transport/private headers", () => {
-  const safe = relayHeaders({ connection: "x-internal", "x-internal": "secret", "content-length": "123", "set-cookie": "secret", "access-control-allow-origin": "evil", "content-type": "text/plain" });
+  const safe = relayHeaders({
+    connection: "x-internal", "x-internal": "secret", "content-length": "123", "set-cookie": "secret",
+    "access-control-allow-origin": "evil", authorization: "Bearer node-secret", "www-authenticate": "Bearer node-secret",
+    "api-key": "node-secret", "x-api-key": "node-secret", "x-auth-token": "node-secret", "x-access-token": "node-secret",
+    "x-goog-api-key": "node-secret", "x-llama-api-key": "node-secret", "x-node-api-key": "node-secret",
+    "x-upstream-api-key": "node-secret", "content-type": "text/plain",
+  });
   assert.deepEqual(Object.keys(safe), ["content-type"]);
   assert.throws(() => relayHeaders({ "bad\nname": "value" }));
   assert.throws(() => relayHeaders({ "x-header": "value\r\nInjected: yes" }));

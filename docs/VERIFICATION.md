@@ -7,7 +7,7 @@
 | 检查 | 结果 |
 | --- | --- |
 | `npm --prefix backend run build` | TypeScript 编译通过 |
-| `npm --prefix backend test` | 41 项通过；服务商账户隔离测试覆盖 `private, no-store` 响应头；Key 状态、RPM 和模型白名单检查通过旧快照测试；账务回归覆盖长时间无上游数据块时续期，以及非流式 JSON 超过 4 MiB 后仍准确结算尾部 usage |
+| `npm --prefix backend test` | 41 项通过；服务商账户隔离测试覆盖 `private, no-store` 响应头；Key 状态、RPM 和模型白名单检查通过旧快照测试；账务回归覆盖长时间无上游数据块时续期，以及非流式 JSON 超过 4 MiB 后仍准确结算尾部 usage；中继响应会过滤认证凭据头，避免节点回显 Key |
 | `npm --prefix scripts test` | 13 项通过；本阶段未修改 Bridge 源码 |
 | `git diff --check` | 无空白错误 |
 
