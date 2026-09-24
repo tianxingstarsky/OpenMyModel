@@ -1,189 +1,128 @@
-# OpenMyModel
+<p align="center">
+  <img src="docs/assets/openmymodel-mark.png" alt="OpenMyModel logo" width="104">
+</p>
+<h1 align="center">OpenMyModel</h1>
+<p align="center"><strong>Run models locally. Serve them through your own OpenAI-compatible cloud gateway.</strong></p>
+<p align="center">Local inference · WebSocket tunnels · Multi-node routing · Usage metering</p>
+<p align="center"><a href="README.md">中文</a>　|　English</p>
 
-> [**中文**](README.md) | **English**
-
-![OpenMyModel](OpenMyModel.png)
-
-> **Bring your local GPU compute to the cloud -- accessible via standard OpenAI API.**
->
-> OpenMyModel seamlessly tunnels your locally running llama.cpp models to your own cloud server through WebSocket, exposing them as industry-standard OpenAI-compatible endpoints. Whether you are a solo developer with spare GPU cycles, a hobbyist who loves self-hosting, or an operator building private inference nodes for a small team -- OpenMyModel has everything you need. No public IP required, no complex ops: a single WebSocket tunnel turns your local model into a cloud API.
->
-> #### Why Self-Host?
-> Free online LLM platforms are everywhere, but nearly all serve aggressively quantized models -- a downgraded version of intelligence. I have tested this firsthand: **Qwen 3.5 9B at INT8** running on a consumer GPU consistently outperforms the so-called flagship free-tier online services on logic and mathematical reasoning tasks. Free APIs compress quality for cost at scale -- what you get is merely a shadow of the same model name. When you control precision and parameters yourself, every inference runs on real weights, and the difference exceeds expectations.
->
-> #### Beyond Solo Use: Share and Monetize
-> OpenMyModel supports personal node sharing and service-provider operations. Admins can configure model routes, node credentials and unified API keys. Provider mode adds email-code accounts, Alipay top-ups, balance deductions, and input/output token metering.
-
-**Tunnel local llama.cpp compute to the cloud via WebSocket, exposed as an OpenAI-compatible API.**
-
-> Your GPU, your model, your API service -- no public IP needed.
+<p align="center"><img src="docs/assets/dashboard-overview.png" alt="OpenMyModel service dashboard"></p>
+<p align="center"><sub>Dashboard captured in an isolated preview with two mock nodes and sample usage data.</sub></p>
 
 ---
+
+OpenMyModel connects desktop <code>llama-server</code> instances to your cloud server through authenticated WebSocket tunnels. Nodes need no public IP. Clients use one OpenAI-compatible endpoint and gateway key while the server routes each request to an eligible node.
+
+## Features
+
+- **Local GPU inference** — The desktop app manages the bundled llama.cpp engine, model settings, chat and node connection. Windows releases include CPU, CUDA and Vulkan engines.
+- **Protected nodes** — Each node has its own llama-server API key. The admin console stores it encrypted and supplies it to that node when routing requests.
+- **Unified gateway and model routing** — Issue caller-facing gateway keys, map public model names to upstream names, and configure weighted routes across nodes.
+- **OpenAI-compatible API** — <code>GET /v1/models</code> and <code>POST /v1/chat/completions</code>, including streaming SSE. Works with Open WebUI and OpenAI SDKs.
+- **Personal and provider modes** — Personal mode has no end-user registration. Provider mode adds email-code accounts, user-owned keys, usage and orders, Alipay top-ups and token billing.
+- **Usage and health** — Admin views summarize request volume, token usage and node health. The personal dashboard can show public aggregates without exposing node addresses, keys or conversation content.
+
+## Admin console
+
+<p align="center"><img src="docs/assets/admin-console-overview.png" alt="OpenMyModel admin console" width="100%"></p>
+<p align="center"><sub>Captured with a temporary local database. Usage and online nodes are sample data; no real user records or credentials are included.</sub></p>
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Local Machine
-        A[Flutter Desktop<br/>InferenceService owns the process] --> C[llama-server<br/>Bundled llama.cpp b10909<br/>Local GPU Inference]
-        A --> N[Node Bridge<br/>Local Key Validation]
-        N --> C
+    subgraph Local["Local nodes"]
+        UI["Flutter desktop app"] --> Engine["llama-server<br/>Local GPU inference"]
+        UI --> Bridge["Node Bridge<br/>Node authentication and HTTP tunnel"]
+        Bridge --> Engine
     end
-
-    subgraph Cloud Server
-        D[Cloud Backend<br/>Fastify + WebSocket] --> E[OpenAI-Compatible API<br/>Admin / Users]
+    subgraph Cloud["Your cloud server"]
+        Gateway["OpenMyModel gateway<br/>Auth · limits · metering · routing"]
+        Admin["Admin console<br/>Nodes · routes · pricing · users and orders"]
+        Gateway <--> Admin
     end
-
-    subgraph External Consumers
-        E --> F[Open WebUI]
-        E --> G[ChatGPT Clients]
-        E --> H[Any OpenAI SDK]
-    end
-
-    D <== WebSocket Tunnel ==> N
+    Clients["OpenAI SDK / Open WebUI / other clients"] -->|"Unified API key"| Gateway
+    Bridge <-->|"WSS tunnel"| Gateway
 ```
 
-### Components
+A node key protects the llama-server HTTP service on its machine. A gateway key identifies API callers for access control, rate limits and metering.
 
-| Component | Stack | Role |
-|-----------|-------|------|
-| **Flutter Desktop** | Flutter + Dart | UI / bundled llama-server process management (start, health check, stop) / API Key management (local-only, no cloud storage) / Chat connecting directly to the engine's OpenAI API |
-| **Bundled Engine** | llama.cpp b10909 (pinned Git submodule) | Official OpenAI-compatible HTTP API; CPU/CUDA backends built from source, Vulkan backend from the official prebuilt archive (all SHA-256 verified), backend auto-selected per GPU -- no Python or any runtime installation required |
-| **Node Bridge** | Node.js + ws | Desktop stdin/stdout control / local key validation / WebSocket HTTP tunnel |
-| **Cloud Backend** | TypeScript + Node.js | WebSocket server / encrypted node credentials and model routing / OpenAI-compatible gateway / admin console |
+| Component | Role |
+| --- | --- |
+| Flutter desktop app | Manages the inference process, GGUF models, settings, local API keys and cloud connection |
+| Node Bridge | Authenticated WebSocket tunnel between desktop and cloud; relays HTTP and SSE |
+| Cloud backend | Node.js 22, Fastify and SQLite; model routing, API gateway, admin console and user portal |
 
-> Historical note: earlier versions managed llama-server through a local Python HTTP
-> bridge. The desktop app now manages the engine process directly via Dart
-> (`InferenceService`) and requires no Python; the legacy bridge code has been
-> removed from the repository (see Git history for the old implementation).
+## Quick start
 
----
+### Download the desktop app
 
-## Key Features
+Download a Windows installer or archive from [GitHub Releases](https://github.com/tianxingstarsky/OpenMyModel/releases/latest). Windows 10 or later is supported. The inference engine is bundled; Python is not required.
 
-- **Bundled Inference Engine**: llama.cpp b10909 ships with the app (CPU/CUDA built from source + Vulkan official prebuilt, all SHA-256 verified), ready to run with no Python installation; the backend is auto-selected per hardware, so NVIDIA, AMD and Intel GPUs all get GPU acceleration
-- **Local GPU Inference**: full llama.cpp parameter surface (GPU layers auto/all, `--fit` VRAM adaptation, KV cache quantization, tri-state Flash Attention)
-- **WebSocket Tunnel**: No public IP needed -- home lab goes cloud; bounded exponential reconnect after drops, no auto-reconnect after a manual disconnect
-- **Local Key Storage**: Keys are persisted locally, not in the cloud database. Validation still passes through the cloud and tunnel; use HTTPS/WSS and protect local user data.
-- **OpenAI-Compatible API**: `/v1/chat/completions`, `/v1/models`, SSE streaming; `reasoning_content` from thinking models is displayed separately in the chat UI
-- **Multimodal Support**: mmproj vision projector, image understanding
-- **Built-in Chat**: Multi-image upload + text, streaming responses, stop-generation cuts the underlying connection
-- **Parameter Profiles**: Saved locally (compatible with profile files exported by older versions), switch with one click
-- **Public Status Page**: the cloud backend's landing page shows online nodes, concurrency capacity/utilization, throughput and per-model concurrency — public aggregates only
-- **Admin and Routing**: `/admin` configures nodes, public model aliases, upstream model names, one `llama-server --api-key` configured per node, route weights, unified API keys, usage and orders. Node keys are configured once per node, encrypted on the server, and sent only to their node over the tunnel; older route-level credentials remain a fallback
-- **Personal Mode**: no end-user registration; admins issue unified API keys, and `/dashboard` shows aggregate status without login. Callers may also access a node directly with its desktop-managed key
-- **Service-Provider Mode**: requires an HTTPS public base URL, configured SMTP email, Alipay app ID, seller ID, RSA2 private key and Alipay public key. Payment return and notification URLs always use the configured base URL. Users register/sign in with email codes, manage their own API keys, usage, orders and balance history, and top up at `/console`. Billing uses input/output token prices; cached tokens have no separate price
-- **Separate API Key Roles**: the node key protects the local `llama-server` HTTP service. The gateway key identifies external callers for limits and metering. Gateway keys are shown once; only their hashes are stored
-- **Chinese CLI**: Wizard-driven command-line setup for the cloud backend
-- **Real-Time Status**: Engine start/loading/ready/error states and cloud connection status tracked live
+### Run the desktop app from source
 
----
-
-## Quick Start
-
-### Prerequisites
-
-- **Desktop (release package)**: Windows 10+, no Python installation required; CPU/CUDA/Vulkan engines are bundled and the backend is auto-selected per GPU
-- **Building the desktop from source**: Flutter 3.x+, CMake 3.28+, Visual Studio 2022 C++ toolset (CUDA backend additionally needs the CUDA toolkit; Vulkan backend needs the Vulkan SDK)
-- **Node.js** 22+ (cloud backend and local cloud tunnel)
-- **GGUF model files** (e.g., Qwen 3.5 9B Q8) + optional mmproj
-
-### 1. Desktop (Windows)
+Requires Node.js 22+, stable Flutter with Dart 3.11+, CMake 3.28+, and the Visual Studio 2022 C++ toolchain.
 
 ```bash
-npm --prefix scripts ci            # cloud Node bridge dependency
+npm --prefix scripts ci
 cd frontend
 flutter pub get
 flutter run -d windows
 ```
 
-Build engines from source into `artifacts/engine/` (the packager collects them automatically):
+### Start the cloud backend
 
-```bash
-python scripts/build_llama_windows.py --backends cpu,cuda
-python scripts/fetch_official_engine.py --backend vulkan   # official prebuilt when no Vulkan SDK
-```
-
-### 2. Cloud Backend
+Install Node.js 22+ on your server or development machine, initialize an administrator password, then start the backend:
 
 ```bash
 cd backend
 npm ci
-npm run setup                      # Configure admin password before first launch
+npm run setup
 npm run dev
 ```
 
-### 3. CLI Management
+The default port is <code>3000</code>. You may set <code>ADMIN_PASSWORD</code> before startup instead. Connect the desktop app from **Cloud Connection** with the server address and administrator password. Public deployments should use HTTPS/WSS.
+
+## Modes and entry points
+
+| Mode | How it works |
+| --- | --- |
+| Personal | No end-user sign-up. Admins create gateway keys at <code>/admin</code>. <code>/dashboard</code> shows aggregate usage; <code>/</code> shows public node status. Desktop-managed node keys can also access their corresponding node directly. |
+| Service provider | Requires an HTTPS public base URL, SMTP and Alipay settings before activation. Users register and sign in with email codes, then manage their account, API keys, usage and orders, and top up from <code>/console</code>. |
+
+Provider mode requires an SMTP host, sender account and password, plus the Alipay app ID, seller ID, RSA2 app private key and Alipay public key. The mode stays unavailable until all required settings are present. Admins configure input and output prices per million tokens; cached tokens have no separate price. Provider prebilling currently accepts text chat messages, and nodes need llama-server <code>/apply-template</code> and <code>/tokenize</code> endpoints.
+
+## Use an OpenAI-compatible client
+
+Create a gateway key in the admin console and set the server URL with <code>/v1</code>. Replace <code>qwen</code> with a public model name configured by the admin:
 
 ```bash
-cd backend
-npm run setup
+curl https://api.example.com/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer sk-your-gateway-key" -d '{"model":"qwen","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
----
+For Open WebUI and compatible clients:
 
+- **API URL:** <code>https://api.example.com/v1</code>
+- **API key:** an <code>sk-</code> gateway key created by the admin
 
+## Deploy the backend
 
-## ☁️ Cloud Backend Deployment Guide (Baota Panel)
+### Docker Compose
 
-> Deploy the OpenMyModel backend on a cloud server using Baota Panel in three steps.
-
-### Prerequisites
-
-- Cloud server (1 core 2 GB min) + domain with DNS pointing to server IP
-- Baota Panel installed
-- Security group: ports 80/443 open
-- App Store installed: **Nginx**, **Node.js Version Manager**, **PM2 Manager**
-
----
-
-### Step 1: Build on Server
+Copy <code>.env.example</code> to <code>.env</code>, set a strong administrator password, then start from the repository root:
 
 ```bash
-ssh root@your-server
-cd /aiapi
-git clone https://github.com/tianxingstarsky/OpenMyModel.git backend
-cd backend/backend
-
-npm install
-npm run build
+docker compose up -d --build
 ```
 
-> ⚠️ `npm install` MUST run on the server (better-sqlite3 is a native C++ module).
-> If `NODE_MODULE_VERSION` error: `rm -rf node_modules && npm install`
+### Node.js with Nginx / Baota Panel
 
----
+1. Clone the repository on a Linux server. In <code>backend/</code>, run <code>npm ci && npm run build</code>.
+2. Run <code>backend/dist/index.js</code> with Node.js 22 on the default port <code>3000</code>. Configure a persistent data directory.
+3. Reverse proxy to <code>http://127.0.0.1:3000</code>. Enable WebSocket Upgrade, disable proxy buffering and install an HTTPS certificate for public domains.
+4. Run <code>npm run setup</code> before first launch. Preserve the data directory and server encryption key to retain node credentials and user data.
 
-### Step 2: Baota Node Project
-
-"Websites" -> "Node Projects" -> Add Project:
-
-| Setting | Value |
-|---------|-------|
-| Project Dir | `/aiapi/backend/backend` |
-| Startup File | `dist/index.js` |
-| Project Name | `openmymodel` |
-| Port | `3000` |
-
-**Critical**: Select **v22.x** in the Node version dropdown.
-
-Before the first launch, set `ADMIN_PASSWORD` in the process environment or run `npm run setup` in `backend/`. Passwords are never printed to logs.
-
-> Existing `data/config.json` is preserved. Changing the environment does not replace an existing password; use `npm run setup` to reset it without deleting the database.
-
----
-
-### Step 3: Reverse Proxy
-
-"Websites" -> "Reverse Proxy" tab -> Add:
-
-| Setting | Value |
-|---------|-------|
-| Domain | `api.your-domain.com` |
-| Target URL | `http://127.0.0.1:3000` |
-| Send Domain | `$host` |
-
-Then edit the site's Nginx config, ensure the `location /` block has:
+At minimum, the WebSocket proxy needs:
 
 ```nginx
 proxy_http_version 1.1;
@@ -193,85 +132,16 @@ proxy_read_timeout 600s;
 proxy_buffering off;
 ```
 
-And add before the `server` block:
+See [development, verification and release notes](docs/DEVELOPMENT.md) and the [verification record](docs/VERIFICATION.md) for setup and troubleshooting.
 
-```nginx
-map $http_upgrade $connection_upgrade {
-    default upgrade;
-    ''      close;
-}
-```
+## Security and data
 
----
+- Use HTTPS/WSS in production; do not connect remote nodes over plaintext HTTP/WebSocket.
+- Node keys are encrypted at rest on the server. Gateway keys are stored as hashes and shown only once when created.
+- Protect and back up the server database, encryption key file and data directory.
+- Public pages expose aggregate status only; they do not return node IDs, names, addresses or keys.
 
-### Verify
-
-Visit `http://your-domain/` — the OpenMyModel service status page should render (nodes online, concurrency, throughput).
-
----
-
-### Update
-
-```bash
-cd /aiapi/backend/backend
-git pull && npm install && npm run build
-```
-Then click "Restart" in Baota Node Projects.
-
----
-
-### Common Issues
-
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| Crashes on start | Source not compiled / wrong Node version | `npm run build`, select v22 |
-| `NODE_MODULE_VERSION` | node_modules from wrong platform | `rm -rf node_modules && npm install` |
-| WebSocket disconnects | Missing Upgrade header in Nginx | Add `proxy_set_header Upgrade $http_upgrade;` |
-| Domain unreachable | Wrong target IP in proxy | Must be `http://127.0.0.1:3000` not `172.0.0.1` |
-| API Key 401 | Key is disabled or its owning node is offline | Check the original key's node and enabled state; do not regenerate blindly |
-| First launch refused | No admin password configured | Set `ADMIN_PASSWORD` or run `npm run setup` |
-| Bridge protocol error | Desktop/cloud version mismatch | Update both cloud backend and desktop Node bridge |
-
-
----
-
-## Security Design
-
-```
-Personal-mode direct call: desktop API key or node `--api-key` -> that node's bridge validation -> llama-server
-Unified gateway call: gateway API key -> backend auth/limits/metering -> public model route
-  -> decrypt the selected node's API key (falling back to a legacy route-level key) -> tunnel relay -> node bridge calls llama-server with Bearer key
-
-The node key protects the node's HTTP service and is managed separately from caller gateway keys. The admin configures one key per node and all routes for that node share it; older route-level keys remain a fallback. Node keys are encrypted with a local server secret in the database; gateway keys are stored as hashes. Use HTTPS/WSS in production and protect the server data directory and secret file.
-```
-
-Admin console: `/admin`; public personal-mode dashboard: `/dashboard`; provider user console: `/console`. Configure the HTTPS public base URL, SMTP and Alipay credentials in the admin console before enabling provider mode.
-
-Provider requests use the selected node's `/apply-template` and `/tokenize` endpoints before inference to count text input tokens and atomically reserve input cost plus the output limit. Settlement prefers reported usage and releases the unused balance. If output usage is missing, the server tokenizes generated text on the same node, including text emitted before a client disconnect; if that node is unavailable, settlement can only use usage it reported. Users can set per-key requests-per-minute and lifetime token limits in `/console`. When `max_tokens` is omitted, the output limit is reduced to what the balance can cover, up to 4,096 tokens per choice; explicit limits are capped at 65,536 total output tokens. Prebilling currently accepts text-only chat messages and rejects multimodal messages before inference. Nodes need a llama-server version that supports both endpoints.
-
----
-
-## Usage Examples
-
-### Configure Open WebUI
-
-- **API URL**: `https://your-domain/v1`
-- **API Key**: An `sk-` prefixed key generated in the desktop app
-
-### curl Test
-
-```bash
-curl https://your-domain/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-your-key" \
-  -d '{"model":"qwen","messages":[{"role":"user","content":"Hello!"}]}'
-```
-
----
-
-## Development and releases
-
-See [development, testing and packaging notes](docs/DEVELOPMENT.md) for the relay protocol, bundled engine builds, troubleshooting, automated tests and traceable Windows packaging. Update the cloud backend and desktop Node bridge together; old bridges cannot report upstream HTTP status correctly.
+## Development checks
 
 ```bash
 npm --prefix scripts ci
@@ -280,21 +150,16 @@ npm --prefix scripts run check:release
 npm --prefix backend ci
 npm --prefix backend run build
 npm --prefix backend test
-cd frontend && flutter analyze && flutter test && flutter build windows --release
-python scripts/build_llama_windows.py --backends cpu,cuda   # bundled engine source build
-python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-<rev>
+cd frontend
+flutter analyze
+flutter test
 ```
 
-For Docker, copy `.env.example` to `.env`, set a strong password, then run `docker compose up -d --build`. Public deployments require TLS at the reverse proxy and an `https://` desktop server URL. Node bridges allow plaintext only for loopback addresses; remote connections require TLS to protect node authentication, llama-server API keys, and inference data. The bundled nginx example does not supply certificates.
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for Windows engine builds, packaging and troubleshooting.
 
-## License
+## Acknowledgments and license
 
-MIT License -- see [LICENSE](LICENSE)
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) provides the GGUF inference engine.
+- [Open WebUI](https://github.com/open-webui/open-webui) is an example OpenAI-compatible client.
 
----
-
-## Acknowledgments
-
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) -- GGUF inference engine
-- [Open WebUI](https://github.com/open-webui/open-webui) -- Chat frontend reference
-- [unsloth](https://github.com/unslothai/unsloth) -- Parameter design inspiration
+This project is licensed under the [MIT License](LICENSE).

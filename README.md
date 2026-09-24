@@ -1,244 +1,128 @@
-# OpenMyModel
+<p align="center">
+  <img src="docs/assets/openmymodel-mark.png" alt="OpenMyModel 标志" width="104">
+</p>
+<h1 align="center">OpenMyModel</h1>
+<p align="center"><strong>在本地运行模型，通过自己的云端网关提供 OpenAI 兼容 API。</strong></p>
+<p align="center">本地推理 · WebSocket 隧道 · 多节点模型调度 · 用量计量</p>
+<p align="center"><a href="README_EN.md">English</a>　|　中文</p>
 
-
-> [**English**](README_EN.md) | **中文**
-![OpenMyModel](OpenMyModel.png)
-
-> **让本地 GPU 算力走出局域网，以标准 OpenAI API 触达世界。**
->
-> OpenMyModel 帮助你将本地运行的 llama.cpp 大模型无缝推送到自有云服务器，通过业界通用的 OpenAI 兼容接口对外提供服务。无论你是有闲置 GPU 的个人开发者、想折腾自部署模型的技术爱好者，还是需要为小团队搭建私有推理节点的运维者，这里都有你所需的一切——无需公网 IP，无需复杂运维，一条 WebSocket 隧道即可将本机模型变为云端 API。
->
-> #### 为什么自己部署？
-> 免费在线大模型虽触手可及，却几乎都经过过度量化——提供给你的是智力"降级版"。我实测对比：一台消费级显卡上跑 **Qwen 3.5 9B INT8**，在逻辑推理和数学推导上明显优于所谓"旗舰级"的免费在线服务。免费 API 为了成本极致压缩，你拿到的其实只是同名模型的一张影子。而当你自己掌控精度和参数，每一轮推理都在真实权重上完成，体验的差距会超出你的预期。
->
-> #### 不止自用，更可共享与变现
-> OpenMyModel 同时支持个人节点共享与服务商运营：管理员可配置模型路由、节点凭据和统一 API Key；服务商模式提供邮箱验证码登录、支付宝充值、余额扣费以及按输入/输出 Token 统计。
-
-**将本地 llama.cpp 算力通过 WebSocket 隧道暴露到云端，以 OpenAI 兼容 API 供外部调用。**
-
-> 你的 GPU，你的模型，你自己的 API 服务 —— 无需公网 IP。
+<p align="center"><img src="docs/assets/dashboard-overview.png" alt="OpenMyModel 服务仪表盘"></p>
+<p align="center"><sub>仪表盘截图来自隔离演示环境，包含两台模拟节点和演示用量，仅用于展示界面。</sub></p>
 
 ---
 
-## 🏗 架构总览
+OpenMyModel 将桌面电脑上的 <code>llama-server</code> 通过 WebSocket 隧道连接到自有服务器。节点无需公网 IP；调用者使用统一网关地址和 API Key，由服务器按模型路由到合适节点。
+
+## 能做什么
+
+- **本地 GPU 推理**：桌面应用管理内置 llama.cpp 引擎、模型参数、对话和节点连接；Windows 发布包包含 CPU、CUDA 与 Vulkan 引擎。
+- **保护节点服务**：每个节点使用独立的 llama-server API Key。管理端加密保存节点 Key，并在路由时交给对应节点使用。
+- **统一网关与模型调度**：为调用者发放统一 API Key；公开模型名可映射到节点真实模型名，并配置多节点权重与路由。
+- **兼容 OpenAI 客户端**：提供 <code>/v1/models</code> 和 <code>/v1/chat/completions</code>，支持流式 SSE，可接入 Open WebUI 与 OpenAI SDK。
+- **个人与服务商模式**：个人模式关闭用户注册；服务商模式提供邮箱验证码账户、用户专属 Key、用量和订单、支付宝充值与按 Token 计费。
+- **运行状态与统计**：管理端汇总请求、Token 和节点状态；个人模式可展示公开聚合仪表盘，不暴露节点地址、密钥或对话内容。
+
+## 管理端
+
+<p align="center"><img src="docs/assets/admin-console-overview.png" alt="OpenMyModel 管理控制台" width="100%"></p>
+<p align="center"><sub>截图来自临时本地数据库。用量和在线节点为演示数据，不含真实用户或凭据。</sub></p>
+
+## 架构
 
 ```mermaid
 flowchart LR
-    subgraph 本地机器
-        A[Flutter 桌面端<br/>InferenceService 直接管理进程] --> C[llama-server<br/>内置 llama.cpp b10909<br/>本地 GPU 推理]
-        A --> N[Node Bridge<br/>本地密钥校验]
-        N --> C
+    subgraph Local["本地节点"]
+        UI["Flutter 桌面应用"] --> Engine["llama-server<br/>本地 GPU 推理"]
+        UI --> Bridge["Node Bridge<br/>节点身份验证与 HTTP 隧道"]
+        Bridge --> Engine
     end
-
-    subgraph 云端服务器
-        D[云后端<br/>Fastify + WebSocket] --> E[OpenAI 兼容 API<br/>管理员 / 用户]
+    subgraph Cloud["自有云服务器"]
+        Gateway["OpenMyModel 网关<br/>鉴权 · 限流 · 计量 · 模型调度"]
+        Admin["管理端<br/>节点 · 路由 · 价格 · 用户与订单"]
+        Gateway <--> Admin
     end
-
-    subgraph 外部调用者
-        E --> F[Open WebUI]
-        E --> G[ChatGPT 客户端]
-        E --> H[任意 OpenAI SDK]
-    end
-
-    D <== WebSocket 隧道 ==> N
+    Clients["OpenAI SDK / Open WebUI / 其他客户端"] -->|"统一 API Key"| Gateway
+    Bridge <-->|"WSS 隧道"| Gateway
 ```
 
-### 组件职责
+节点 Key 保护对应机器上的 llama-server HTTP 服务；网关 Key 用于识别调用者、执行访问控制、限流和计量。
 
-| 组件 | 技术栈 | 角色 |
-|------|--------|------|
-| **Flutter 桌面端** | Flutter + Dart | UI 界面 / 内置 llama-server 进程管理（启动、健康检查、停止）/ API Key 管理（本地存储+本地验证）/ 模型对话（直连引擎 OpenAI API） |
-| **内置引擎** | llama.cpp b10909（Git submodule 固定版本） | 官方 OpenAI 兼容 HTTP API；CPU/CUDA 后端源码构建，Vulkan 后端官方预编译（均经 SHA-256 校验），按显卡自动选择，无需安装 Python 或任何运行环境 |
-| **Node Bridge** | Node.js + ws | Flutter stdin/stdout 控制 / 本地 Key 验证 / WebSocket HTTP 隧道 |
-| **云后端** | TypeScript + Node.js | WebSocket 服务端 / 节点密钥加密托管与模型调度 / OpenAI 兼容网关 / 管理面板 |
+| 组件 | 用途 |
+| --- | --- |
+| Flutter 桌面端 | 管理引擎进程、GGUF 模型、推理参数、本地 API Key 与云端连接 |
+| Node Bridge | 建立认证后的 WebSocket 隧道，并转发 HTTP/SSE 请求 |
+| 云端后端 | Node.js 22、Fastify、SQLite；提供模型调度、API 网关、管理端和用户控制台 |
 
-> 历史说明：早期版本通过一个本地 Python HTTP 桥管理 llama-server；当前版本已由 Dart 的
-> `InferenceService` 直接管理引擎进程，无需安装 Python，旧桥代码已从仓库移除
-> （需要查阅历史实现请翻看 Git 历史）。
+## 快速开始
 
----
+### 下载桌面版
 
-## ✨ 核心特性
+从 [GitHub Releases](https://github.com/tianxingstarsky/OpenMyModel/releases/latest) 下载 Windows 安装包或压缩包。Windows 10 及以上系统可直接启动；引擎已随包提供，无需安装 Python。
 
-- **📦 内置推理引擎**：llama.cpp b10909 随应用分发（CPU/CUDA 源码构建 + Vulkan 官方预编译，均经 SHA-256 校验），启动即用，无需安装 Python；按真实硬件自动选择后端，N 卡/A 卡/I 卡都能用上 GPU
-- **🖥 本地 GPU 推理**：完整 llama.cpp 参数（GPU 层数 auto/all、`--fit` 显存自适应、KV 量化、Flash Attention 三态开关）
-- **🌐 WebSocket 隧道**：无需公网 IP，家庭主机也能上云；断线自动有界退避重连，主动断开不重连
-- **🔑 本地密钥管理**：API Key 持久化在本机，云端不持久化；验证时仍经过云后端和隧道，生产环境必须使用 HTTPS/WSS，并保护本机用户数据。
-- **🔄 OpenAI 兼容 API**：`/v1/chat/completions`、`/v1/models`，支持流式 (SSE)；思考型模型的 `reasoning_content` 在对话界面单独展示
-- **🖼 多模态支持**：mmproj 视觉投影，图片识别能力
-- **💬 内置对话界面**：多图上传 + 文字，流式响应，停止生成即断开底层连接
-- **📦 参数档案**：配置档案本地保存（兼容旧版本导出的档案文件），一键切换
-- **📊 公共状态页**：访问云后端首页即见在线节点、并发容量/使用率、吞吐速度和各模型并发，仅公开聚合信息
-- **🧭 管理与调度**：`/admin` 配置节点、模型别名、上游模型名、节点级 `llama-server --api-key`（每节点配置一次）、调度权重、统一 API Key、调用统计和用户订单；节点 Key 在服务器加密保存并只经隧道发送给对应节点
-- **📈 个人模式**：不开放用户注册；管理员创建统一 API Key，`/dashboard` 无需登录即可查看聚合状态；也可继续用桌面端节点 Key 直接访问节点
-- **💼 服务商模式**：管理员完成 HTTPS 公网地址、SMTP 邮箱及支付宝应用 ID、商户 ID、RSA2 私钥/支付宝公钥配置后才能启用；用户通过邮箱验证码注册/登录，在 `/console` 管理自己的 API Key（可设置每分钟请求与 Token 总量限额）、用量、订单和余额流水并充值。按输入/输出 Token 单价计费，不包含缓存 Token 单独定价
-- **🔐 分层 API Key**：节点 Key 由 `llama-server --api-key` 保护本机 HTTP；网关 Key 用来识别外部调用者、限流和计量。网关 Key 只显示一次，服务器保存其哈希。服务商模式只接受绑定用户账户的网关 Key；切换运营模式后，个人模式下创建的无归属 Key 会被拒绝调用
-- **🛠 中文 CLI**：云后端通过向导式命令行完成初始化和管理
-- **⚡ 实时状态**：引擎启动/加载/就绪/错误状态、云端连接状态实时跟踪
+### 从源码运行桌面端
 
-
-## 📸 界面截图
-
-### 首页 — 模型配置与启动
-![首页](首页.png)
-
-### 云端连接 — API Key 管理与节点状态
-![云端连接](云端连接.png)
-
----
-## 📂 目录结构
-
-```
-output_my_model/
-├── frontend/                 # Flutter 桌面应用
-│   ├── lib/
-│   │   ├── main.dart         # 入口
-│   │   ├── models/           # 数据模型
-│   │   ├── pages/            # 页面（首页/配置/对话/云端）
-│   │   ├── services/         # InferenceService / WebSocket / 配置档案
-│   │   └── widgets/          # UI 组件
-│   ├── windows/              # Windows 平台文件
-│   ├── pubspec.yaml
-│   └── pubspec.lock
-├── third_party/llama.cpp/    # llama.cpp b10909（Git submodule，固定版本）
-├── third_party/llama.cpp.lock.json  # 版本锁定与官方预编译包 SHA-256
-├── backend/                  # TypeScript 云后端
-│   ├── src/
-│   │   ├── index.ts          # Fastify + WebSocket 入口
-│   │   ├── cli.ts            # 中文 CLI 交互
-│   │   ├── config.ts         # 配置文件管理
-│   │   ├── db/               # 数据库层 (SQLite)
-│   │   ├── routes/           # API 路由
-│   │   │   ├── openai.ts     # OpenAI 兼容代理
-│   │   │   └── admin.ts      # 管理接口
-│   │   └── services/         # 业务服务
-│   │       ├── websocket.ts  # WebSocket 连接池
-│   │       └── auth.ts       # 认证
-│   ├── data/                 # 运行时数据（不提交）
-│   ├── package.json
-│   └── tsconfig.json
-├── scripts/                  # 工具脚本（引擎构建 / 打包 / 云端桥接）
-│   ├── build_llama_windows.py
-│   ├── package_windows.py
-│   ├── cloud_bridge.js
-│   └── mock_node.js          # 模拟节点（测试用）
-├── docs/                     # 文档与截图
-├── OpenMyModel.png                 # README 头图
-├── logo.png                  # 应用图标
-├── LICENSE
-└── README.md
-```
-
----
-
-## 🚀 快速开始
-
-### 环境要求
-
-- **桌面端（发布包）**：Windows 10+，无需安装 Python；CPU/CUDA/Vulkan 引擎随包内置，自动按显卡选择后端
-- **从源码构建桌面端**：Flutter 3.x+、CMake 3.28+、Visual Studio 2022 C++ 工具集（CUDA 后端另需 CUDA toolkit；Vulkan 后端另需 Vulkan SDK）
-- **Node.js** 22+（云后端与本地云端桥接）
-- **模型文件**（GGUF 格式，如 Qwen 3.5 9B Q8）+ 可选 mmproj 文件
-
-### 1. 桌面端 (Windows)
+需要 Node.js 22+、支持 Dart 3.11+ 的 Flutter stable、CMake 3.28+ 与 Visual Studio 2022 C++ 工具集。
 
 ```bash
-npm --prefix scripts ci            # 云端 Node 桥接依赖
+npm --prefix scripts ci
 cd frontend
 flutter pub get
 flutter run -d windows
 ```
 
-引擎可从源码构建并放置到 `artifacts/engine/`（打包脚本会自动收集）：
+### 启动云端后端
 
-```bash
-python scripts/build_llama_windows.py --backends cpu,cuda
-python scripts/fetch_official_engine.py --backend vulkan   # 无 Vulkan SDK 时用官方预编译包
-```
-
-### 2. 云后端
+在服务器或本机安装 Node.js 22+，初始化管理员密码后启动：
 
 ```bash
 cd backend
 npm ci
-npm run setup                      # 首次配置管理员密码
-npm run dev                        # 默认端口 3000
-```
-
-### 3. CLI 管理（云后端）
-
-```bash
-cd backend
 npm run setup
+npm run dev
 ```
 
-向导式设置域名、密码、查看节点状态。
+默认监听端口为 <code>3000</code>。也可先设置 <code>ADMIN_PASSWORD</code> 环境变量。桌面端在“云端连接”页面填写服务器地址和管理员密码后连接；公网部署使用 HTTPS/WSS。
 
----
+## 模式与入口
 
+| 模式 | 使用方式 |
+| --- | --- |
+| 个人模式 | 不提供终端用户注册。管理员在 <code>/admin</code> 创建统一网关 Key；<code>/dashboard</code> 展示聚合用量，<code>/</code> 展示公开节点状态。桌面端也可使用自己的节点 Key 直连对应节点。 |
+| 服务商模式 | 管理员配置 HTTPS 公网地址、SMTP 和支付宝参数后才能启用。用户通过邮箱验证码注册/登录，在 <code>/console</code> 管理账户、申请 API Key、查看用量和订单并充值。 |
 
+服务商模式要求 SMTP 主机、发信账户与密码，以及支付宝应用 ID、商户 ID、RSA2 应用私钥和支付宝公钥全部配置完成。管理端设置输入和输出 Token 单价（每百万 Token）；缓存 Token 暂无单独价格。当前预扣费支持文本聊天消息，节点需提供 llama-server 的 <code>/apply-template</code> 与 <code>/tokenize</code> 接口。
 
-## ☁️ 云后端部署指南（宝塔面板）
+## 接入客户端
 
-> 在云服务器上通过宝塔面板部署 OpenMyModel 后端，三步完成。
-
-### 前置条件
-
-- 云服务器（1核2G起步）+ 已备案域名 DNS 已解析
-- 宝塔面板已安装
-- 安全组已开放 80/443 端口
-- 软件商店已安装：**Nginx**、**Node.js版本管理器**、**PM2管理器**
-
----
-
-### 第一步：服务器编译部署
+管理端创建网关 Key 后，客户端使用服务器地址加 <code>/v1</code>。把 <code>qwen</code> 换成管理端配置的公开模型名：
 
 ```bash
-ssh root@你的服务器
-cd /aiapi
-git clone https://github.com/tianxingstarsky/OpenMyModel.git backend
-cd backend/backend
-
-# 安装依赖并编译
-npm install
-npm run build
+curl https://api.example.com/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer sk-your-gateway-key" -d '{"model":"qwen","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-> ⚠️ `npm install` 必须在服务器上执行（`better-sqlite3` 是原生模块，需 Linux 编译）。
-> 如果报 `NODE_MODULE_VERSION` 错误：`rm -rf node_modules && npm install`
+Open WebUI 等 OpenAI 兼容客户端使用：
 
----
+- **API 地址**：<code>https://api.example.com/v1</code>
+- **API Key**：管理端创建的 <code>sk-</code> 网关 Key
 
-### 第二步：宝塔 Node 项目启动
+## 部署到服务器
 
-「网站」→「Node项目」→ 添加项目：
+### Docker Compose
 
-| 设置项 | 值 |
-|--------|-----|
-| 项目目录 | `/aiapi/backend/backend` |
-| 启动文件 | `dist/index.js` |
-| 项目名称 | `openmymodel` |
-| 运行端口 | `3000` |
+复制 <code>.env.example</code> 为 <code>.env</code>，设置强管理员密码，再从仓库根目录启动：
 
-**关键**：Node版本选择栏里选你安装的 **v22.x**（不是系统默认的旧版本）。
+```bash
+docker compose up -d --build
+```
 
-首次启动前设置项目环境变量 `ADMIN_PASSWORD`，或在 `backend/` 运行 `npm run setup` 创建管理员密码。服务不会把密码打印到日志。
+### Node.js + Nginx / 宝塔面板
 
-> 已存在的 `data/config.json` 会保留；修改环境变量不会覆盖原密码。重置密码请使用 `npm run setup`，不要删除数据库。
+1. 在 Linux 服务器克隆仓库，在 <code>backend/</code> 执行 <code>npm ci && npm run build</code>。
+2. 用 Node.js 22 启动 <code>backend/dist/index.js</code>，监听默认 <code>3000</code> 端口，并配置持久化数据目录。
+3. 反向代理到 <code>http://127.0.0.1:3000</code>。Nginx 需支持 WebSocket Upgrade、关闭代理缓冲，并为公网域名配置 HTTPS 证书。
+4. 首次启动前运行 <code>npm run setup</code> 创建管理员密码；保留数据目录和服务器加密密钥，以保留节点凭据和用户数据。
 
----
-
-### 第三步：反向代理配置
-
-「网站」→顶部「反向代理」页 → 添加反向代理：
-
-| 设置项 | 值 |
-|--------|-----|
-| 域名 | `api.your-domain.com` |
-| 目标URL | `http://127.0.0.1:3000` |
-| 发送域名 | `$host` |
-
-然后编辑该站点的 Nginx 配置文件，在 `location /` 块中确保包含：
+WebSocket 代理至少需要：
 
 ```nginx
 proxy_http_version 1.1;
@@ -248,87 +132,16 @@ proxy_read_timeout 600s;
 proxy_buffering off;
 ```
 
-并在文件最外层（`server` 块之前）添加：
+部署细节和问题排查见 [开发、验证与发布说明](docs/DEVELOPMENT.md) 与 [验证记录](docs/VERIFICATION.md)。
 
-```nginx
-map $http_upgrade $connection_upgrade {
-    default upgrade;
-    ''      close;
-}
-```
+## 安全与数据
 
----
+- 生产环境使用 HTTPS/WSS；远程节点连接不要使用明文 HTTP/WebSocket。
+- 节点 Key 在服务器端加密存储；网关 Key 只保存哈希，创建时仅显示一次。
+- 数据库、加密密钥文件和备份都属于敏感数据，应限制文件权限并定期备份。
+- 公开页面只展示聚合统计，不返回节点标识、名称、地址或密钥。
 
-### 验证
-
-浏览器访问 `http://你的域名/`，返回 JSON 即成功。
-
----
-
-### 更新代码
-
-```bash
-cd /aiapi/backend/backend
-git pull && npm install && npm run build
-```
-然后在宝塔 Node 项目中点击「重启」。
-
----
-
-### 常见问题
-
-| 问题 | 原因 | 解决 |
-|------|------|------|
-| 启动闪退 | 源码未编译或 Node 版本不对 | `npm run build`，Node 选 v22 |
-| `NODE_MODULE_VERSION` | 本机带了 node_modules | 服务器上 `rm -rf node_modules && npm install` |
-| WebSocket 闪断 | Nginx 缺 Upgrade 头 | 加上 `proxy_set_header Upgrade $http_upgrade;` |
-| 域名不通 | 反向代理目标 IP 错误 | 确保是 `http://127.0.0.1:3000` 不是 `172.0.0.1` |
-| API Key 401 | 密钥未启用或不属于在线节点 | 检查密钥所属桌面节点在线且已启用该 Key，无需盲目重建 |
-| 首次启动拒绝运行 | 尚未配置管理员密码 | 设置 `ADMIN_PASSWORD` 或运行 `npm run setup` |
-| 桥接协议错误 | 桌面与云端版本不匹配 | 同时更新云后端和桌面的 Node 桥接 |
-
-
----
-
-## 🔐 安全设计
-
-```
-个人模式直连：桌面端 API Key 或节点 `--api-key` → 对应节点桥接校验 → llama-server
-统一网关调用：网关 API Key → 云后端鉴权/限流/计量 → 选择公开模型路由
-  → 解密所选节点的 API Key（旧版逐路由 Key 可回退）→ 隧道转发 → 节点桥接以 Bearer Key 调用 llama-server
-
-节点 Key 是保护节点 HTTP 服务的凭据，与调用者的网关 Key 分开管理。管理端按节点保存一把 `llama-server --api-key`，该节点的所有路由共用；旧版逐路由凭据仍作为兼容回退。节点 Key 使用服务器本地密钥加密后保存在数据库；网关 Key 只保存哈希。生产环境应使用 HTTPS/WSS，并保护服务器数据目录和密钥文件。
-```
-
-管理入口：`/admin`；个人模式公开仪表盘：`/dashboard`；服务商用户控制台：`/console`。服务商模式须先在管理端配置 HTTPS 公网地址、SMTP 和支付宝应用参数，配置完整后才能启用；支付宝回调地址使用该规范公网地址，不依赖请求 Host。
-
-服务商模式会在推理前调用所选节点的 `/apply-template` 与 `/tokenize` 计算文本输入 Token，并原子预留输入费用和输出上限费用；结算时优先按节点返回的实际用量扣款并释放未使用余额。若节点未返回输出 usage，服务端会用同一节点的 `/tokenize` 计算已生成文本（也覆盖客户端中途断开的流）；节点不可用时只能按其已报告用量结算。调用未指定 `max_tokens` 时，输出上限会按可用余额自动缩小，单个候选默认最多 4096 Token；用户显式指定时最多允许 65,536 个总输出 Token。服务商预扣目前支持纯文本聊天消息，多模态消息会在推理前被拒绝。节点需使用支持这两个接口的 llama-server。
-
----
-
-## 🔗 使用示例
-
-### 配置 Open WebUI
-
-在 Open WebUI 中添加 OpenAI 兼容连接：
-
-- **API URL**: `https://你的域名/v1`
-- **API Key**: 前端生成的 `sk-` 开头密钥
-
-### curl 测试
-
-```bash
-curl https://你的域名/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-你的密钥" \
-  -d '{"model":"qwen","messages":[{"role":"user","content":"你好"}]}'
-```
-
----
-
-## 开发验证与发布
-
-请参阅 [开发、测试与发布说明](docs/DEVELOPMENT.md)，包括中继协议、内置引擎构建、故障排查、自动化测试和 Windows 可追溯打包。更新时应同时部署后端和桌面桥接，旧桥接不会提供正确的上游状态码。
+## 开发验证
 
 ```bash
 npm --prefix scripts ci
@@ -337,23 +150,16 @@ npm --prefix scripts run check:release
 npm --prefix backend ci
 npm --prefix backend run build
 npm --prefix backend test
-cd frontend && flutter analyze && flutter test && flutter build windows --release
-python scripts/build_llama_windows.py --backends cpu,cuda   # 内置引擎源码构建
-python scripts/package_windows.py --output artifacts/OpenMyModel-win-x64-<rev>
-python scripts/make_installer.py --payload artifacts/OpenMyModel-win-x64-<rev>   # 可选：生成安装包
+cd frontend
+flutter analyze
+flutter test
 ```
 
-Docker 首次启动前将 `.env.example` 复制为 `.env` 并填写强密码，再运行 `docker compose up -d --build`。公网部署请在反向代理终止 TLS，并使用 `https://` 地址连接桌面端；节点桥接只允许本机回环地址使用明文连接，远程连接必须使用 TLS，以保护节点认证信息、llama-server API key 和推理数据。仓库内 nginx 示例本身不提供证书。
+Windows 引擎构建、打包和故障排查见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
 
-## 📝 许可证
+## 致谢与许可证
 
-MIT License — 详见 [LICENSE](LICENSE)
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) 提供 GGUF 推理引擎。
+- [Open WebUI](https://github.com/open-webui/open-webui) 是 OpenAI 兼容客户端示例。
 
----
-
-## 🙏 鸣谢
-
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) — GGUF 推理引擎
-- [Open WebUI](https://github.com/open-webui/open-webui) — 对话前端参考
-- [unsloth](https://github.com/unslothai/unsloth) — 参数设计灵感
-
+本项目采用 [MIT License](LICENSE)。

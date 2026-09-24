@@ -80,6 +80,9 @@ export async function buildApp(options: AppOptions = {}) {
     tunnel.registerRoutes(app);
     if (options.heartbeat !== false) tunnel.startHeartbeat();
     // Public status page (non-sensitive aggregates only) + machine-readable data.
+    app.get("/brand-mark.png", async (_request, reply) => {
+      reply.type("image/png").send(readFileSync(join(__dirname, "../public/brand-mark.png")));
+    });
     app.get("/", async (_request, reply) => {
       reply.type("text/html; charset=utf-8").send(renderStatusPage());
     });

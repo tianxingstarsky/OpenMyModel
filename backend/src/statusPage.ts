@@ -23,7 +23,8 @@ export function renderStatusPage(): string {
     padding: 40px 20px 60px;
   }
   .wrap { max-width: 960px; margin: 0 auto; }
-  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+  .brand-mark { width: 38px; height: 38px; object-fit: contain; flex: none; }
   h1 { font-size: 26px; letter-spacing: .5px; }
   h1 .dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%;
     background: var(--ok); margin-right: 10px; box-shadow: 0 0 10px var(--ok); }
@@ -61,7 +62,7 @@ export function renderStatusPage(): string {
 </head>
 <body>
 <div class="wrap">
-  <header><h1><span class="dot"></span>OpenMyModel 服务状态</h1></header>
+  <header><img class="brand-mark" src="/brand-mark.png" alt=""><h1><span class="dot"></span>OpenMyModel 服务状态</h1></header>
   <div class="sub">公开状态页 · 每 3 秒自动刷新 · 最近更新 <span class="live" id="updated">—</span></div>
 
   <div class="cards">
