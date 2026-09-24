@@ -701,24 +701,15 @@ export class PlatformService {
       || fields.app_id !== this.setting("alipay_app_id")
       || fields.auth_app_id !== undefined && fields.auth_app_id !== this.setting("alipay_app_id")
       || fields.seller_id !== this.setting("alipay_seller_id") || fields.notify_type !== "trade_status_sync") return false;
-    const canonical = (includeSignType: boolean) => {
-      const values = { ...fields };
-      delete values.sign;
-      if (includeSignType) values.sign_type = fields.sign_type || "RSA2";
-      else delete values.sign_type;
-      return Object.keys(values).filter(key => values[key] !== "" && values[key] != null).sort()
-        .map(key => `${key}=${typeof values[key] === "string" ? values[key] : JSON.stringify(values[key])}`).join("&");
-    };
+    const canonicalFields = { ...fields };
+    delete canonicalFields.sign;
+    delete canonicalFields.sign_type;
+    const canonical = Object.keys(canonicalFields).filter(key => canonicalFields[key] !== "" && canonicalFields[key] != null).sort()
+      .map(key => `${key}=${typeof canonicalFields[key] === "string" ? canonicalFields[key] : JSON.stringify(canonicalFields[key])}`).join("&");
     const publicKey = this.secretSetting("alipay_public_key");
     let verified = false;
-    for (const payload of [canonical(true), canonical(false)]) {
-      try {
-        if (createVerify("RSA-SHA256").update(payload, "utf8").verify(publicKey, signature, "base64")) {
-          verified = true;
-          break;
-        }
-      } catch { /* Malformed signatures are rejected below. */ }
-    }
+    try { verified = createVerify("RSA-SHA256").update(canonical, "utf8").verify(publicKey, signature, "base64"); }
+    catch { /* Malformed signatures are rejected below. */ }
     if (!verified) return false;
     const orderId = typeof fields.out_trade_no === "string" ? fields.out_trade_no : "";
     if (!orderId) return false;
