@@ -387,6 +387,10 @@ export class PlatformService {
     return row ?? null;
   }
 
+  directKeyId(raw: string): string {
+    return `direct-${hashPlatformValue(`direct-key\n${raw}`, this.secret).slice(0, 40)}`;
+  }
+
   checkGatewayKey(key: GatewayKey): void {
     if (key.token_limit > 0 && key.total_tokens >= key.token_limit) throw new RelayError("API Key token limit exceeded", 429);
     const providerMode = this.isProviderMode();
@@ -654,7 +658,8 @@ export class PlatformService {
 
   adminUsageRows(ownerUserId?: string, limit = 200) {
     const bounded = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 500)) : 200;
-    return this.sqlite.prepare(`SELECT l.*, k.name AS key_name, u.email AS user_email
+    return this.sqlite.prepare(`SELECT l.*, CASE WHEN l.api_key_id LIKE 'direct-%' THEN '节点 Key 直连' ELSE k.name END AS key_name,
+      u.email AS user_email
       FROM usage_logs l LEFT JOIN gateway_keys k ON k.id=l.api_key_id
       LEFT JOIN platform_users u ON u.id=k.owner_user_id
       WHERE (? IS NULL OR k.owner_user_id=?) ORDER BY l.timestamp DESC LIMIT ?`)

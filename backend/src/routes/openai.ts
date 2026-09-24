@@ -1,6 +1,5 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { OutgoingHttpHeaders, validateHeaderName, validateHeaderValue } from "http";
-import { createHash } from "crypto";
 import { WebSocketTunnel, RelayError } from "../services/websocket";
 import { PlatformService } from "../services/platform";
 
@@ -281,7 +280,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     let publicModel = typeof body.model === "string" && body.model ? body.model : "local-model";
     let inputPrice = 0;
     let outputPrice = 0;
-    let targetKeyId = `direct-${createHash("sha256").update(rawKey).digest("hex").slice(0, 40)}`;
+    let targetKeyId = platform.directKeyId(rawKey);
     let usageReservationId: string | undefined;
     let tokenReservationId: string | undefined;
     let reservedPromptTokens = 0;
@@ -395,7 +394,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
       } catch (error) { request.log.error({ err: error }, "Usage could not be recorded"); }
       if (!reply.raw.destroyed) reply.raw.end();
     } catch (error) {
-      if ((usageReservationId || tokenReservationId) && upstreamHeadersReceived && upstreamStatus < 400) {
+      if (upstreamHeadersReceived && upstreamStatus < 400) {
         const partialUsage = capture?.finish(body.stream === true);
         const completionTokens = await settledCompletionTokens();
         try {

@@ -88,6 +88,7 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   });
 
   app.post("/api/admin/login", async (request, reply) => {
+    if (!allowSameOriginMutation(request, reply, platform)) return;
     const result = await auth.authenticate(bodyOf(request).password, request.ip);
     if (result !== "ok") {
       if (result === "limited") reply.header("Retry-After", "60").status(429);
@@ -198,6 +199,7 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   });
 
   app.post("/api/auth/email-code", async (request, reply) => {
+    if (!allowSameOriginMutation(request, reply, platform)) return;
     const body = bodyOf(request);
     if (typeof body.email !== "string" || body.email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
       return reply.status(400).send({ error: "请输入有效邮箱地址" });
@@ -211,6 +213,7 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   });
   for (const purpose of ["register", "login"] as const) {
     app.post(`/api/auth/${purpose}`, async (request, reply) => {
+      if (!allowSameOriginMutation(request, reply, platform)) return;
       try {
         const result = platform.loginWithCode(bodyOf(request).email, purpose, bodyOf(request).code);
         reply.header("set-cookie", sessionCookie(request, result.token, 30 * 24 * 60 * 60));

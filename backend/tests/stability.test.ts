@@ -158,10 +158,16 @@ test("personal mode exposes only its public dashboard and blocks provider signup
   const dashboard = await app.inject({ method: "GET", url: "/api/public/dashboard" });
   assert.equal(dashboard.statusCode, 200);
   assert.equal(dashboard.json().onlineNodes, 0);
+  const crossOriginSignup = await app.inject({ method: "POST", url: "/api/auth/email-code",
+    headers: { origin: "https://evil.example.test" }, payload: { email: "person@example.com", purpose: "register" } });
+  assert.equal(crossOriginSignup.statusCode, 403, "browser auth actions reject cross-origin form submissions");
   const signup = await app.inject({ method: "POST", url: "/api/auth/email-code", payload: { email: "person@example.com", purpose: "register" } });
   assert.equal(signup.statusCode, 503);
   assert.match(signup.json().error, /服务商模式尚未启用/);
 
+  const csrfLogin = await app.inject({ method: "POST", url: "/api/admin/login",
+    headers: { origin: "https://evil.example.test" }, payload: { password: PASSWORD } });
+  assert.equal(csrfLogin.statusCode, 403, "cross-origin login cannot place an authenticated session in another site");
   const login = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
   const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
   const enable = await app.inject({ method: "PUT", url: "/api/admin/settings", headers: { cookie },
@@ -882,7 +888,7 @@ test("relay headers reject injection and remove transport/private headers", () =
 
 test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, auth, and cancellation", async t => {
   const { CloudBridge } = require("../../scripts/cloud_bridge.js");
-  const { url, post, tunnel } = await fixture(t);
+  const { app, url, post, tunnel } = await fixture(t);
   let mode = "stream";
   let expectedAuthorization = "Bearer llama-secret";
   let upstreamClosed = false;
@@ -894,6 +900,11 @@ test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, aut
     req.resume();
     req.on("end", () => {
       if (mode === "error") { res.writeHead(429, { "content-type": "text/plain", "retry-after": "3" }); res.end("limited\n"); return; }
+      if (mode === "usage") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: "measured" } }], usage: { prompt_tokens: 13, completion_tokens: 5 } }));
+        return;
+      }
       res.writeHead(200, { "content-type": "text/event-stream" });
       if (mode === "cancel") {
         res.on("close", () => { upstreamClosed = true; });
@@ -922,6 +933,20 @@ test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, aut
   const directNodeKey = await post({ stream: true, model: "model-a" }, "llama-secret").response;
   assert.equal(directNodeKey.statusCode, 200, "personal mode accepts the configured node key for direct-node access");
   assert.equal(await text(directNodeKey), 'data: {"text":"\u4f60\u597d  "}\n\n');
+  mode = "usage";
+  const measuredDirect = await post({ model: "model-a" }, "llama-secret").response;
+  assert.equal(measuredDirect.statusCode, 200);
+  await text(measuredDirect);
+  const publicDashboard = await app.inject({ method: "GET", url: "/api/public/dashboard" });
+  assert.equal(publicDashboard.statusCode, 200);
+  assert.deepEqual([publicDashboard.json().requests, publicDashboard.json().input, publicDashboard.json().output], [3, 13, 5],
+    "the public dashboard includes token usage reported for node-key calls routed through the gateway");
+  const adminLogin = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
+  const adminCookie = String(adminLogin.headers["set-cookie"]).split(";", 1)[0];
+  const directUsage = await app.inject({ method: "GET", url: "/api/admin/usage", headers: { cookie: adminCookie } });
+  const directUsageRow = directUsage.json().find((row: Message) => row.prompt_tokens === 13);
+  assert.equal(directUsageRow.key_name, "节点 Key 直连");
+  assert.match(directUsageRow.api_key_id, /^direct-[a-f0-9]{40}$/);
   mode = "override";
   expectedAuthorization = "Bearer managed-node-secret";
   let relayStatus = 0;
