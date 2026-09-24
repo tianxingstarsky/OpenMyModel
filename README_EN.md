@@ -238,7 +238,7 @@ Then click "Restart" in Baota Node Projects.
 ## Security Design
 
 ```
-Direct node call: desktop API key -> node bridge validation -> llama-server
+Personal-mode direct call: desktop API key or node `--api-key` -> that node's bridge validation -> llama-server
 Unified gateway call: gateway API key -> backend auth/limits/metering -> public model route
   -> decrypt that route's node key -> tunnel relay -> node bridge calls llama-server with Bearer key
 

@@ -172,11 +172,19 @@ test("keys can be disabled/deleted without logging secret values", async (t) => 
   f.send({ type: "validate_key", requestId: "valid", key: "test-key" });
   await until(() => f.messages.some((m) => m.requestId === "valid"));
   assert.equal(f.messages.find((m) => m.requestId === "valid").valid, true);
+  f.send({ type: "validate_key", requestId: "node-key", key: "upstream-test" });
+  await until(() => f.messages.some((m) => m.requestId === "node-key"));
+  assert.equal(f.messages.find((m) => m.requestId === "node-key").valid, true,
+    "the configured llama-server key is a valid direct-node credential");
   f.bridge.command({ cmd: "set_keys", keys: [] });
   f.send({ type: "validate_key", requestId: "deleted", key: "test-key" });
   await until(() => f.messages.some((m) => m.requestId === "deleted"));
   assert.equal(f.messages.find((m) => m.requestId === "deleted").valid, false);
+  f.send({ type: "validate_key", requestId: "wrong-node-key", key: "another-node-key" });
+  await until(() => f.messages.some((m) => m.requestId === "wrong-node-key"));
+  assert.equal(f.messages.find((m) => m.requestId === "wrong-node-key").valid, false);
   assert.ok(!JSON.stringify(f.events).includes("test-key"));
+  assert.ok(!JSON.stringify(f.events).includes("upstream-test"));
 });
 
 test("rejects unexpected compression instead of corrupting the response", async (t) => {

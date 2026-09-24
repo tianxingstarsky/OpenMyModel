@@ -293,7 +293,7 @@ git pull && npm install && npm run build
 ## 🔐 安全设计
 
 ```
-直接节点调用：桌面端 API Key → 节点桥接校验 → llama-server
+个人模式直连：桌面端 API Key 或节点 `--api-key` → 对应节点桥接校验 → llama-server
 统一网关调用：网关 API Key → 云后端鉴权/限流/计量 → 选择公开模型路由
   → 解密该路由的节点 Key → 隧道转发 → 节点桥接以 Bearer Key 调用 llama-server
 

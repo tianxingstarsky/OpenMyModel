@@ -733,6 +733,9 @@ test("production CloudBridge E2E preserves split UTF-8 SSE, upstream errors, aut
   await until(() => bridge.connected);
   const streamed = await post('{ "stream" : true, "model": "model-a" }').response;
   assert.equal(await text(streamed), 'data: {"text":"\u4f60\u597d  "}\n\n');
+  const directNodeKey = await post({ stream: true, model: "model-a" }, "llama-secret").response;
+  assert.equal(directNodeKey.statusCode, 200, "personal mode accepts the configured node key for direct-node access");
+  assert.equal(await text(directNodeKey), 'data: {"text":"\u4f60\u597d  "}\n\n');
   mode = "override";
   expectedAuthorization = "Bearer managed-node-secret";
   let relayStatus = 0;
@@ -1000,6 +1003,11 @@ test("provider gateway preflights node tokens and reserves no more than the avai
     const keyResponse = await app.inject({ method: "POST", url: "/api/user/keys", headers: { cookie: userCookie }, payload: { name: "budgeted" } });
     assert.equal(keyResponse.statusCode, 200, keyResponse.body);
     const gatewayKey = keyResponse.json().key;
+
+    const blockedNodeKey = await post({ model: "public-chat", messages: [{ role: "user", content: "hello" }] }, nodeKey).response;
+    assert.equal(blockedNodeKey.statusCode, 401, "provider mode keeps node credentials private to the selected route");
+    await text(blockedNodeKey);
+    assert.equal(inferenceCalls, 0);
 
     const response = await post({ model: "public-chat", messages: [{ role: "user", content: "hello" }] }, gatewayKey).response;
     assert.equal(response.statusCode, 200);
