@@ -52,8 +52,12 @@ export async function buildApp(options: AppOptions = {}) {
     logger: options.logger ?? {
       level: "info",
       redact: ["req.headers.authorization", "req.headers['x-admin-password']", "password", "body.password", "body.code",
-        "body.mailPassword", "body.alipayPrivateKey", "body.alipayPublicKey", "body.upstreamKey", "body.apiKey"],
+      "body.mailPassword", "body.alipayPrivateKey", "body.alipayPublicKey", "body.upstreamKey", "body.apiKey"],
     },
+  });
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (request.url.startsWith("/api/")) reply.header("Cache-Control", "private, no-store");
+    return payload;
   });
   app.decorate("tunnel", tunnel);
   // Close the tunnel before the websocket plugin waits for active sockets.

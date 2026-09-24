@@ -403,6 +403,8 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.equal(alphaKeys.json().find((key: Message) => key.id === alphaKey.id).tokenLimit, 250);
     const dashboard = await get("/api/user/dashboard?userId=user-beta");
     assert.equal(dashboard.statusCode, 200);
+    assert.equal(dashboard.headers["cache-control"], "private, no-store",
+      "customer dashboards must not be retained by browser or shared HTTP caches");
     assert.equal(dashboard.json().user.email, "alpha@example.test");
     assert.equal(dashboard.json().user.balance, 12.5);
     assert.deepEqual(dashboard.json().keys.map((key: Message) => key.name), ["alpha-private"]);
@@ -424,6 +426,8 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
 
     const adminUsage = await app.inject({ method: "GET", url: "/api/admin/usage?limit=100&userId=user-alpha", headers: { cookie: adminCookie } });
     assert.equal(adminUsage.statusCode, 200);
+    assert.equal(adminUsage.headers["cache-control"], "private, no-store",
+      "administrator responses containing account data must not be cached");
     assert.deepEqual(adminUsage.json().map((row: Message) => [row.model, row.user_email]), [["alpha-model", "alpha@example.test"]]);
     const adminInvalidLimit = await app.inject({ method: "GET", url: "/api/admin/usage?limit=not-a-number", headers: { cookie: adminCookie } });
     assert.equal(adminInvalidLimit.statusCode, 200);
