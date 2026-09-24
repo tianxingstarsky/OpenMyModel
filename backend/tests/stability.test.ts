@@ -725,9 +725,14 @@ test("gateway rate checks honor updated and revoked keys from stale request snap
   const database = createDatabase(directory);
   try {
     const platform = new PlatformService(database.sqlite, directory, new WebSocketTunnel({ authenticate: async () => "ok" }));
+    platform.saveModel({ publicName: "live-allowed", inputPrice: 0, outputPrice: 0 });
+    platform.saveModel({ publicName: "live-denied", inputPrice: 0, outputPrice: 0 });
     const created = platform.createGatewayKey("live key check", null, 0, 0);
     const staleSnapshot = platform.findGatewayKey(created.key)!;
 
+    assert.equal(platform.updateKeyLimits(staleSnapshot.id, 0, 0, undefined, ["live-allowed"])?.modelFilter[0], "live-allowed");
+    assert.deepEqual(platform.allowedModels(staleSnapshot), ["live-allowed"],
+      "model permissions are re-read after an administrator narrows the key's allowlist");
     assert.equal(platform.updateKeyLimits(staleSnapshot.id, 0, 1)?.rpmLimit, 1);
     platform.checkGatewayKey(staleSnapshot);
     assert.throws(() => platform.checkGatewayKey(staleSnapshot),
@@ -738,6 +743,9 @@ test("gateway rate checks honor updated and revoked keys from stale request snap
     assert.throws(() => platform.checkGatewayKey(staleSnapshot),
       (error: any) => error.statusCode === 401,
     "a revoked key cannot pass authorization with a stale active snapshot");
+    assert.throws(() => platform.allowedModels(staleSnapshot),
+      (error: any) => error.statusCode === 401,
+    "a revoked key cannot retrieve model permissions from a stale snapshot");
   } finally {
     database.close();
     rmSync(directory, { recursive: true, force: true });

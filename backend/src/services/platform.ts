@@ -465,7 +465,10 @@ export class PlatformService {
   }
 
   allowedModels(key: GatewayKey): string[] {
-    const parsed = this.parseStoredModelFilter(key.model_filter);
+    const current = this.sqlite.prepare("SELECT is_active, model_filter FROM gateway_keys WHERE id=?").get(key.id) as
+      { is_active: number; model_filter: string } | undefined;
+    if (!current || current.is_active !== 1) throw new RelayError("Invalid API Key", 401);
+    const parsed = this.parseStoredModelFilter(current.model_filter);
     if (!parsed) throw new RelayError("API Key model permissions are invalid", 403);
     return parsed;
   }
