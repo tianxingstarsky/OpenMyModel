@@ -1,0 +1,17 @@
+.git
+**/node_modules
+**/.dart_tool
+**/build
+backend
+frontend
+python
+third_party
+docs
+scripts/node_modules
+node_modules
+build
+release
+artifacts
+*.zip
+*.rar
+*.7z

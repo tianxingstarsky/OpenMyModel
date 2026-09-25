@@ -63,8 +63,13 @@ function hasTextOnlyMessages(body: Record<string, unknown>): boolean {
   });
 }
 
+function relayJson(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string }, path: string,
+  body: Record<string, unknown>, upstreamApiKey: string, signal: AbortSignal): Promise<Record<string, unknown>>;
+function relayJson(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string }, path: string,
+  body: Record<string, unknown>, upstreamApiKey: string, signal: AbortSignal, unsupportedIsNull: true): Promise<Record<string, unknown> | null>;
 async function relayJson(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string }, path: string,
-  body: Record<string, unknown>, upstreamApiKey: string, signal: AbortSignal): Promise<Record<string, unknown>> {
+  body: Record<string, unknown>, upstreamApiKey: string, signal: AbortSignal,
+  unsupportedIsNull = false): Promise<Record<string, unknown> | null> {
   let statusCode = 0;
   let raw: string;
   try {
@@ -75,6 +80,7 @@ async function relayJson(tunnel: WebSocketTunnel, node: { nodeId: string; connec
     if (error instanceof RelayError) throw error;
     throw new RelayError("Node billing preflight failed", 503);
   }
+  if (unsupportedIsNull && [400, 404, 405, 422].includes(statusCode)) return null;
   if (statusCode === 404) throw new RelayError("The compute node does not support balance-safe token billing", 503);
   if (statusCode === 429 || statusCode >= 500 || statusCode < 200) {
     throw new RelayError("Node is temporarily unable to calculate the request token budget", 503);
@@ -89,34 +95,52 @@ async function relayJson(tunnel: WebSocketTunnel, node: { nodeId: string; connec
   }
 }
 
+function tokenCount(response: Record<string, unknown>, label: string): number {
+  if (Array.isArray(response.tokens) && response.tokens.every(token => Number.isSafeInteger(token) && (token as number) >= 0)) {
+    return response.tokens.length;
+  }
+  if (Number.isSafeInteger(response.count) && (response.count as number) >= 0) return response.count as number;
+  throw new RelayError(`Node did not return valid ${label} tokens`, 503);
+}
+
 async function managedPromptTokenCount(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string },
   body: Record<string, unknown>, upstreamApiKey: string, signal: AbortSignal): Promise<number> {
   if (!hasTextOnlyMessages(body)) {
     throw new RelayError("Service-provider billing currently supports text-only chat messages", 400);
   }
-  const templated = await relayJson(tunnel, node, "/apply-template", body, upstreamApiKey, signal);
-  if (typeof templated.prompt !== "string") throw new RelayError("Node did not return the formatted prompt", 503);
-  const tokenized = await relayJson(tunnel, node, "/tokenize", {
-    content: templated.prompt, add_special: true, parse_special: true,
-  }, upstreamApiKey, signal);
-  if (!Array.isArray(tokenized.tokens) || tokenized.tokens.some(token => !Number.isInteger(token))) {
-    throw new RelayError("Node did not return valid prompt tokens", 503);
+  const templated = await relayJson(tunnel, node, "/apply-template", body, upstreamApiKey, signal, true);
+  if (templated && typeof templated.prompt === "string") {
+    const tokenized = await relayJson(tunnel, node, "/tokenize", {
+      content: templated.prompt, add_special: true, parse_special: true,
+    }, upstreamApiKey, signal);
+    return tokenCount(tokenized, "prompt");
   }
-  return tokenized.tokens.length;
+
+  // vLLM renders chat templates and tokenizes messages in one request. This keeps
+  // provider-mode prebilling accurate without requiring llama.cpp-only endpoints.
+  const vllmRequest: Record<string, unknown> = {
+    model: body.model, messages: body.messages, add_generation_prompt: true,
+    add_special_tokens: false, continue_final_message: false,
+  };
+  for (const field of ["tools", "chat_template", "chat_template_kwargs"] as const) {
+    if (body[field] !== undefined) vllmRequest[field] = body[field];
+  }
+  const tokenized = await relayJson(tunnel, node, "/tokenize", vllmRequest, upstreamApiKey, signal);
+  return tokenCount(tokenized, "prompt");
 }
 
 async function managedCompletionTokenCount(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string },
-  texts: string[], upstreamApiKey: string, signal: AbortSignal): Promise<number> {
+  texts: string[], model: string, upstreamApiKey: string, signal: AbortSignal): Promise<number> {
   let total = 0;
   for (const content of texts) {
     if (!content) continue;
-    const tokenized = await relayJson(tunnel, node, "/tokenize", {
+    const vllmTokenized = await relayJson(tunnel, node, "/tokenize", {
+      model, prompt: content, add_special_tokens: false,
+    }, upstreamApiKey, signal, true);
+    const tokenized = vllmTokenized ?? await relayJson(tunnel, node, "/tokenize", {
       content, add_special: false, parse_special: true,
     }, upstreamApiKey, signal);
-    if (!Array.isArray(tokenized.tokens) || tokenized.tokens.some(token => !Number.isInteger(token))) {
-      throw new RelayError("Node did not return valid completion tokens", 503);
-    }
-    total += tokenized.tokens.length;
+    total += tokenCount(tokenized, "completion");
     if (!Number.isSafeInteger(total)) throw new RelayError("Node returned an invalid completion token count", 503);
   }
   return total;
@@ -356,6 +380,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     let capture: UsageCapture | undefined;
     let node: { nodeId: string; connectionId: string } | undefined;
     let upstreamApiKey: string | undefined;
+    let upstreamModel = "";
 
     const settledCompletionTokens = async (): Promise<number> => {
       if (!capture) return 0;
@@ -371,7 +396,8 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
       }
       try {
         // Settlement must still finish if the caller disconnects after receiving part of a stream.
-        return await managedCompletionTokenCount(tunnel, node, texts, upstreamApiKey, AbortSignal.timeout(10_000));
+        return await managedCompletionTokenCount(tunnel, node, texts, upstreamModel,
+          upstreamApiKey, AbortSignal.timeout(10_000));
       } catch (error) {
         request.log.error({ err: error, model: publicModel }, "Completion token usage was unavailable; charging reported usage only");
         return capture.completion;
@@ -387,6 +413,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
         const route = await platform.selectManagedRoute(publicModel, controller.signal);
         node = { nodeId: route.nodeId, connectionId: route.connectionId };
         upstreamApiKey = route.upstreamKey;
+        upstreamModel = route.upstreamModel;
         inputPrice = route.inputPrice;
         outputPrice = route.outputPrice;
         publicModel = route.publicName;

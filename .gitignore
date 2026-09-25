@@ -58,6 +58,7 @@ OpenMyModel-win-x64-*.zip
 /.zcode/
 /该文件夹用于临时修改/
 /.env
+/deploy/vllm-node/.env
 /artifacts/
 **/__pycache__/
 **/*.pyc

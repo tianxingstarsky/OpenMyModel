@@ -103,7 +103,7 @@ After activation:
 2. Users open `https://your-domain/console`, register or sign in with an email verification code, and manage their own usage, orders, top-ups and API keys.
 3. Users call `/v1` with their own API keys. Admins can review users and orders under **Users & Orders**, and inspect platform request and token activity under **Usage**.
 
-Provider-mode prebilling currently supports text chat messages. Model nodes must expose llama-server's `/apply-template` and `/tokenize` endpoints. Before opening registration and payments, test SMTP delivery and Alipay asynchronous notifications on the HTTPS domain.
+Provider-mode prebilling currently supports text chat messages. llama.cpp nodes use `/apply-template` and `/tokenize`; vLLM nodes use its chat `/tokenize` endpoint. Before opening registration and payments, test SMTP delivery and Alipay asynchronous notifications on the HTTPS domain.
 
 ## Architecture
 
@@ -168,7 +168,7 @@ The default port is <code>3000</code>. You may set <code>ADMIN_PASSWORD</code> b
 | Personal | No end-user sign-up. Admins create gateway keys at <code>/admin</code>. <code>/dashboard</code> shows aggregate usage; <code>/</code> shows public node status. Desktop-managed node keys can also access their corresponding node directly. |
 | Service provider | Requires an HTTPS public base URL, SMTP and Alipay settings before activation. Users register and sign in with email codes, then manage their account, API keys, usage and orders, and top up from <code>/console</code>. |
 
-Provider mode requires an SMTP host, sender account and password, plus the Alipay app ID, seller ID, RSA2 app private key and Alipay public key. The mode stays unavailable until all required settings are present. Admins configure input and output prices per million tokens; cached tokens have no separate price. Provider prebilling currently accepts text chat messages, and nodes need llama-server <code>/apply-template</code> and <code>/tokenize</code> endpoints.
+Provider mode requires an SMTP host, sender account and password, plus the Alipay app ID, seller ID, RSA2 app private key and Alipay public key. The mode stays unavailable until all required settings are present. Admins configure input and output prices per million tokens; cached tokens have no separate price. Provider prebilling currently accepts text chat messages; llama.cpp nodes use <code>/apply-template</code> and <code>/tokenize</code>, while vLLM nodes use its chat <code>/tokenize</code> endpoint.
 
 ## Use an OpenAI-compatible client
 
@@ -184,6 +184,31 @@ For Open WebUI and compatible clients:
 - **API key:** an <code>sk-</code> gateway key created by the admin
 
 ## Deploy the backend
+
+### Linux vLLM compute node
+
+The repository includes a headless Linux node package: Docker runs the official vLLM OpenAI server, while a small Connector joins your OpenMyModel server over HTTPS/WSS. This package targets Linux x86_64 with an NVIDIA GPU. vLLM does not natively support Windows, and the GPU, driver and vLLM image must meet [the official requirements](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/). This node package does not install or launch the Windows desktop app and does not replace the cloud gateway.
+
+Install Docker Engine, the Compose plugin and NVIDIA Container Toolkit on the Linux host, then confirm Docker can access the GPU. Clone this repository and run:
+
+```bash
+cd OpenMyModel/deploy/vllm-node
+cp .env.example .env
+chmod 600 .env
+```
+
+Edit <code>.env</code>: set <code>CLOUD_URL</code> and <code>ADMIN_PASSWORD</code> to your OpenMyModel server URL and admin password; give the node a unique <code>NODE_ID</code> and readable <code>NODE_NAME</code>; choose a <code>VLLM_MODEL</code> that fits your GPU, its <code>PUBLIC_MODEL_NAME</code>, and a long random <code>NODE_API_KEY</code>. Generate a key with <code>openssl rand -hex 32</code>. For gated Hugging Face models, also set <code>HF_TOKEN</code>.
+
+Start the node:
+
+```bash
+docker compose up -d
+docker compose logs -f vllm connector
+```
+
+The first run downloads the model; startup time depends on model size and network speed. The vLLM API stays on the private Compose network and is not published on a host port. vLLM's API key protects only some endpoints; utilities such as <code>/tokenize</code> are unauthenticated, so do not add a port mapping. See [vLLM security guidance](https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations). The Connector waits for the model to become ready, then registers the node with the admin server. Open <code>/admin</code> on your server and save the exact same <code>NODE_API_KEY</code> for this node. In **Model Scheduling**, set the route's actual upstream model name to <code>PUBLIC_MODEL_NAME</code>. If a public model maps to nodes running different engines, enter each node's own model name and node key on its route.
+
+The image is pinned to vLLM v0.30.0; change <code>VLLM_IMAGE</code> in <code>.env</code> to upgrade. GPU, driver, model and CUDA image combinations have different requirements, so check [vLLM GPU installation requirements](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/) first. The [official vLLM releases](https://github.com/vllm-project/vllm/releases) list available versions and image tags. The default <code>VLLM_MAX_MODEL_LEN</code> is 8192; adjust it for the model, context needs and available GPU memory.
 
 ### Docker Compose
 

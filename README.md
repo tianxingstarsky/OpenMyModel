@@ -103,7 +103,7 @@ curl https://api.example.com/v1/chat/completions \
 2. 用户打开 `https://你的域名/console`，通过邮箱验证码注册或登录，在自己的控制台查看用量和订单、充值并申请个人 API Key。
 3. 用户使用自己的 API Key 调用 `/v1`。管理员可在“用户与订单”查看用户和订单，并在“用量统计”检查平台请求与 Token 情况。
 
-服务商模式的预扣费目前支持文本聊天消息；模型节点需要提供 llama-server 的 `/apply-template` 和 `/tokenize` 接口。正式开放注册与支付前，请先在 HTTPS 域名下完成 SMTP 发信测试和支付宝异步通知验证。
+服务商模式的预扣费目前支持文本聊天消息；llama.cpp 节点使用 `/apply-template` 和 `/tokenize`，vLLM 节点使用其聊天 `/tokenize` 接口。正式开放注册与支付前，请先在 HTTPS 域名下完成 SMTP 发信测试和支付宝异步通知验证。
 
 ## 架构
 
@@ -168,7 +168,7 @@ npm run dev
 | 个人模式 | 不提供终端用户注册。管理员在 <code>/admin</code> 创建统一网关 Key；<code>/dashboard</code> 展示聚合用量，<code>/</code> 展示公开节点状态。桌面端也可使用自己的节点 Key 直连对应节点。 |
 | 服务商模式 | 管理员配置 HTTPS 公网地址、SMTP 和支付宝参数后才能启用。用户通过邮箱验证码注册/登录，在 <code>/console</code> 管理账户、申请 API Key、查看用量和订单并充值。 |
 
-服务商模式要求 SMTP 主机、发信账户与密码，以及支付宝应用 ID、商户 ID、RSA2 应用私钥和支付宝公钥全部配置完成。管理端设置输入和输出 Token 单价（每百万 Token）；缓存 Token 暂无单独价格。当前预扣费支持文本聊天消息，节点需提供 llama-server 的 <code>/apply-template</code> 与 <code>/tokenize</code> 接口。
+服务商模式要求 SMTP 主机、发信账户与密码，以及支付宝应用 ID、商户 ID、RSA2 应用私钥和支付宝公钥全部配置完成。管理端设置输入和输出 Token 单价（每百万 Token）；缓存 Token 暂无单独价格。当前预扣费支持文本聊天消息；llama.cpp 节点使用 <code>/apply-template</code> 与 <code>/tokenize</code>，vLLM 节点使用其聊天 <code>/tokenize</code> 接口。
 
 ## 接入客户端
 
@@ -184,6 +184,31 @@ Open WebUI 等 OpenAI 兼容客户端使用：
 - **API Key**：管理端创建的 <code>sk-</code> 网关 Key
 
 ## 部署到服务器
+
+### Linux vLLM 计算节点
+
+仓库提供独立的无界面 Linux 节点包：Docker 在 Linux 上运行官方 vLLM OpenAI 服务，轻量 Connector 通过 HTTPS/WSS 接入 OpenMyModel。当前包面向 Linux x86_64 + NVIDIA GPU；vLLM 不原生支持 Windows，GPU、驱动和 vLLM 镜像需符合官方要求。该节点包不安装或启动 Windows 桌面界面，也不替代云端网关。
+
+先在 Linux 主机安装 Docker Engine、Compose 插件和 NVIDIA Container Toolkit，并确认 Docker 能访问 GPU。克隆本仓库后运行：
+
+```bash
+cd OpenMyModel/deploy/vllm-node
+cp .env.example .env
+chmod 600 .env
+```
+
+编辑 <code>.env</code>：将 <code>CLOUD_URL</code> 和 <code>ADMIN_PASSWORD</code> 设置为 OpenMyModel 服务地址及管理员密码；为节点设置唯一的 <code>NODE_ID</code> 和可读的 <code>NODE_NAME</code>；设置受 GPU 显存支持的 <code>VLLM_MODEL</code>、对应的 <code>PUBLIC_MODEL_NAME</code>，并将 <code>NODE_API_KEY</code> 换成足够长的随机值。可用 <code>openssl rand -hex 32</code> 生成密钥。需要访问 Hugging Face 受限模型时，另外填写 <code>HF_TOKEN</code>。
+
+启动节点：
+
+```bash
+docker compose up -d
+docker compose logs -f vllm connector
+```
+
+首次运行会下载模型，耗时取决于模型大小和网络。vLLM API 只在 Compose 内部网络开放，不发布主机端口；客户端通过 OpenMyModel 网关访问。vLLM 的 API Key 只保护部分端点，`/tokenize` 等接口不受它保护，因此不要自行添加端口映射，详情见 [vLLM 安全说明](https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations)。Connector 等待模型就绪后会以节点名注册到管理端。打开服务器 <code>/admin</code>，在该节点的密钥设置中录入与 <code>NODE_API_KEY</code> 完全相同的值，然后在“模型调度”将路由的节点真实模型名设置为 <code>PUBLIC_MODEL_NAME</code>。如果同一公开模型名下还有其他引擎节点，可分别填入各自的真实模型名和节点密钥。
+
+镜像版本固定在 vLLM v0.30.0，升级时可在 <code>.env</code> 修改 <code>VLLM_IMAGE</code>。不同 GPU、驱动和模型对镜像/CUDA 组合及可用显存的要求不同，请先核对 [vLLM GPU 安装要求](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/)；[官方 vLLM 发布页](https://github.com/vllm-project/vllm/releases)列出可用版本和镜像标签。<code>VLLM_MAX_MODEL_LEN</code> 默认设为 8192，可按模型、上下文需求与 GPU 显存调整。
 
 ### Docker Compose
 
