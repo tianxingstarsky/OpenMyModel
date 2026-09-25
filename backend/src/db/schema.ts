@@ -47,6 +47,7 @@ export const nodes = sqliteTable("nodes", {
   modelName: text("model_name"),            // 当前加载的模型
   modelConfig: text("model_config"),        // JSON 模型配置
   upstreamApiKey: text("upstream_api_key"), // AES-GCM encrypted llama-server API key
+  ownerUserId: text("owner_user_id"),        // Relay-mode node owner; null for legacy admin nodes
 });
 
 // ==================== 数据库初始化 ====================
@@ -107,7 +108,19 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
       is_online INTEGER NOT NULL DEFAULT 0,
       model_name TEXT,
       model_config TEXT,
-      upstream_api_key TEXT
+      upstream_api_key TEXT,
+      owner_user_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS relay_node_credentials (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      node_id TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT,
+      revoked_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS platform_settings (
@@ -136,12 +149,35 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS relay_models (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      public_name TEXT NOT NULL,
+      remark TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      UNIQUE(user_id, public_name COLLATE NOCASE)
+    );
+
+    CREATE TABLE IF NOT EXISTS relay_model_routes (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      upstream_model TEXT NOT NULL,
+      weight INTEGER NOT NULL DEFAULT 1,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      UNIQUE(model_id, node_id, upstream_model)
+    );
+
     CREATE TABLE IF NOT EXISTS gateway_keys (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       prefix TEXT NOT NULL,
       secret_hash TEXT NOT NULL UNIQUE,
       owner_user_id TEXT,
+      service_mode TEXT NOT NULL DEFAULT 'personal',
       is_active INTEGER NOT NULL DEFAULT 1,
       token_limit INTEGER NOT NULL DEFAULT 0,
       rpm_limit INTEGER NOT NULL DEFAULT 0,
@@ -211,7 +247,27 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
       description TEXT NOT NULL,
       created_at TEXT NOT NULL,
       paid_at TEXT,
-      trade_no TEXT
+      trade_no TEXT,
+      purpose TEXT NOT NULL DEFAULT 'topup',
+      relay_request_limit INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS relay_subscription_periods (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      order_id TEXT NOT NULL UNIQUE,
+      starts_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      amount REAL NOT NULL,
+      request_limit INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS relay_request_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      key_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS platform_balance_entries (
@@ -238,6 +294,11 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
     CREATE INDEX IF NOT EXISTS idx_email_codes_created ON email_codes(created_at);
     CREATE INDEX IF NOT EXISTS idx_orders_user ON payment_orders(user_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_balance_entries_user_time ON platform_balance_entries(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_relay_credentials_user ON relay_node_credentials(user_id, revoked_at);
+    CREATE INDEX IF NOT EXISTS idx_relay_models_owner ON relay_models(user_id, enabled);
+    CREATE INDEX IF NOT EXISTS idx_relay_routes_model ON relay_model_routes(model_id, enabled);
+    CREATE INDEX IF NOT EXISTS idx_relay_periods_user_time ON relay_subscription_periods(user_id, starts_at, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_relay_events_user_time ON relay_request_events(user_id, created_at);
   `);
   try { sqlite.exec("ALTER TABLE usage_logs ADD COLUMN cost REAL NOT NULL DEFAULT 0"); } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
@@ -245,6 +306,20 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
   try { sqlite.exec("ALTER TABLE nodes ADD COLUMN upstream_api_key TEXT"); } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
   }
+  try { sqlite.exec("ALTER TABLE nodes ADD COLUMN owner_user_id TEXT"); } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
+  }
+  try { sqlite.exec("ALTER TABLE payment_orders ADD COLUMN purpose TEXT NOT NULL DEFAULT 'topup'"); } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
+  }
+  try { sqlite.exec("ALTER TABLE payment_orders ADD COLUMN relay_request_limit INTEGER NOT NULL DEFAULT 0"); } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
+  }
+  try { sqlite.exec("ALTER TABLE gateway_keys ADD COLUMN service_mode TEXT NOT NULL DEFAULT 'personal'"); } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
+  }
+  sqlite.exec(`UPDATE gateway_keys SET service_mode=CASE WHEN owner_user_id IS NULL THEN 'personal' ELSE 'provider' END
+    WHERE service_mode='personal' AND owner_user_id IS NOT NULL`);
   const sessionUserId = (sqlite.pragma("table_info(platform_sessions)") as Array<{ name: string; notnull: number }>)
     .find(column => column.name === "user_id");
   if (sessionUserId?.notnull) {

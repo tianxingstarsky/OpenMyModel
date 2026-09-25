@@ -19,7 +19,7 @@ OpenMyModel connects local inference nodes to your cloud server through authenti
 - **Protected nodes** — Each node has its own API key. The admin console stores it encrypted and supplies it to that node when routing requests.
 - **Unified gateway and model routing** — Issue caller-facing gateway keys, map public model names to upstream names, and configure weighted routes across nodes.
 - **OpenAI-compatible API** — <code>GET /v1/models</code> and <code>POST /v1/chat/completions</code>, including streaming SSE. Works with Open WebUI and OpenAI SDKs.
-- **Personal and provider modes** — Personal mode has no end-user registration. Provider mode adds email-code accounts, user-owned keys, usage and orders, Alipay top-ups and token billing.
+- **Personal, provider and relay-only modes** — Provider mode adds email-code accounts, user-owned keys, Alipay top-ups and token billing. Relay-only mode routes each account only to its own nodes, with free or monthly subscription billing.
 - **Usage and health** — Admin views summarize request volume, token usage and node health. The personal dashboard can show public aggregates without exposing node addresses, keys or conversation content.
 
 ## Admin console
@@ -132,6 +132,14 @@ After activation:
 
 Provider-mode prebilling currently supports text chat messages. llama.cpp nodes use `/apply-template` and `/tokenize`; vLLM nodes use its chat `/tokenize` endpoint. Before opening registration and payments, test SMTP delivery and Alipay asynchronous notifications on the HTTPS domain.
 
+### Relay-only mode: users bring their own nodes
+
+An administrator selects **Relay-only mode** in **System Settings**. The free plan requires an HTTPS public URL and SMTP. Monthly subscriptions also require Alipay RSA2 settings, a subscription price and a request allowance. Accounts remain unavailable until the selected plan's required settings are complete. Relay-only mode does not charge input or output tokens and has no separate cached-token price; users and administrators can still review request, token and access-frequency statistics.
+
+Users register or sign in at `https://your-domain/console`, create a node under **My Nodes**, and copy its one-time connector token. Paste the token into the desktop app's **Cloud Connection** page, or put it in `NODE_TOKEN` for a headless Linux node. The local inference engine should still use its own node API key: the relay connector token authenticates the tunnel, while the engine API key protects the local inference service.
+
+Users create public aliases and add routes to one or more of their own nodes. Upstream model names can differ between nodes: an alias such as `team-chat` can route to `Qwen3-8B` on one node and `my-local-qwen` on another. Gateway keys reveal only that account's available aliases, and requests can reach only that account's online, ready nodes. Other accounts' models, nodes and local engine keys are outside its routing scope. Admins can review accounts, node counts, orders and platform statistics, but cannot read or edit the local engine key stored on a user's node.
+
 ## Architecture
 
 ```mermaid
@@ -194,6 +202,7 @@ The default port is <code>3000</code>. You may set <code>ADMIN_PASSWORD</code> b
 | --- | --- |
 | Personal | No end-user sign-up. Admins create gateway keys at <code>/admin</code>. <code>/dashboard</code> shows aggregate usage; <code>/</code> shows public node status. Desktop-managed node keys can also access their corresponding node directly. |
 | Service provider | Requires an HTTPS public base URL, SMTP and Alipay settings before activation. Users register and sign in with email codes, then manage their account, API keys, usage and orders, and top up from <code>/console</code>. |
+| Relay-only | Users register at <code>/console</code> and manage their own nodes, model aliases, routes and gateway keys. Requests go only to the user's own ready nodes. Token use is free or covered by a monthly request subscription. |
 
 Provider mode requires an SMTP host, sender account and password, plus the Alipay app ID, seller ID, RSA2 app private key and Alipay public key. The mode stays unavailable until all required settings are present. Admins configure input and output prices per million tokens; cached tokens have no separate price. Provider prebilling currently accepts text chat messages; llama.cpp nodes use <code>/apply-template</code> and <code>/tokenize</code>, while vLLM nodes use its chat <code>/tokenize</code> endpoint.
 
@@ -224,7 +233,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Edit <code>.env</code>: set <code>CLOUD_URL</code> and <code>ADMIN_PASSWORD</code> to your OpenMyModel server URL and admin password; give the node a unique <code>NODE_ID</code> and readable <code>NODE_NAME</code>; choose a <code>VLLM_MODEL</code> that fits your GPU, its <code>PUBLIC_MODEL_NAME</code>, and a long random <code>NODE_API_KEY</code>. Generate a key with <code>openssl rand -hex 32</code>. For gated Hugging Face models, also set <code>HF_TOKEN</code>.
+Edit <code>.env</code> and set <code>CLOUD_URL</code>. For a personal or provider shared node, set <code>ADMIN_PASSWORD</code>, a unique <code>NODE_ID</code> and readable <code>NODE_NAME</code>. For relay-only mode, create a node in the user's console, put its one-time connector token in <code>NODE_TOKEN</code>, and leave <code>ADMIN_PASSWORD</code>, <code>NODE_ID</code> and <code>NODE_NAME</code> empty. Choose exactly one credential method. Set a GPU-compatible <code>VLLM_MODEL</code>, its <code>PUBLIC_MODEL_NAME</code> and a long random <code>NODE_API_KEY</code>. Generate a key with <code>openssl rand -hex 32</code>. For gated Hugging Face models, also set <code>HF_TOKEN</code>.
 
 Start the node:
 
@@ -233,7 +242,7 @@ docker compose up -d
 docker compose logs -f vllm connector
 ```
 
-The first run downloads the model; startup time depends on model size and network speed. The vLLM API stays on the private Compose network and is not published on a host port. vLLM's API key protects only some endpoints; utilities such as <code>/tokenize</code> are unauthenticated, so do not add a port mapping. See [vLLM security guidance](https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations). The Connector waits for the model to become ready, then registers the node with the admin server. Open <code>/admin</code> on your server and save the exact same <code>NODE_API_KEY</code> for this node. In **Model Scheduling**, set the route's actual upstream model name to <code>PUBLIC_MODEL_NAME</code>. If a public model maps to nodes running different engines, enter each node's own model name and node key on its route.
+The first run downloads the model; startup time depends on model size and network speed. The vLLM API stays on the private Compose network and is not published on a host port. vLLM's API key protects only some endpoints; utilities such as <code>/tokenize</code> are unauthenticated, so do not add a port mapping. See [vLLM security guidance](https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations). The Connector waits for the model to become ready, then establishes its tunnel. In personal or provider mode it uses the administrator credential and the node appears in the admin console; save its <code>NODE_API_KEY</code> there, then configure shared routes. In relay-only mode it uses the user's one-time node token. The node appears in that user's <code>/console</code>, where the user adds routes for the actual model name; the admin does not need or receive the local <code>NODE_API_KEY</code>.
 
 The image is pinned to vLLM v0.30.0; change <code>VLLM_IMAGE</code> in <code>.env</code> to upgrade. GPU, driver, model and CUDA image combinations have different requirements, so check [vLLM GPU installation requirements](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/) first. The [official vLLM releases](https://github.com/vllm-project/vllm/releases) list available versions and image tags. The default <code>VLLM_MAX_MODEL_LEN</code> is 8192; adjust it for the model, context needs and available GPU memory.
 

@@ -173,3 +173,23 @@ export function renderStatusPage(): string {
 </body>
 </html>`;
 }
+
+/** Public relay-mode landing page. It intentionally contains no node/model or
+ * customer usage information; customer dashboards require an account session. */
+export function renderRelayStatusPage(serviceName: string): string {
+  const name = serviceName.replace(/[&<>"']/g, value => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[value]!));
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light">
+<title>${name} · 网关状态</title><style>
+:root{color-scheme:light;--bg:#eef2ed;--card:#fff;--ink:#1c3432;--muted:#617673;--line:#dce6e1;--green:#227c69}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 Inter,"Segoe UI","Microsoft YaHei",sans-serif;min-height:100vh;display:grid;place-items:center;padding:28px}
+main{width:min(620px,100%);background:var(--card);border:1px solid var(--line);border-radius:24px;padding:36px;box-shadow:0 16px 44px #12312c10}
+.brand{display:flex;gap:14px;align-items:center}.mark{width:46px;height:46px;border-radius:14px;background:#e5f1ec;padding:8px;object-fit:contain}h1{font-size:24px;margin:0}.sub{color:var(--muted);margin:5px 0 28px}.state{display:flex;align-items:center;gap:10px;padding:16px;border:1px solid #cde6d8;background:#f0f8f3;border-radius:14px;color:#236c4b;font-weight:600}.dot{width:10px;height:10px;border-radius:50%;background:#2c9b68;box-shadow:0 0 0 5px #2c9b6818}.copy{color:var(--muted);margin:22px 0}.actions{display:flex;gap:10px;flex-wrap:wrap}.button{display:inline-flex;padding:10px 16px;border-radius:11px;text-decoration:none;font-weight:600;color:#fff;background:var(--green)}.secondary{background:#eef4f1;color:var(--ink)}footer{margin-top:28px;padding-top:18px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}code{background:#f2f5f3;border-radius:5px;padding:2px 5px}@media(max-width:520px){main{padding:25px}.brand{align-items:flex-start}}
+</style></head><body><main><div class="brand"><img class="mark" src="/brand-mark.png" alt=""><div><h1>${name}</h1><div class="sub">代转发网关</div></div></div>
+<div class="state"><span class="dot"></span>网关运行正常</div>
+<p class="copy">模型节点、路由和用量仅在所属账户内展示。使用者可登录控制台管理自己的节点与 API Key。</p>
+<div class="actions"><a class="button" href="/console">打开用户控制台</a><a class="button secondary" href="/api">查看 API 接入信息</a></div>
+<footer>公开页面不展示个人节点、模型名称或客户用量。OpenAI 兼容接口：<code>/v1/chat/completions</code> · 模型列表：<code>/v1/models</code></footer></main></body></html>`;
+}

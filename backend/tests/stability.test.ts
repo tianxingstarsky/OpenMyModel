@@ -69,7 +69,8 @@ async function fixture(t: TestContext, options: AppOptions = {}) {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  async function node(info: Message = {}, handle: (msg: Message, send: (msg: Message) => void) => void = () => {}, autoPong = true) {
+  async function node(info: Message = {}, handle: (msg: Message, send: (msg: Message) => void) => void = () => {}, autoPong = true,
+    credential = PASSWORD) {
     const socket = new WebSocket(url.replace("http:", "ws:") + "/ws/node", { autoPong });
     clients.push(socket);
     const messages: Message[] = [];
@@ -82,7 +83,7 @@ async function fixture(t: TestContext, options: AppOptions = {}) {
     });
     socket.on("error", () => {});
     await once(socket, "open");
-    send({ type: "auth", password: PASSWORD, nodeId: "node-1", modelName: "model-a", ...info });
+    send({ type: "auth", password: credential, nodeId: "node-1", modelName: "model-a", ...info });
     await until(() => messages.some(msg => msg.type === "auth_ok" || msg.type === "auth_error"));
     assert.equal(messages.find(msg => msg.type.startsWith("auth_"))?.type, "auth_ok");
     return { socket, messages, send };
@@ -242,7 +243,7 @@ test("personal mode exposes only its public dashboard and blocks provider signup
   assert.equal(crossOriginSignup.statusCode, 403, "browser auth actions reject cross-origin form submissions");
   const signup = await app.inject({ method: "POST", url: "/api/auth/email-code", payload: { email: "person@example.com", purpose: "register" } });
   assert.equal(signup.statusCode, 503);
-  assert.match(signup.json().error, /服务商模式尚未启用/);
+  assert.match(signup.json().error, /未开放用户账户/);
 
   const csrfLogin = await app.inject({ method: "POST", url: "/api/admin/login",
     headers: { origin: "https://evil.example.test" }, payload: { password: PASSWORD } });
@@ -467,6 +468,10 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     assert.equal(unauthenticated.statusCode, 401);
     const unauthenticatedBalanceEntries = await app.inject({ method: "GET", url: "/api/user/balance-entries" });
     assert.equal(unauthenticatedBalanceEntries.statusCode, 401);
+    const blockedPersonalMode = await app.inject({ method: "PUT", url: "/api/admin/settings", headers: { cookie: adminCookie }, payload: { mode: "personal" } });
+    assert.equal(blockedPersonalMode.statusCode, 400, "mode changes cannot strand customer balances or pending top-ups");
+    database.prepare("UPDATE platform_users SET balance=0").run();
+    database.prepare("UPDATE payment_orders SET status='closed' WHERE status='pending'").run();
     const personalMode = await app.inject({ method: "PUT", url: "/api/admin/settings", headers: { cookie: adminCookie }, payload: { mode: "personal" } });
     assert.equal(personalMode.statusCode, 200);
     const blockedProviderKey = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${alphaKey.key}` } });
@@ -1489,7 +1494,7 @@ test("managed gateway routes with the configured llama-server key and meters usa
   const nodeKey = "node-secret-for-llama-server";
   let expectedNodeKey = nodeKey;
   let relayed = false;
-  await node({ modelName: "internal-model" }, (msg, send) => {
+  const handleNodeMessage = (msg: Message, send: (message: Message) => void) => {
     if (msg.type !== "http_relay") return;
     if (msg.path === "/apply-template") {
       send(headers(msg.requestId, 200, { "content-type": "application/json" }));
@@ -1516,12 +1521,13 @@ test("managed gateway routes with the configured llama-server key and meters usa
       authorization: `Bearer ${expectedNodeKey}`, "x-api-key": expectedNodeKey }));
     send({ type: "http_chunk", requestId: msg.requestId, data: body });
     send({ type: "http_done", requestId: msg.requestId });
-  });
+  };
 
   const login = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
   assert.equal(login.statusCode, 200);
   const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
   const adminHeaders = { cookie, "content-type": "application/json" };
+  await node({ modelName: "internal-model" }, handleNodeMessage);
   const nodeKeyResponse = await app.inject({ method: "PUT", url: "/api/admin/nodes/node-1/api-key", headers: adminHeaders,
     payload: { apiKey: nodeKey } });
   assert.equal(nodeKeyResponse.statusCode, 200, nodeKeyResponse.body);
@@ -1608,7 +1614,7 @@ test("provider gateway preflights node tokens and reserves no more than the avai
   let inferenceCalls = 0;
   let cancelledStream = false;
   let oversizedResponse = false;
-  await node({ modelName: "internal-model" }, (msg, send) => {
+  const handleNodeMessage = (msg: Message, send: (message: Message) => void) => {
     if (msg.type === "cancel_request") { cancelledStream = true; return; }
     if (msg.type !== "http_relay") return;
     relayedPaths.push(msg.path);
@@ -1653,7 +1659,7 @@ test("provider gateway preflights node tokens and reserves no more than the avai
     send(headers(msg.requestId, 200, { "content-type": "application/json" }));
     send({ type: "http_chunk", requestId: msg.requestId, data: JSON.stringify(value) });
     send({ type: "http_done", requestId: msg.requestId });
-  });
+  };
 
   const adminLogin = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
   const adminCookie = String(adminLogin.headers["set-cookie"]).split(";", 1)[0];
@@ -1668,6 +1674,7 @@ test("provider gateway preflights node tokens and reserves no more than the avai
   } });
   assert.equal(settings.statusCode, 200, settings.body);
   const adminHeaders = { cookie: adminCookie, "content-type": "application/json" };
+  await node({ modelName: "internal-model" }, handleNodeMessage);
   const model = await app.inject({ method: "POST", url: "/api/admin/models", headers: adminHeaders,
     payload: { publicName: "public-chat", inputPrice: 1, outputPrice: 1 } });
   const route = await app.inject({ method: "POST", url: `/api/admin/models/${model.json().id}/routes`, headers: adminHeaders,
@@ -1728,5 +1735,203 @@ test("provider gateway preflights node tokens and reserves no more than the avai
       (database.prepare("SELECT COUNT(*) AS count FROM provider_usage_reservations").get() as any).count === 0);
     const afterCancel = database.prepare("SELECT balance FROM platform_users WHERE id='provider-user'").get() as { balance: number };
     assert.equal(afterCancel.balance, 0.000011, "cancelled streams charge input tokens and tokenize emitted output when upstream usage is absent");
+  } finally { database.close(); }
+});
+
+test("relay mode isolates models and requests to each account's own nodes and API keys", async t => {
+  const { app, tunnel, node, post, directory } = await fixture(t);
+  const adminLogin = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
+  const adminCookie = String(adminLogin.headers["set-cookie"]).split(";", 1)[0];
+  const settings = await app.inject({ method: "PUT", url: "/api/admin/settings", headers: { cookie: adminCookie }, payload: {
+    mode: "relay", relayBillingMode: "free", relayFreeMonthlyRequests: 1000,
+    publicUrl: "https://relay.example.test", mailHost: "smtp.example.test", mailPort: 465,
+    mailUser: "mailer", mailFrom: "noreply@example.test", mailPassword: "mail-secret",
+  } });
+  assert.equal(settings.statusCode, 200, settings.body);
+  assert.equal(settings.json().mode, "relay");
+
+  const database = new Database(join(directory, "openmymodel.db"));
+  try {
+    const now = new Date().toISOString();
+    database.prepare("INSERT INTO nodes(id,name,connected_at,owner_user_id) VALUES(?,?,?,NULL)")
+      .run("legacy-shared-node", "Legacy shared node", now);
+    database.prepare("INSERT INTO platform_users(id,email,created_at) VALUES(?,?,?)")
+      .run("relay-user-a", "a@example.test", now);
+    database.prepare("INSERT INTO platform_users(id,email,created_at) VALUES(?,?,?)")
+      .run("relay-user-b", "b@example.test", now);
+    const platform = new PlatformService(database, directory, tunnel);
+    const nodeA = platform.createRelayNode("relay-user-a", "A node");
+    const nodeB = platform.createRelayNode("relay-user-b", "B node");
+    const modelA = platform.saveRelayModel("relay-user-a", { publicName: "account-a-chat", remark: "private A" })!;
+    const modelB = platform.saveRelayModel("relay-user-b", { publicName: "account-b-chat", remark: "private B" })!;
+    platform.saveRelayModelRoute("relay-user-a", modelA.id, { nodeId: nodeA.nodeId, upstreamModel: "tenant-a/model-real" });
+    platform.saveRelayModelRoute("relay-user-b", modelB.id, { nodeId: nodeB.nodeId, upstreamModel: "tenant-b/model-real" });
+    const keyA = platform.createGatewayKey("A gateway", "relay-user-a");
+    const keyB = platform.createGatewayKey("B gateway", "relay-user-b");
+    assert.equal(keyA.serviceMode, "relay");
+    assert.equal(keyB.serviceMode, "relay");
+
+    let inferenceCallsA = 0;
+    let inferenceCallsB = 0;
+    await node({ modelName: "tenant-a/model-real" }, (message, send) => {
+      if (message.type !== "http_relay") return;
+      assert.equal(message.upstreamApiKey, undefined, "relay mode relies on the node's local engine credential");
+      const body = JSON.parse(message.body);
+      if (message.path === "/apply-template") {
+        send(headers(message.requestId, 200, { "content-type": "application/json" }));
+        send({ type: "http_chunk", requestId: message.requestId, data: JSON.stringify({ prompt: "rendered relay prompt" }) });
+        send({ type: "http_done", requestId: message.requestId });
+        return;
+      }
+      if (message.path === "/tokenize") {
+        if (typeof body.prompt === "string" && body.content === undefined) {
+          send(headers(message.requestId, 404, { "content-type": "application/json" }));
+          send({ type: "http_done", requestId: message.requestId });
+          return;
+        }
+        const content = String(body.content ?? body.prompt ?? "");
+        send(headers(message.requestId, 200, { "content-type": "application/json" }));
+        send({ type: "http_chunk", requestId: message.requestId, data: JSON.stringify({ tokens: Array.from(content, (_, index) => index) }) });
+        send({ type: "http_done", requestId: message.requestId });
+        return;
+      }
+      assert.equal(message.path, "/v1/chat/completions");
+      assert.equal(body.model, "tenant-a/model-real");
+      inferenceCallsA++;
+      send(headers(message.requestId, 200, { "content-type": "application/json" }));
+      const content = body.messages[0].content === "missing usage" ? "unreported output" : "only account A";
+      const responseBody: Message = { choices: [{ message: { content } }] };
+      if (content === "only account A") responseBody.usage = { prompt_tokens: 11, completion_tokens: 7 };
+      send({ type: "http_chunk", requestId: message.requestId, data: JSON.stringify(responseBody) });
+      send({ type: "http_done", requestId: message.requestId });
+    }, true, nodeA.token);
+    await node({ modelName: "tenant-b/model-real" }, (message, send) => {
+      if (message.type !== "http_relay") return;
+      inferenceCallsB++;
+      send(headers(message.requestId, 200, { "content-type": "application/json" }));
+      send({ type: "http_chunk", requestId: message.requestId, data: JSON.stringify({
+        choices: [{ message: { content: "only account B" } }], usage: { prompt_tokens: 2, completion_tokens: 2 },
+      }) });
+      send({ type: "http_done", requestId: message.requestId });
+    }, true, nodeB.token);
+
+    const adminNodes = await app.inject({ method: "GET", url: "/api/admin/nodes", headers: { cookie: adminCookie } });
+    assert.equal(adminNodes.statusCode, 200, adminNodes.body);
+    assert.deepEqual(adminNodes.json().map((item: Message) => item.id).sort(), [nodeA.nodeId, nodeB.nodeId].sort(),
+      "relay-mode support pages include account-owned nodes only, not legacy shared-pool nodes");
+
+    const directNodeKey = await post({ model: "account-a-chat", messages: [] }, nodeA.token).response;
+    assert.equal(directNodeKey.statusCode, 401, "relay-only mode rejects using node credentials as gateway keys");
+    await text(directNodeKey);
+
+    const modelsA = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${keyA.key}` } });
+    const modelsB = await app.inject({ method: "GET", url: "/v1/models", headers: { authorization: `Bearer ${keyB.key}` } });
+    assert.equal(modelsA.statusCode, 200, modelsA.body);
+    assert.deepEqual(modelsA.json().data.map((model: Message) => model.id), ["account-a-chat"]);
+    assert.deepEqual(modelsB.json().data.map((model: Message) => model.id), ["account-b-chat"]);
+    const noAccountKey = await app.inject({ method: "GET", url: "/v1/models" });
+    assert.equal(noAccountKey.statusCode, 401, "relay model discovery requires an account gateway key");
+
+    const crossedRequest = await post({ model: "account-b-chat", messages: [{ role: "user", content: "hello" }] }, keyA.key).response;
+    assert.equal(crossedRequest.statusCode, 404, "one account cannot route through another account's model");
+    await text(crossedRequest);
+    assert.equal(inferenceCallsA + inferenceCallsB, 0);
+
+    const response = await post({ model: "account-a-chat", messages: [{ role: "user", content: "hello" }] }, keyA.key).response;
+    assert.equal(response.statusCode, 200);
+    assert.match(await text(response), /only account A/);
+    assert.equal(inferenceCallsA, 1);
+    assert.equal(inferenceCallsB, 0);
+
+    const unreportedUsage = await post({ model: "account-a-chat", messages: [{ role: "user", content: "missing usage" }] }, keyA.key).response;
+    assert.equal(unreportedUsage.statusCode, 200, unreportedUsage.statusMessage);
+    assert.match(await text(unreportedUsage), /unreported output/);
+    assert.equal(inferenceCallsA, 2);
+
+    const cookieA = `omm_session=${platform.createSession("user", "relay-user-a")}`;
+    const cookieB = `omm_session=${platform.createSession("user", "relay-user-b")}`;
+    const relayConsoleModels = await app.inject({ method: "GET", url: "/api/user/models", headers: { cookie: cookieA } });
+    assert.equal(relayConsoleModels.statusCode, 200, relayConsoleModels.body);
+    assert.equal(relayConsoleModels.json()[0].publicName, "account-a-chat",
+      "the relay console uses the mode-aware user model endpoint for its routing page");
+    assert.equal(relayConsoleModels.json()[0].routes[0].upstreamModel, "tenant-a/model-real");
+    const dashboardA = await app.inject({ method: "GET", url: "/api/user/dashboard", headers: { cookie: cookieA } });
+    const dashboardB = await app.inject({ method: "GET", url: "/api/user/dashboard", headers: { cookie: cookieB } });
+    assert.equal(dashboardA.statusCode, 200, dashboardA.body);
+    assert.deepEqual(dashboardA.json().models.map((model: Message) => model.id), ["account-a-chat"]);
+    assert.equal(dashboardA.json().stats.requests, 2);
+    assert.equal(dashboardA.json().stats.input, 11 + "rendered relay prompt".length);
+    assert.equal(dashboardA.json().stats.output, 7 + "unreported output".length);
+    assert.equal(dashboardA.json().stats.cost, 0);
+    assert.deepEqual(dashboardB.json().models.map((model: Message) => model.id), ["account-b-chat"]);
+    assert.equal(dashboardB.json().stats.requests, 0);
+    assert.equal(platform.relaySubscriptionSummary("relay-user-a").requestsUsed, 2,
+      "model discovery and requests rejected before dispatch do not count against the monthly allowance");
+    assert.equal(platform.orders("relay-user-a").length, 0);
+    assert.equal((await app.inject({ method: "GET", url: "/status.json" })).json().mode, "relay",
+      "public service status exposes only the relay mode marker rather than node/model inventory");
+  } finally { database.close(); }
+});
+
+test("monthly relay orders apply signed Alipay payments once and enforce the stored request allowance", async t => {
+  const { app, tunnel, directory } = await fixture(t);
+  const database = new Database(join(directory, "openmymodel.db"));
+  try {
+    const appKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const alipayKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const appPrivateKey = appKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const alipayPrivateKey = alipayKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const platform = new PlatformService(database, directory, tunnel, "https://relay.example.test");
+    const settings = platform.saveAdminSettings({
+      mode: "relay", relayBillingMode: "monthly", relayMonthlyPrice: 6.5, relayMonthlyRequests: 1,
+      publicUrl: "https://relay.example.test", mailHost: "smtp.example.test", mailPort: 465,
+      mailUser: "mailer", mailFrom: "noreply@example.test", mailPassword: "mail-secret",
+      alipayAppId: "2026092500000001", alipaySellerId: "2088000000000000",
+      alipayPrivateKey: appPrivateKey,
+      alipayPublicKey: alipayKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    });
+    assert.equal(settings.relayReady, true);
+    database.prepare("INSERT INTO platform_users(id,email,created_at) VALUES(?,?,?)")
+      .run("monthly-relay-user", "monthly@example.test", new Date().toISOString());
+
+    const staleOrder = platform.createRelaySubscriptionOrder("monthly-relay-user", "https://relay.example.test/console?payment=return");
+    assert.equal(staleOrder.amount, 6.5);
+    assert.equal(staleOrder.requestLimit, 1);
+    platform.saveAdminSettings({ relayMonthlyPrice: 7.25, relayMonthlyRequests: 2 });
+    const order = platform.createRelaySubscriptionOrder("monthly-relay-user", "https://relay.example.test/console?payment=return");
+    assert.notEqual(order.orderId, staleOrder.orderId, "a changed price or quota must create a fresh checkout snapshot");
+    assert.equal(platform.orders("monthly-relay-user").find((row: any) => row.id === staleOrder.orderId)?.status, "closed");
+    assert.equal(order.amount, 7.25);
+    assert.equal(order.requestLimit, 2);
+    assert.equal(new URL(order.paymentUrl).searchParams.get("notify_url"),
+      "https://relay.example.test/api/payments/alipay/notify");
+    assert.equal(platform.orders("monthly-relay-user").find((row: any) => row.id === order.orderId)?.relayRequestLimit, 2,
+      "the order stores the allowance selected at checkout");
+
+    const fields: Record<string, string> = {
+      app_id: "2026092500000001", seller_id: "2088000000000000", sign_type: "RSA2",
+      notify_type: "trade_status_sync", notify_id: "relay-notify-1", notify_time: "2026-09-25 12:00:00",
+      charset: "utf-8", version: "1.0", out_trade_no: order.orderId, total_amount: "7.25",
+      trade_status: "TRADE_SUCCESS", trade_no: "2026092500000002",
+    };
+    const signatureBase = Object.keys(fields).filter(key => key !== "sign_type").sort()
+      .map(key => `${key}=${fields[key]}`).join("&");
+    const notification = { ...fields, sign: createSign("RSA-SHA256").update(signatureBase).sign(alipayPrivateKey, "base64") };
+    assert.equal(platform.processAlipayNotification(notification), true);
+    assert.equal(platform.processAlipayNotification(notification), true, "duplicate callbacks are acknowledged idempotently");
+    const summary = platform.relaySubscriptionSummary("monthly-relay-user");
+    assert.equal(summary.status, "active");
+    assert.equal(summary.current.requestLimit, 2);
+    assert.equal(summary.requestsRemaining, 2);
+
+    const createdKey = platform.createGatewayKey("monthly key", "monthly-relay-user");
+    const gatewayKey = platform.findGatewayKey(createdKey.key)!;
+    platform.checkGatewayKey(gatewayKey);
+    platform.checkGatewayKey(gatewayKey);
+    assert.throws(() => platform.checkGatewayKey(gatewayKey), (error: any) => error.statusCode === 429,
+      "the allowance stored on the paid order blocks additional requests");
+    assert.equal(platform.relaySubscriptionSummary("monthly-relay-user").requestsUsed, 2);
+    assert.throws(() => platform.saveAdminSettings({ relayBillingMode: "free" }), /仍有有效订阅/,
+      "billing mode changes wait until paid periods expire");
   } finally { database.close(); }
 });

@@ -64,11 +64,11 @@ function hasTextOnlyMessages(body: Record<string, unknown>): boolean {
 }
 
 function relayJson(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string }, path: string,
-  body: Record<string, unknown>, upstreamApiKey: string, signal: AbortSignal): Promise<Record<string, unknown>>;
+  body: Record<string, unknown>, upstreamApiKey: string | undefined, signal: AbortSignal): Promise<Record<string, unknown>>;
 function relayJson(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string }, path: string,
-  body: Record<string, unknown>, upstreamApiKey: string, signal: AbortSignal, unsupportedIsNull: true): Promise<Record<string, unknown> | null>;
+  body: Record<string, unknown>, upstreamApiKey: string | undefined, signal: AbortSignal, unsupportedIsNull: true): Promise<Record<string, unknown> | null>;
 async function relayJson(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string }, path: string,
-  body: Record<string, unknown>, upstreamApiKey: string, signal: AbortSignal,
+  body: Record<string, unknown>, upstreamApiKey: string | undefined, signal: AbortSignal,
   unsupportedIsNull = false): Promise<Record<string, unknown> | null> {
   let statusCode = 0;
   let raw: string;
@@ -104,9 +104,9 @@ function tokenCount(response: Record<string, unknown>, label: string): number {
 }
 
 async function managedPromptTokenCount(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string },
-  body: Record<string, unknown>, upstreamApiKey: string, signal: AbortSignal): Promise<number> {
+  body: Record<string, unknown>, upstreamApiKey: string | undefined, signal: AbortSignal): Promise<number> {
   if (!hasTextOnlyMessages(body)) {
-    throw new RelayError("Service-provider billing currently supports text-only chat messages", 400);
+    throw new RelayError("Per-key token limits currently support text-only chat messages", 400);
   }
   const templated = await relayJson(tunnel, node, "/apply-template", body, upstreamApiKey, signal, true);
   if (templated && typeof templated.prompt === "string") {
@@ -130,7 +130,7 @@ async function managedPromptTokenCount(tunnel: WebSocketTunnel, node: { nodeId: 
 }
 
 async function managedCompletionTokenCount(tunnel: WebSocketTunnel, node: { nodeId: string; connectionId: string },
-  texts: string[], model: string, upstreamApiKey: string, signal: AbortSignal): Promise<number> {
+  texts: string[], model: string, upstreamApiKey: string | undefined, signal: AbortSignal): Promise<number> {
   let total = 0;
   for (const content of texts) {
     if (!content) continue;
@@ -310,6 +310,20 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     const authorization = request.headers.authorization;
     const rawKey = authorization?.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
     const managedKey = rawKey ? platform.findGatewayKey(rawKey) : null;
+    if (platform.isRelayMode()) {
+      if (!managedKey) {
+        return reply.status(401).send({ error: { message: rawKey ? "Invalid API Key" : "Missing API Key", type: "authentication_error" } });
+      }
+      try {
+        platform.checkGatewayKey(managedKey, { countRelayRequest: false });
+        if (!managedKey.owner_user_id) throw new RelayError("An account-owned API Key is required", 403);
+        const modelFilter = platform.allowedModels(managedKey);
+        return { object: "list", data: platform.publicRelayModels(managedKey.owner_user_id, modelFilter) };
+      } catch (error) {
+        const status = error instanceof RelayError ? error.statusCode : 401;
+        return reply.status(status).send({ error: { message: (error as Error).message, type: "authentication_error" } });
+      }
+    }
     if (managedKey) {
       let modelFilter: string[];
       try {
@@ -329,6 +343,7 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
       const target = await tunnel.findNode(rawKey);
       platform.recordDirectRequest(platform.directKeyId(rawKey));
       const node = tunnel.getOnlineNodes().find(candidate => candidate.id === target.nodeId);
+      if (node?.ownerUserId) throw new RelayError("Personal relay nodes require an account gateway API Key", 401);
       if (!node?.serverRunning) throw new RelayError("Compute node unavailable", 503);
       return { object: "list", data: [{ id: node.modelName || "local-model", object: "model",
         created: Math.floor(Date.now() / 1000), owned_by: node.name }] };
@@ -353,8 +368,9 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
 
     const rawKey = auth.slice(7).trim();
     const managedKey = platform.findGatewayKey(rawKey);
-    if (platform.isProviderMode() && !managedKey) {
-      return reply.status(401).send({ error: { message: "Use an API Key issued by this service", type: "authentication_error" } });
+    const relayMode = platform.isRelayMode();
+    if ((platform.isProviderMode() || relayMode) && !managedKey) {
+      return reply.status(401).send({ error: { message: "Use an account API Key issued for the current service mode", type: "authentication_error" } });
     }
     if (/^sk-oom-gw-/.test(rawKey) && !managedKey) {
       return reply.status(401).send({ error: { message: "Invalid API Key", type: "authentication_error" } });
@@ -381,15 +397,28 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     let node: { nodeId: string; connectionId: string } | undefined;
     let upstreamApiKey: string | undefined;
     let upstreamModel = "";
+    let relayBody = body;
+
+    const settledPromptTokens = async (reportedPrompt: number): Promise<number> => {
+      if (reportedPrompt > 0 || reservedPromptTokens > 0 || !relayMode || !node || !hasTextOnlyMessages(relayBody)) {
+        return reportedPrompt || reservedPromptTokens;
+      }
+      try {
+        return await managedPromptTokenCount(tunnel, node, relayBody, upstreamApiKey, AbortSignal.timeout(10_000));
+      } catch (error) {
+        request.log.warn({ err: error, model: publicModel }, "Prompt token usage was unavailable for relay statistics");
+        return 0;
+      }
+    };
 
     const settledCompletionTokens = async (): Promise<number> => {
       if (!capture) return 0;
       const texts = capture.completionTexts();
-      if ((!usageReservationId && !tokenReservationId)
+      if ((!usageReservationId && !tokenReservationId && !relayMode)
         || (capture.completionReported && (capture.completion > 0 || texts.length === 0))) {
         return capture.completion;
       }
-      if (!node || !upstreamApiKey) return capture.completion;
+      if (!node || (!upstreamApiKey && !relayMode)) return capture.completion;
       if (capture.completionTextTruncated) {
         request.log.error({ model: publicModel }, "Completion text exceeded the token metering buffer");
         return capture.completion;
@@ -405,20 +434,27 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
     };
 
     try {
-      let relayBody = body;
       if (managedKey) {
-        platform.checkGatewayKey(managedKey);
+        platform.checkGatewayKey(managedKey, { countRelayRequest: !relayMode });
         const allowed = platform.allowedModels(managedKey);
         if (allowed.length && !allowed.includes(publicModel)) throw new RelayError("Model is not allowed for this API Key", 403);
-        const route = await platform.selectManagedRoute(publicModel, controller.signal);
-        node = { nodeId: route.nodeId, connectionId: route.connectionId };
-        upstreamApiKey = route.upstreamKey;
-        upstreamModel = route.upstreamModel;
-        inputPrice = route.inputPrice;
-        outputPrice = route.outputPrice;
-        publicModel = route.publicName;
+        if (relayMode) {
+          if (!managedKey.owner_user_id) throw new RelayError("An account-owned API Key is required", 403);
+          const route = await platform.selectRelayRoute(managedKey.owner_user_id, publicModel, controller.signal);
+          node = { nodeId: route.nodeId, connectionId: route.connectionId };
+          upstreamModel = route.upstreamModel;
+          publicModel = route.publicName;
+        } else {
+          const route = await platform.selectManagedRoute(publicModel, controller.signal);
+          node = { nodeId: route.nodeId, connectionId: route.connectionId };
+          upstreamApiKey = route.upstreamKey;
+          upstreamModel = route.upstreamModel;
+          inputPrice = route.inputPrice;
+          outputPrice = route.outputPrice;
+          publicModel = route.publicName;
+        }
         targetKeyId = managedKey.id;
-        relayBody = { ...body, model: route.upstreamModel };
+        relayBody = { ...body, model: upstreamModel };
         if (platform.isProviderMode() || managedKey.token_limit > 0) {
           const budget = requestCompletionBudget(body);
           reservedPromptTokens = await managedPromptTokenCount(tunnel, node, relayBody, upstreamApiKey, controller.signal);
@@ -449,15 +485,19 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
           }
         }
       } else {
+        if (relayMode) throw new RelayError("Personal node keys cannot be used in relay-only mode", 401);
         node = await tunnel.findNode(rawKey, body.model as string | undefined, controller.signal);
+        const localNode = tunnel.getOnlineNodes().find(candidate => candidate.id === node!.nodeId);
+        if (localNode?.ownerUserId) throw new RelayError("Personal relay nodes require an account gateway API Key", 401);
         platform.recordDirectRequest(targetKeyId);
       }
+      if (relayMode && managedKey) platform.recordRelayRequest(managedKey);
       if (body.stream === true) {
         const streamOptions = body.stream_options && typeof body.stream_options === "object" && !Array.isArray(body.stream_options)
           ? body.stream_options as Record<string, unknown> : {};
         relayBody = { ...relayBody, stream_options: { ...streamOptions, include_usage: true } };
       }
-      capture = new UsageCapture(!!usageReservationId || !!tokenReservationId);
+      capture = new UsageCapture(!!usageReservationId || !!tokenReservationId || relayMode);
       await tunnel.relayHttp(node, { path: request.url, body: JSON.stringify(relayBody), upstreamApiKey }, {
         signal: controller.signal,
         onHeaders: (statusCode, headers) => {
@@ -484,9 +524,10 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
       });
       const usage = capture.finish(body.stream === true);
       const completionTokens = await settledCompletionTokens();
+      const promptTokens = upstreamStatus < 400 ? await settledPromptTokens(usage.prompt) : 0;
       try {
         platform.recordUsage(targetKeyId, publicModel, "/v1/chat/completions",
-          upstreamStatus < 400 ? (usage.prompt || reservedPromptTokens) : 0, upstreamStatus < 400 ? completionTokens : 0,
+          promptTokens, upstreamStatus < 400 ? completionTokens : 0,
           request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId, tokenReservationId);
         usageReservationId = undefined;
         tokenReservationId = undefined;
@@ -496,9 +537,10 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
       if (upstreamHeadersReceived && upstreamStatus < 400) {
         const partialUsage = capture?.finish(body.stream === true);
         const completionTokens = await settledCompletionTokens();
+        const promptTokens = await settledPromptTokens(partialUsage?.prompt ?? 0);
         try {
           platform.recordUsage(targetKeyId, publicModel, "/v1/chat/completions",
-            partialUsage?.prompt || reservedPromptTokens, completionTokens,
+            promptTokens, completionTokens,
             request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId, tokenReservationId);
           usageReservationId = undefined;
           tokenReservationId = undefined;

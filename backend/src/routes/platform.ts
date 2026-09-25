@@ -70,9 +70,14 @@ async function requireAdmin(request: FastifyRequest, reply: FastifyReply, platfo
 }
 
 function requireUser(request: FastifyRequest, reply: FastifyReply, platform: PlatformService): string | null {
-  if (!platform.isProviderMode()) { reply.status(403).send({ error: "Service-provider mode is disabled" }); return null; }
+  if (!platform.isUserPortalEnabled()) { reply.status(403).send({ error: "User accounts are disabled in the current mode" }); return null; }
   const session = platform.getSession(cookie(request, "omm_session"));
   if (session?.role !== "user" || !session.userId) { reply.status(401).send({ error: "Sign in required" }); return null; }
+  if (!platform.isUserActive(session.userId)) {
+    platform.revokeSession(cookie(request, "omm_session"));
+    reply.header("set-cookie", sessionCookie(request, "", 0)).status(403).send({ error: "Account disabled" });
+    return null;
+  }
   if (!allowSameOriginMutation(request, reply, platform)) return null;
   return session.userId;
 }
@@ -84,7 +89,7 @@ function apiError(reply: FastifyReply, error: unknown, status = 400) {
 export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformService, auth: AdminAuthenticator): void {
   app.get("/api/public/config", async () => platform.getPublicConfig());
   app.get("/api/public/dashboard", async (_request, reply) => {
-    if (platform.isProviderMode()) return reply.status(404).send({ error: "Dashboard is private in service-provider mode" });
+    if (platform.isUserPortalEnabled()) return reply.status(404).send({ error: "Dashboard is private in account mode" });
     return platform.publicOverview();
   });
 
@@ -150,6 +155,7 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   });
   app.get("/api/admin/models", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
+    if (platform.isRelayMode()) return reply.status(409).send({ error: "Shared model routing is disabled in relay-only mode" });
     return platform.adminModels();
   });
   app.post("/api/admin/models", async (request, reply) => {
@@ -236,7 +242,7 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
       return reply.status(400).send({ error: "请输入有效邮箱地址" });
     }
     if (body.purpose !== "register" && body.purpose !== "login") return reply.status(400).send({ error: "验证码用途无效" });
-    if (!platform.isProviderMode()) return reply.status(503).send({ error: "服务商模式尚未启用" });
+    if (!platform.isUserPortalEnabled()) return reply.status(503).send({ error: "当前运营模式未开放用户账户" });
 
     void platform.sendEmailCode(body.email, body.purpose)
       .catch(error => request.log.error({ err: error }, "Email verification code delivery failed"));
@@ -255,6 +261,11 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   app.get("/api/auth/me", async (request, reply) => {
     const session = platform.getSession(cookie(request, "omm_session"));
     if (session?.role !== "user") return reply.status(401).send({ error: "Sign in required" });
+    if (!session.userId || !platform.isUserActive(session.userId)) {
+      platform.revokeSession(cookie(request, "omm_session"));
+      reply.header("set-cookie", sessionCookie(request, "", 0));
+      return reply.status(403).send({ error: "Account disabled" });
+    }
     return { ok: true, email: session.email };
   });
   app.post("/api/auth/logout", async (request, reply) => {
@@ -269,11 +280,44 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   });
   app.get("/api/user/models", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;
-    return platform.listPublicModels();
+    return platform.isRelayMode() ? platform.listRelayModels(userId) : platform.listPublicModels();
   });
   app.get("/api/user/key-models", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;
-    return platform.keyModelOptions();
+    return platform.keyModelOptions(userId);
+  });
+  app.get("/api/user/relay/nodes", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    try { return platform.listRelayNodes(userId); } catch (error) { return apiError(reply, error, 403); }
+  });
+  app.post("/api/user/relay/nodes", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    try { return platform.createRelayNode(userId, bodyOf(request).name); } catch (error) { return apiError(reply, error); }
+  });
+  app.post<{ Params: { nodeId: string } }>("/api/user/relay/nodes/:nodeId/token", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    try { return platform.rotateRelayNodeToken(userId, request.params.nodeId); } catch (error) { return apiError(reply, error, 404); }
+  });
+  app.delete<{ Params: { nodeId: string } }>("/api/user/relay/nodes/:nodeId", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    try { return { ok: platform.revokeRelayNode(userId, request.params.nodeId) }; } catch (error) { return apiError(reply, error, 404); }
+  });
+  app.post("/api/user/relay/models", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    try { return platform.saveRelayModel(userId, bodyOf(request)); } catch (error) { return apiError(reply, error); }
+  });
+  app.delete<{ Params: { modelId: string } }>("/api/user/relay/models/:modelId", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    try { return { ok: platform.deleteRelayModel(userId, request.params.modelId) }; } catch (error) { return apiError(reply, error); }
+  });
+  app.post<{ Params: { modelId: string } }>("/api/user/relay/models/:modelId/routes", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    try { return platform.saveRelayModelRoute(userId, request.params.modelId, bodyOf(request)); }
+    catch (error) { return apiError(reply, error); }
+  });
+  app.delete<{ Params: { routeId: string } }>("/api/user/relay/routes/:routeId", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    try { return { ok: platform.deleteRelayModelRoute(userId, request.params.routeId) }; } catch (error) { return apiError(reply, error); }
   });
   app.get("/api/user/keys", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;
@@ -315,6 +359,13 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
     try {
       const base = platform.getAdminSettings().publicUrl;
       return platform.createOrder(userId, bodyOf(request).amount, `${base.replace(/\/$/, "")}/console?payment=return`);
+    } catch (error) { return apiError(reply, error); }
+  });
+  app.post("/api/user/relay/subscription-order", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    try {
+      const base = platform.getAdminSettings().publicUrl;
+      return platform.createRelaySubscriptionOrder(userId, `${base.replace(/\/$/, "")}/console?payment=return`);
     } catch (error) { return apiError(reply, error); }
   });
   app.post("/api/payments/alipay/notify", { bodyLimit: 256 * 1024 }, async (request, reply) => {

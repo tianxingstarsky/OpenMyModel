@@ -7,7 +7,7 @@ import { registerOpenAIRoutes } from "./routes/openai";
 import { registerAdminRoutes } from "./routes/admin";
 import { TunnelOptions, WebSocketTunnel } from "./services/websocket";
 import { AdminAuthenticator } from "./services/auth";
-import { renderStatusPage } from "./statusPage";
+import { renderRelayStatusPage, renderStatusPage } from "./statusPage";
 import { registerPlatformRoutes } from "./routes/platform";
 import { PlatformService } from "./services/platform";
 import { readFileSync } from "fs";
@@ -34,18 +34,21 @@ export async function buildApp(options: AppOptions = {}) {
   }
   const database = createDatabase(store.directory);
   const auth = new AdminAuthenticator(store, options.authLimit);
+  let platformService: PlatformService;
   const tunnel = options.tunnel ?? new WebSocketTunnel({
     ...options.tunnelOptions,
-    authenticate: (password, address) => auth.authenticate(password, address),
+    authenticate: (credential, address) => platformService.isRelayMode()
+      ? Promise.resolve(platformService.authenticateRelayNodeToken(credential, address))
+      : auth.authenticate(credential, address),
     onNodeChange: node => {
       const now = new Date().toISOString();
       const record = { id: node.id, name: node.name, modelName: node.modelName, modelConfig: node.modelConfig,
-        isOnline: node.isOnline, lastHeartbeat: now, connectedAt: now };
+        isOnline: node.isOnline, ownerUserId: node.ownerUserId ?? null, lastHeartbeat: now, connectedAt: now };
       const { connectedAt, ...update } = record;
       database.db.insert(nodes).values(record).onConflictDoUpdate({ target: nodes.id, set: update }).run();
     },
   });
-  const platformService = new PlatformService(database.sqlite, store.directory, tunnel,
+  platformService = new PlatformService(database.sqlite, store.directory, tunnel,
     options.publicUrl ?? process.env.PUBLIC_BASE_URL ?? "");
   const app = Fastify({
     bodyLimit: 32 * 1024 * 1024,
@@ -84,7 +87,10 @@ export async function buildApp(options: AppOptions = {}) {
       reply.type("image/png").send(readFileSync(join(__dirname, "../public/brand-mark.png")));
     });
     app.get("/", async (_request, reply) => {
-      reply.type("text/html; charset=utf-8").send(renderStatusPage());
+      const page = platformService.isRelayMode()
+        ? renderRelayStatusPage(platformService.getPublicConfig().serviceName)
+        : renderStatusPage();
+      reply.type("text/html; charset=utf-8").send(page);
     });
     app.get("/admin", async (_request, reply) => {
       reply.type("text/html; charset=utf-8").send(readFileSync(join(__dirname, "../public/admin.html"), "utf8"));
@@ -95,7 +101,7 @@ export async function buildApp(options: AppOptions = {}) {
     app.get("/console", async (_request, reply) => {
       reply.type("text/html; charset=utf-8").send(readFileSync(join(__dirname, "../public/console.html"), "utf8"));
     });
-    app.get("/status.json", async () => tunnel.statusSnapshot());
+    app.get("/status.json", async () => platformService.publicStatusSnapshot());
     app.get("/api", async request => ({
       name: "OpenMyModel Cloud API", version: "1.0.0", domain: request.hostname || "localhost",
       endpoints: { status: "/", statusData: "/status.json", models: "/v1/models", chat: "/v1/chat/completions", admin: "/admin", console: "/console", websocket: "/ws/node" },

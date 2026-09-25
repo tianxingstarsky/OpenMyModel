@@ -16,6 +16,8 @@ export interface NodeInfo {
   serverRunning: boolean;
   /** Optional parallel-slot capacity (-np) reported by newer desktop builds. */
   slots?: number | null;
+  /** User owner in relay-only mode; null for legacy administrator-managed nodes. */
+  ownerUserId?: string | null;
 }
 
 export interface TunnelStats {
@@ -55,7 +57,9 @@ export interface StatusSnapshot {
 }
 
 export interface TunnelOptions {
-  authenticate: (password: unknown, address: string) => Promise<AuthResult>;
+  authenticate: (credential: unknown, address: string) => Promise<AuthResult | {
+    status: "ok"; ownerUserId: string; nodeId: string; nodeName: string;
+  }>;
   onNodeChange?: (node: NodeInfo) => void;
   requestTimeoutMs?: number;
   keyTimeoutMs?: number;
@@ -173,16 +177,18 @@ export class WebSocketTunnel {
     try {
       const result = await this.options.authenticate(msg.password, address);
       if (conn.retired || conn.ws.readyState !== WebSocket.OPEN) return;
-      if (result !== "ok") {
-        this.send(conn, { type: "auth_error", message: result === "limited" ? "Too many authentication attempts" : "Invalid password" });
+      const identity = typeof result === "object" && result.status === "ok" ? result : null;
+      if (result !== "ok" && !identity) {
+        this.send(conn, { type: "auth_error", message: result === "limited" ? "Too many authentication attempts" : "Invalid credentials" });
         conn.ws.close(1008, "Authentication failed");
         return;
       }
       conn.authenticated = true;
       clearTimeout(conn.authTimeout);
       conn.node = {
-        id: typeof msg.nodeId === "string" && msg.nodeId.length > 0 && msg.nodeId.length <= 256 ? msg.nodeId : randomUUID(),
-        name: typeof msg.nodeName === "string" ? msg.nodeName : "Unnamed node",
+        id: identity?.nodeId ?? (typeof msg.nodeId === "string" && msg.nodeId.length > 0 && msg.nodeId.length <= 256 ? msg.nodeId : randomUUID()),
+        name: identity?.nodeName ?? (typeof msg.nodeName === "string" ? msg.nodeName : "Unnamed node"),
+        ownerUserId: identity?.ownerUserId ?? null,
         modelName: typeof msg.modelName === "string" ? msg.modelName : "",
         modelConfig: typeof msg.modelConfig === "string" ? msg.modelConfig : "",
         serverRunning: typeof msg.serverRunning === "boolean" ? msg.serverRunning : true,
@@ -421,6 +427,13 @@ export class WebSocketTunnel {
   cancelRelay(nodeId: string, requestId: string): void {
     const conn = this.connections.get(nodeId);
     if (conn) this.fail(conn, requestId, new RelayError("HTTP client disconnected", 499), true);
+  }
+
+  disconnectNode(nodeId: string): boolean {
+    const conn = this.connections.get(nodeId);
+    if (!conn) return false;
+    this.retire(conn, new RelayError("Node access was revoked", 403));
+    return true;
   }
 
   getOnlineNodes(): NodeInfo[] {

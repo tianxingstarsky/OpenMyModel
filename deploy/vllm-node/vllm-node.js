@@ -10,16 +10,25 @@ function required(name) {
 
 const config = {
   cloudUrl: required("CLOUD_URL"),
-  adminPassword: required("ADMIN_PASSWORD"),
-  nodeId: required("NODE_ID"),
-  nodeName: required("NODE_NAME"),
+  nodeToken: process.env.NODE_TOKEN?.trim() || "",
+  adminPassword: process.env.ADMIN_PASSWORD || "",
+  nodeId: process.env.NODE_ID?.trim() || "",
+  nodeName: process.env.NODE_NAME?.trim() || "",
   modelName: required("PUBLIC_MODEL_NAME"),
   apiKey: required("NODE_API_KEY"),
   vllmUrl: process.env.VLLM_URL?.trim() || "http://vllm:8000",
 };
 
-if (config.nodeId.length > 256 || config.apiKey.length < 16 || /[\r\n]/.test(config.apiKey)) {
-  throw new Error("NODE_ID must be at most 256 characters and NODE_API_KEY must be at least 16 characters without line breaks");
+if (!!config.nodeToken === !!config.adminPassword) {
+  throw new Error("Set exactly one of ADMIN_PASSWORD (personal/provider mode) or NODE_TOKEN (relay-only mode)");
+}
+if (config.nodeToken && (!config.nodeToken.startsWith("omm-relay-node-")
+  || config.nodeToken.length < 40 || config.nodeToken.length > 256 || /[\r\n]/.test(config.nodeToken))) {
+  throw new Error("NODE_TOKEN must be a valid relay node token created in your user console");
+}
+if ((!config.nodeToken && (!config.nodeId || !config.nodeName || config.nodeId.length > 256))
+  || config.apiKey.length < 16 || /[\r\n]/.test(config.apiKey)) {
+  throw new Error("Personal/provider nodes require NODE_ID and NODE_NAME; NODE_API_KEY must be at least 16 characters without line breaks");
 }
 
 const vllmUrl = new URL(config.vllmUrl);
@@ -55,7 +64,7 @@ async function probeEngine() {
 const bridge = new CloudBridge((message) => {
   if (message.type === "connected") {
     reconnectDelay = 1000;
-    writeLog(`Connected to OpenMyModel as ${config.nodeName}`);
+    writeLog(`Connected to OpenMyModel as ${config.nodeName || "your relay node"}`);
   } else if (message.type === "disconnected" || message.type === "error") {
     writeLog(message.type === "error" ? "Tunnel connection failed; reconnecting" : "Tunnel disconnected; reconnecting");
     scheduleReconnect();
@@ -77,8 +86,8 @@ function connect() {
   if (stopped) return;
   try {
     bridge.command({
-      cmd: "connect", url: config.cloudUrl, password: config.adminPassword,
-      nodeId: config.nodeId, nodeName: config.nodeName, modelName: config.modelName,
+      cmd: "connect", url: config.cloudUrl, password: config.nodeToken || config.adminPassword,
+      nodeId: config.nodeId || undefined, nodeName: config.nodeName || undefined, modelName: config.modelName,
       serverRunning: lastReportedReady === true, llamaUrl: vllmUrl.toString(), llamaApiKey: config.apiKey,
     });
   } catch {

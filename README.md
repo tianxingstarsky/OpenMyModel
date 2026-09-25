@@ -20,6 +20,7 @@ OpenMyModel 将本地推理节点通过 WebSocket 隧道连接到自有服务器
 - **统一网关与模型调度**：为调用者发放统一 API Key；公开模型名可映射到节点真实模型名，并配置多节点权重与路由。
 - **兼容 OpenAI 客户端**：提供 <code>/v1/models</code> 和 <code>/v1/chat/completions</code>，支持流式 SSE，可接入 Open WebUI 与 OpenAI SDK。
 - **个人与服务商模式**：个人模式关闭用户注册；服务商模式提供邮箱验证码账户、用户专属 Key、用量和订单、支付宝充值与按 Token 计费。
+- **用户自有节点代转发模式**：用户注册后接入自己的节点，设置私有模型别名与调度路由，并创建仅能访问本人节点的网关 Key；平台不收取 Token 费用，可选免费或支付宝月度订阅。
 - **运行状态与统计**：管理端汇总请求、Token 和节点状态；个人模式可展示公开聚合仪表盘，不暴露节点地址、密钥或对话内容。
 
 ## 管理端
@@ -132,6 +133,14 @@ curl https://api.example.com/v1/chat/completions \
 
 服务商模式的预扣费目前支持文本聊天消息；llama.cpp 节点使用 `/apply-template` 和 `/tokenize`，vLLM 节点使用其聊天 `/tokenize` 接口。正式开放注册与支付前，请先在 HTTPS 域名下完成 SMTP 发信测试和支付宝异步通知验证。
 
+### 代转发模式：用户接入自己的节点
+
+管理员在“系统设置”选择“代转发模式”。免费方案需配置 HTTPS 公网地址和 SMTP 邮件服务；月度订阅还需填写支付宝 RSA2 参数、订阅价格和请求额度。未完成对应必填设置时，服务器不会启用账户注册。代转发模式不对输入或输出 Token 计价，也没有缓存 Token 单独计价；用户和管理员仍可查看请求、Token 用量及访问频率。
+
+用户打开 `https://你的域名/console`，通过邮箱验证码注册或登录，在“我的节点”创建节点并复制一次性接入令牌。之后可以在桌面端“云端连接”粘贴该令牌，或在无界面 Linux 节点的 `.env` 中填写 `NODE_TOKEN`。本地引擎仍应配置自己的节点 API Key；代转发连接令牌与节点 API Key 作用不同，分别用于连接服务器和保护本地推理服务。
+
+用户在控制台为节点创建公开模型别名，并为每个别名添加一个或多个本人节点路由。真实模型名可以因节点而异，例如公开名 `team-chat` 可调度到不同节点上的 `Qwen3-8B` 和 `my-local-qwen`。创建的网关 API Key 只返回该用户可用的模型；请求只会转发到该账户名下、仍在线且已就绪的节点。其他用户的模型、节点和本地密钥不会进入此用户的调度范围。管理员可查看账户、节点数量、订单和平台运行统计，但代转发用户的节点 API Key 由用户保存在各自节点上，管理员不能读取或代为修改。
+
 ## 架构
 
 ```mermaid
@@ -194,6 +203,7 @@ npm run dev
 | --- | --- |
 | 个人模式 | 不提供终端用户注册。管理员在 <code>/admin</code> 创建统一网关 Key；<code>/dashboard</code> 展示聚合用量，<code>/</code> 展示公开节点状态。桌面端也可使用自己的节点 Key 直连对应节点。 |
 | 服务商模式 | 管理员配置 HTTPS 公网地址、SMTP 和支付宝参数后才能启用。用户通过邮箱验证码注册/登录，在 <code>/console</code> 管理账户、申请 API Key、查看用量和订单并充值。 |
+| 代转发模式 | 用户通过邮箱验证码注册/登录，在 <code>/console</code> 创建并管理自己的节点、模型别名、路由和网关 Key；平台仅转发到该用户的在线节点，不对 Token 计价，可选择免费或月度请求订阅。 |
 
 服务商模式要求 SMTP 主机、发信账户与密码，以及支付宝应用 ID、商户 ID、RSA2 应用私钥和支付宝公钥全部配置完成。管理端设置输入和输出 Token 单价（每百万 Token）；缓存 Token 暂无单独价格。当前预扣费支持文本聊天消息；llama.cpp 节点使用 <code>/apply-template</code> 与 <code>/tokenize</code>，vLLM 节点使用其聊天 <code>/tokenize</code> 接口。
 
@@ -224,7 +234,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-编辑 <code>.env</code>：将 <code>CLOUD_URL</code> 和 <code>ADMIN_PASSWORD</code> 设置为 OpenMyModel 服务地址及管理员密码；为节点设置唯一的 <code>NODE_ID</code> 和可读的 <code>NODE_NAME</code>；设置受 GPU 显存支持的 <code>VLLM_MODEL</code>、对应的 <code>PUBLIC_MODEL_NAME</code>，并将 <code>NODE_API_KEY</code> 换成足够长的随机值。可用 <code>openssl rand -hex 32</code> 生成密钥。需要访问 Hugging Face 受限模型时，另外填写 <code>HF_TOKEN</code>。
+编辑 <code>.env</code>：将 <code>CLOUD_URL</code> 设置为 OpenMyModel 服务地址。个人或服务商共享节点填写管理员密码 <code>ADMIN_PASSWORD</code>，并设置唯一的 <code>NODE_ID</code> 和可读的 <code>NODE_NAME</code>；代转发模式则在用户控制台创建节点，把一次性接入令牌填入 <code>NODE_TOKEN</code>，并留空前三项中的管理员密码、节点 ID 和节点名。两种凭据只能选择一种。设置受 GPU 显存支持的 <code>VLLM_MODEL</code>、对应的 <code>PUBLIC_MODEL_NAME</code>，并将 <code>NODE_API_KEY</code> 换成足够长的随机值。可用 <code>openssl rand -hex 32</code> 生成密钥。需要访问 Hugging Face 受限模型时，另外填写 <code>HF_TOKEN</code>。
 
 启动节点：
 
@@ -233,7 +243,7 @@ docker compose up -d
 docker compose logs -f vllm connector
 ```
 
-首次运行会下载模型，耗时取决于模型大小和网络。vLLM API 只在 Compose 内部网络开放，不发布主机端口；客户端通过 OpenMyModel 网关访问。vLLM 的 API Key 只保护部分端点，`/tokenize` 等接口不受它保护，因此不要自行添加端口映射，详情见 [vLLM 安全说明](https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations)。Connector 等待模型就绪后会以节点名注册到管理端。打开服务器 <code>/admin</code>，在该节点的密钥设置中录入与 <code>NODE_API_KEY</code> 完全相同的值，然后在“模型调度”将路由的节点真实模型名设置为 <code>PUBLIC_MODEL_NAME</code>。如果同一公开模型名下还有其他引擎节点，可分别填入各自的真实模型名和节点密钥。
+首次运行会下载模型，耗时取决于模型大小和网络。vLLM API 只在 Compose 内部网络开放，不发布主机端口；客户端通过 OpenMyModel 网关访问。vLLM 的 API Key 只保护部分端点，`/tokenize` 等接口不受它保护，因此不要自行添加端口映射，详情见 [vLLM 安全说明](https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations)。Connector 等待模型就绪后会建立隧道。个人或服务商共享模式下，Connector 使用管理员凭据，节点会显示在管理端；将该节点的 `NODE_API_KEY` 配置到管理端，再设置共享模型路由。代转发模式下，Connector 使用用户的一次性节点令牌，节点由该用户在 `/console` 管理，用户在自己的控制台填写实际模型名并添加路由；管理员无需也不能登记用户本地的 `NODE_API_KEY`。
 
 镜像版本固定在 vLLM v0.30.0，升级时可在 <code>.env</code> 修改 <code>VLLM_IMAGE</code>。不同 GPU、驱动和模型对镜像/CUDA 组合及可用显存的要求不同，请先核对 [vLLM GPU 安装要求](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/)；[官方 vLLM 发布页](https://github.com/vllm-project/vllm/releases)列出可用版本和镜像标签。<code>VLLM_MAX_MODEL_LEN</code> 默认设为 8192，可按模型、上下文需求与 GPU 显存调整。
 

@@ -45,6 +45,7 @@ class CloudPageState extends State<CloudPage> {
   StreamSubscription<Map<String, dynamic>>? _subscription;
   Timer? _poll;
   Timer? _reconnectTimer;
+  Timer? _serverConfigTimer;
   int _reconnectAttempts = 0;
   bool _expectingDisconnect = false;
   bool _userDisconnected = false;
@@ -55,6 +56,8 @@ class CloudPageState extends State<CloudPage> {
       _polling = false,
       _closing = false;
   bool _autoConnect = false;
+  String _serverMode = '';
+  String _serverConfigError = '';
   String _status = '未连接';
   String _testResult = '';
   String? _connectedUrl, _connectedPassword;
@@ -64,6 +67,7 @@ class CloudPageState extends State<CloudPage> {
   @override
   void initState() {
     super.initState();
+    _url.addListener(_queueServerConfigRefresh);
     _subscription = _service.messages.listen((message) {
       if (!mounted || _closing) return;
       if (message['type'] == 'connected') {
@@ -72,7 +76,7 @@ class CloudPageState extends State<CloudPage> {
         _expectingDisconnect = false;
         setState(() {
           _connected = true;
-          _status = '已连接，节点在线';
+          _status = _serverMode == 'relay' ? '已连接到你的代转发节点' : '已连接，节点在线';
         });
       } else if (message['type'] == 'disconnected' ||
           message['type'] == 'error') {
@@ -110,7 +114,8 @@ class CloudPageState extends State<CloudPage> {
     final delay = Duration(seconds: 2 << _reconnectAttempts);
     _reconnectAttempts++;
     setState(() {
-      _status = '连接中断，${delay.inSeconds} 秒后自动重连（第 $_reconnectAttempts/$_maxReconnectAttempts 次）';
+      _status =
+          '连接中断，${delay.inSeconds} 秒后自动重连（第 $_reconnectAttempts/$_maxReconnectAttempts 次）';
     });
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(delay, () {
@@ -124,8 +129,13 @@ class CloudPageState extends State<CloudPage> {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted || _closing) return;
     _url.text = prefs.getString('cloud_url') ?? '';
-    _password.text = prefs.getString('cloud_password') ?? '';
     _autoConnect = prefs.getBool('cloud_auto_connect') ?? false;
+    await _refreshServerConfig(_url.text, useStoredCredential: true);
+    if (_serverMode == 'relay') {
+      _password.text = prefs.getString('cloud_relay_node_token') ?? '';
+    } else {
+      _password.text = prefs.getString('cloud_password') ?? '';
+    }
     final raw = prefs.getString('api_keys');
     var corrupt = false;
     if (raw != null && raw.isNotEmpty) {
@@ -184,6 +194,85 @@ class CloudPageState extends State<CloudPage> {
       unawaited(_connect());
   }
 
+  void _queueServerConfigRefresh() {
+    _serverConfigTimer?.cancel();
+    _serverConfigTimer = Timer(const Duration(milliseconds: 500), () {
+      unawaited(_refreshServerConfig(_url.text));
+    });
+  }
+
+  Future<void> _refreshServerConfig(
+    String input, {
+    bool useStoredCredential = false,
+  }) async {
+    if (input.trim().isEmpty) {
+      if (mounted && !_closing) {
+        setState(() {
+          _serverMode = '';
+          _serverConfigError = '';
+        });
+      }
+      return;
+    }
+    final String url;
+    try {
+      url = normalizeCloudUri(input).toString();
+    } catch (_) {
+      return;
+    }
+    final client = http.Client();
+    _clients.add(client);
+    try {
+      final response = await client
+          .get(cloudEndpoint(url, '/api/public/config'))
+          .timeout(const Duration(seconds: 6));
+      if (response.statusCode != 200) {
+        throw StateError('服务器模式查询 HTTP ${response.statusCode}');
+      }
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException('服务器返回的模式配置无效');
+      }
+      final mode = decoded['mode']?.toString() ?? '';
+      if (!['personal', 'provider', 'relay'].contains(mode)) {
+        throw const FormatException('服务器运营模式无法识别');
+      }
+      if (_url.text.trim().isNotEmpty &&
+          normalizeCloudUri(_url.text).toString() != url) {
+        return;
+      }
+      final previousMode = _serverMode;
+      if (mounted && !_closing) {
+        setState(() {
+          _serverMode = mode;
+          _serverConfigError = '';
+          if (previousMode.isNotEmpty &&
+              previousMode != mode &&
+              !useStoredCredential) {
+            _password.clear();
+            _status = '服务器运营模式已切换，请重新输入对应凭据';
+          }
+        });
+      }
+      if (useStoredCredential && mounted && !_closing) {
+        final prefs = await SharedPreferences.getInstance();
+        _password.text = mode == 'relay'
+            ? prefs.getString('cloud_relay_node_token') ?? ''
+            : prefs.getString('cloud_password') ?? '';
+      }
+    } catch (error) {
+      if (mounted && !_closing) {
+        setState(() {
+          _serverMode = '';
+          _serverConfigError = error.toString();
+        });
+      }
+    } finally {
+      client.close();
+      _clients.remove(client);
+    }
+  }
+
   Future<void> _connect() async {
     if (_closing || !_loaded || _connecting || _connected) return;
     if (!widget.serverReady) {
@@ -192,8 +281,26 @@ class CloudPageState extends State<CloudPage> {
     }
     try {
       final url = normalizeCloudUri(_url.text).toString();
-      if (_password.text.isEmpty) throw const FormatException('请输入管理员密码');
+      await _refreshServerConfig(url);
+      if (_serverMode.isEmpty) {
+        throw FormatException(
+          _serverConfigError.isEmpty
+              ? '无法识别服务器运营模式，请检查地址和网络'
+              : '无法获取服务器模式：$_serverConfigError',
+        );
+      }
+      if (_password.text.isEmpty) {
+        throw FormatException(
+          _serverMode == 'relay' ? '请粘贴用户控制台创建的节点接入令牌' : '请输入管理员密码',
+        );
+      }
       final password = _password.text;
+      if (_serverMode == 'relay' &&
+          (!password.startsWith('omm-relay-node-') ||
+              password.length < 40 ||
+              password.length > 256)) {
+        throw const FormatException('请粘贴用户控制台创建的有效节点接入令牌');
+      }
       setState(() {
         _connecting = true;
         _status = '正在连接…';
@@ -211,7 +318,11 @@ class CloudPageState extends State<CloudPage> {
       if (!mounted || _closing) return;
       setState(() {
         _connected = connected;
-        _status = connected ? '已连接，节点在线' : (_service.lastError ?? '连接失败');
+        _status = connected
+            ? _serverMode == 'relay'
+                  ? '已连接到你的代转发节点'
+                  : '已连接，节点在线'
+            : (_service.lastError ?? '连接失败');
       });
       if (connected) {
         _reconnectAttempts = 0;
@@ -221,7 +332,11 @@ class CloudPageState extends State<CloudPage> {
         _connectedPassword = password;
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('cloud_url', url);
-        await prefs.setString('cloud_password', password);
+        if (_serverMode == 'relay') {
+          await prefs.setString('cloud_relay_node_token', password);
+        } else {
+          await prefs.setString('cloud_password', password);
+        }
         if (!mounted || _closing) return;
         _poll?.cancel();
         _poll = Timer.periodic(
@@ -290,6 +405,23 @@ class CloudPageState extends State<CloudPage> {
   Future<void> _fetchNodes() async {
     if (!_connected || _polling || _connectedUrl == null || _closing) return;
     _polling = true;
+    if (_serverMode == 'relay') {
+      if (mounted && !_closing && _connected) {
+        setState(
+          () => _nodes = [
+            {
+              'name': '此设备',
+              'modelName': widget.modelName,
+              'serverRunning': widget.serverReady,
+              'isOnline': true,
+              'slots': widget.slots,
+            },
+          ],
+        );
+      }
+      _polling = false;
+      return;
+    }
     final client = http.Client();
     _clients.add(client);
     try {
@@ -519,13 +651,36 @@ class CloudPageState extends State<CloudPage> {
           placeholder: 'https://api.example.com 或 127.0.0.1:3000',
         ),
         const SizedBox(height: 12),
-        const Text('管理员密码'),
+        Text(
+          _serverMode == 'relay'
+              ? '节点接入令牌'
+              : '管理员密码${_serverMode == 'provider' ? '（服务器）' : ''}',
+        ),
         const SizedBox(height: 6),
         ft.TextBox(
           controller: _password,
           obscureText: true,
           enabled: !_connected && !_connecting,
+          placeholder: _serverMode == 'relay'
+              ? '在用户控制台「我的节点」中创建并复制一次性令牌'
+              : '服务器管理员密码',
         ),
+        if (_serverMode == 'relay')
+          const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: Text(
+              '先在服务器 /console 登录并创建节点。令牌只显示一次；网关调用者 API Key 也在该用户控制台单独创建。',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          )
+        else if (_serverMode.isEmpty && _serverConfigError.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              '无法读取服务器模式：$_serverConfigError',
+              style: const TextStyle(color: Colors.deepOrange),
+            ),
+          ),
         const SizedBox(height: 8),
         ft.Checkbox(
           checked: _autoConnect,
@@ -619,8 +774,10 @@ class CloudPageState extends State<CloudPage> {
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: 6),
-        const Text(
-          '密钥仅在本机持久化。当前不提供 Token 配额、计费或用量统计。',
+        Text(
+          _serverMode == 'relay'
+              ? '这里管理本机应用使用的密钥。代转发网关的统一调用 API Key、用量和请求统计请在网页用户控制台管理。'
+              : '密钥仅在本机持久化。当前不提供 Token 配额、计费或用量统计。',
           style: TextStyle(color: Colors.grey),
         ),
         const SizedBox(height: 12),
@@ -712,6 +869,8 @@ class CloudPageState extends State<CloudPage> {
   void dispose() {
     disconnectForShutdown();
     _reconnectTimer?.cancel();
+    _serverConfigTimer?.cancel();
+    _url.removeListener(_queueServerConfigRefresh);
     unawaited(_subscription?.cancel());
     _service.dispose();
     _url.dispose();

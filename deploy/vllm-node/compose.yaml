@@ -46,9 +46,10 @@ services:
         condition: service_healthy
     environment:
       CLOUD_URL: ${CLOUD_URL:?Set CLOUD_URL in .env}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
-      NODE_ID: ${NODE_ID:?Set NODE_ID in .env}
-      NODE_NAME: ${NODE_NAME:?Set NODE_NAME in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      NODE_TOKEN: ${NODE_TOKEN:-}
+      NODE_ID: ${NODE_ID:-}
+      NODE_NAME: ${NODE_NAME:-}
       PUBLIC_MODEL_NAME: ${PUBLIC_MODEL_NAME:?Set PUBLIC_MODEL_NAME in .env}
       NODE_API_KEY: ${NODE_API_KEY:?Set NODE_API_KEY in .env}
       VLLM_URL: http://vllm:8000
