@@ -1868,6 +1868,13 @@ test("relay mode isolates models and requests to each account's own nodes and AP
     assert.equal(platform.relaySubscriptionSummary("relay-user-a").requestsUsed, 2,
       "model discovery and requests rejected before dispatch do not count against the monthly allowance");
     assert.equal(platform.orders("relay-user-a").length, 0);
+    const publicDashboard = await app.inject({ method: "GET", url: "/api/public/dashboard" });
+    assert.equal(publicDashboard.statusCode, 404,
+      "relay mode keeps account usage dashboards private, unlike personal mode's public dashboard");
+    const landingPage = await app.inject({ method: "GET", url: "/" });
+    assert.match(landingPage.body, /代转发网关/);
+    assert.doesNotMatch(landingPage.body, /A node|account-a-chat|tenant-a\/model-real|monthly@example\.test/,
+      "the relay landing page must not expose private node, model or account details");
     assert.equal((await app.inject({ method: "GET", url: "/status.json" })).json().mode, "relay",
       "public service status exposes only the relay mode marker rather than node/model inventory");
   } finally { database.close(); }
