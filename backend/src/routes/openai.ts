@@ -528,7 +528,8 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
       try {
         platform.recordUsage(targetKeyId, publicModel, "/v1/chat/completions",
           promptTokens, upstreamStatus < 400 ? completionTokens : 0,
-          request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId, tokenReservationId);
+          request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId, tokenReservationId,
+          node?.nodeId);
         usageReservationId = undefined;
         tokenReservationId = undefined;
       } catch (error) { request.log.error({ err: error }, "Usage could not be recorded"); }
@@ -541,7 +542,8 @@ export function registerOpenAIRoutes(app: FastifyInstance, tunnel: WebSocketTunn
         try {
           platform.recordUsage(targetKeyId, publicModel, "/v1/chat/completions",
             promptTokens, completionTokens,
-            request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId, tokenReservationId);
+            request.ip, String(request.headers["user-agent"] || ""), inputPrice, outputPrice, usageReservationId, tokenReservationId,
+            node?.nodeId);
           usageReservationId = undefined;
           tokenReservationId = undefined;
         } catch (recordError) { request.log.error({ err: recordError }, "Partial usage could not be recorded"); }

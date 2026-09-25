@@ -389,7 +389,7 @@ export class PlatformService {
   }
 
   createRelayNode(userId: string, nameInput: unknown) {
-    if (!this.isRelayMode()) throw new Error("当前服务未开放个人节点接入");
+    if (!this.isUserPortalEnabled()) throw new Error("当前服务未开放账户节点接入");
     const name = typeof nameInput === "string" ? nameInput.trim().slice(0, 80) : "";
     if (!name || /[\0\r\n]/.test(name)) throw new Error("节点名称需为 1–80 个有效字符");
     const id = uuidv4();
@@ -417,7 +417,7 @@ export class PlatformService {
     for (const [key, value] of this.relayAuthFailures) if (value.until <= now) this.relayAuthFailures.delete(key);
     const failure = this.relayAuthFailures.get(address);
     if (failure && failure.count >= 30) return "limited";
-    if (!this.isRelayMode() || typeof tokenInput !== "string" || tokenInput.length > 256) return "invalid";
+    if (!this.isUserPortalEnabled() || typeof tokenInput !== "string" || tokenInput.length > 256) return "invalid";
     const token = tokenInput.trim();
     if (!token.startsWith("omm-relay-node-") || token.length < 40) return "invalid";
     const row = this.sqlite.prepare(`SELECT c.id,c.user_id AS userId,c.node_id AS nodeId,c.name AS nodeName
@@ -470,8 +470,10 @@ export class PlatformService {
       if (!credential) return false;
       this.sqlite.prepare("UPDATE relay_node_credentials SET revoked_at=? WHERE id=? AND revoked_at IS NULL")
         .run(now, credential.id);
-      this.sqlite.prepare("UPDATE nodes SET is_online=0 WHERE id=? AND owner_user_id=?").run(nodeId, userId);
+      this.sqlite.prepare("UPDATE nodes SET is_online=0,upstream_api_key=NULL WHERE id=? AND owner_user_id=?")
+        .run(nodeId, userId);
       this.sqlite.prepare("DELETE FROM relay_model_routes WHERE user_id=? AND node_id=?").run(userId, nodeId);
+      this.sqlite.prepare("UPDATE model_routes SET enabled=0 WHERE node_id=?").run(nodeId);
       return true;
     });
     const removed = revoke.immediate();
@@ -513,7 +515,7 @@ export class PlatformService {
       ? encryptSecret(input.upstreamKey.trim(), this.secret) : previous?.upstream_key || "";
     const nodeKey = this.sqlite.prepare("SELECT upstream_api_key,owner_user_id AS ownerUserId FROM nodes WHERE id=?").get(nodeId) as
       { upstream_api_key: string | null; ownerUserId: string | null } | undefined;
-    if (nodeKey?.ownerUserId) throw new Error("个人代转发节点不能加入平台共享路由");
+    if (nodeKey?.ownerUserId && !this.isProviderMode()) throw new Error("账户节点不能加入当前模式的平台路由");
     if (!modelId || !nodeId || !upstreamModel || (!upstreamKey && !nodeKey?.upstream_api_key) || upstreamModel.length > 256 || /[\r\n]/.test(upstreamModel)
       || (typeof input.upstreamKey === "string" && (input.upstreamKey.length > 4096 || /[\r\n]/.test(input.upstreamKey)))) {
       throw new Error("请选择模型和节点，填写节点实际模型名，并先在节点管理中配置该节点的 llama-server API Key");
@@ -713,7 +715,8 @@ export class PlatformService {
       WHERE m.public_name=? AND m.enabled=1 AND r.enabled=1 ORDER BY r.weight DESC, r.id ASC`)
       .all(modelName) as ModelRoute[];
     const online = new Set(this.tunnel.getOnlineNodes().filter(node => node.serverRunning).map(node => node.id));
-    let candidates = rows.filter(row => online.has(row.node_id) && !row.owner_user_id && !!(row.node_api_key || row.upstream_key));
+    let candidates = rows.filter(row => online.has(row.node_id)
+      && (!row.owner_user_id || this.isProviderMode()) && !!(row.node_api_key || row.upstream_key));
     if (!candidates.length) throw new RelayError("Requested model is not available", 404);
     const routeWeight = (route: ModelRoute) => Number.isSafeInteger(route.weight)
       ? Math.max(1, Math.min(route.weight, 100)) : 1;
@@ -827,24 +830,11 @@ export class PlatformService {
 
   private reserveRelayRequest(userId: string, keyId: string, now: string): void {
     if (!this.isRelayMode()) throw new RelayError("Relay mode is disabled", 403);
-    let requestLimit = 0;
-    let periodStart: string;
     if (this.getRelayBillingMode() === "monthly") {
-      const period = this.sqlite.prepare(`SELECT starts_at AS startsAt, expires_at AS expiresAt, request_limit AS requestLimit
+      const period = this.sqlite.prepare(`SELECT starts_at AS startsAt, expires_at AS expiresAt
         FROM relay_subscription_periods WHERE user_id=? AND starts_at<=? AND expires_at>? ORDER BY starts_at DESC LIMIT 1`)
-        .get(userId, now, now) as { startsAt: string; expiresAt: string; requestLimit: number } | undefined;
+        .get(userId, now, now) as { startsAt: string; expiresAt: string } | undefined;
       if (!period) throw new RelayError("转发订阅已到期或尚未开通，请完成月度订阅后重试", 402);
-      periodStart = period.startsAt;
-      requestLimit = period.requestLimit;
-    } else {
-      const date = new Date(now);
-      periodStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)).toISOString();
-      requestLimit = Number(this.setting("relay_free_monthly_requests") || "0");
-    }
-    if (requestLimit > 0) {
-      const used = this.sqlite.prepare("SELECT COUNT(*) AS count FROM relay_request_events WHERE user_id=? AND created_at>=?")
-        .get(userId, periodStart) as { count: number };
-      if (used.count >= requestLimit) throw new RelayError("本周期转发请求额度已用完", 429);
     }
     this.sqlite.prepare("INSERT INTO relay_request_events(user_id,key_id,created_at) VALUES(?,?,?)").run(userId, keyId, now);
     if (Date.now() - this.lastRelayEventPruneAt > 60 * 60_000) {
@@ -1145,7 +1135,8 @@ export class PlatformService {
   }
 
   recordUsage(keyId: string, publicModel: string, endpoint: string, prompt: number, completion: number, ip: string,
-    userAgent: string, inputPrice = 0, outputPrice = 0, reservationId?: string, tokenReservationId?: string): void {
+    userAgent: string, inputPrice = 0, outputPrice = 0, reservationId?: string, tokenReservationId?: string,
+    nodeId?: string): void {
     const input = Math.max(0, Math.floor(prompt));
     const output = Math.max(0, Math.floor(completion));
     const total = input + output;
@@ -1153,8 +1144,8 @@ export class PlatformService {
     const now = isoNow();
     const transaction = this.sqlite.transaction(() => {
       const usageLog = this.sqlite.prepare(`INSERT INTO usage_logs(api_key_id, model, endpoint, prompt_tokens, completion_tokens, total_tokens,
-        timestamp, ip, user_agent, cost) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-        keyId, publicModel, endpoint, input, output, total, now, ip || null, userAgent.slice(0, 512), cost);
+        timestamp, ip, user_agent, cost, node_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        keyId, publicModel, endpoint, input, output, total, now, ip || null, userAgent.slice(0, 512), cost, nodeId ?? null);
       this.sqlite.prepare(`UPDATE gateway_keys SET last_used_at=?, total_tokens=total_tokens+?, total_requests=total_requests+1
         WHERE id=?`).run(now, total, keyId);
       const key = this.sqlite.prepare("SELECT owner_user_id FROM gateway_keys WHERE id=?").get(keyId) as { owner_user_id: string | null } | undefined;
@@ -1255,8 +1246,16 @@ export class PlatformService {
       JOIN gateway_keys k ON k.id=l.api_key_id WHERE k.owner_user_id=? AND l.timestamp>=?`)
       .get(userId, new Date(Date.now() - 60_000).toISOString()) as { count: number };
     if (this.isRelayMode()) (stats as any).cost = 0;
+    const nodes = this.listRelayNodes(userId);
+    const nodeRevenue = this.isProviderMode() ? this.sqlite.prepare(`SELECT l.node_id AS nodeId,
+      COUNT(*) AS requests, COALESCE(SUM(l.total_tokens),0) AS tokens, COALESCE(SUM(l.cost),0) AS revenue
+      FROM usage_logs l JOIN nodes n ON n.id=l.node_id
+      WHERE n.owner_user_id=? AND l.timestamp>=? GROUP BY l.node_id`)
+      .all(userId, new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString()) as
+      Array<{ nodeId: string; requests: number; tokens: number; revenue: number }> : [];
     return { user: { email: user.email, balance: this.isProviderMode() ? user.balance : 0, createdAt: user.created_at }, stats,
       requestsPerMinute: frequency.count, tokensPerMinute: tokenRate.count,
+      nodes, nodeRevenue,
       keys: this.listKeys(userId), usage: this.usageRows(userId, 30),
       models: this.isRelayMode() ? this.publicRelayModels(userId) : this.listPublicModels(),
       mode: this.isRelayMode() ? "relay" : "provider",
@@ -1271,11 +1270,11 @@ export class PlatformService {
     const active = periods.find(period => period.startsAt <= now && period.expiresAt > now) ?? null;
     const next = periods.find(period => period.startsAt > now) ?? null;
     const billingMode = this.getRelayBillingMode();
-    const freeLimit = Number(this.setting("relay_free_monthly_requests") || "0");
+    const freeLimit = 0;
     const date = new Date(now);
     const freeStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)).toISOString();
     const usageStart = billingMode === "monthly" ? active?.startsAt : freeStart;
-    const requestLimit = billingMode === "monthly" ? active?.requestLimit ?? 0 : freeLimit;
+    const requestLimit = 0;
     const used = usageStart
       ? (this.sqlite.prepare("SELECT COUNT(*) AS count FROM relay_request_events WHERE user_id=? AND created_at>=?")
         .get(userId, usageStart) as { count: number }).count : 0;
@@ -1288,7 +1287,7 @@ export class PlatformService {
         requestLimit: next.requestLimit } : null,
       currentPrice: Number(this.setting("relay_monthly_price") || "0"),
       requestLimit, requestsUsed: used,
-      requestsRemaining: requestLimit > 0 ? Math.max(0, requestLimit - used) : null,
+      requestsRemaining: null,
       freeMonthlyRequests: freeLimit,
     };
   }
@@ -1410,7 +1409,7 @@ export class PlatformService {
     const amount = Number(this.setting("relay_monthly_price"));
     const amountCents = Math.round(amount * 100);
     if (!Number.isSafeInteger(amountCents) || amountCents < 1 || amountCents > 100_000_000) throw new Error("月度订阅价格尚未正确设置");
-    const requestLimit = Math.floor(Number(this.setting("relay_monthly_requests") || "0"));
+    const requestLimit = 0;
     const order = this.sqlite.transaction(() => {
       const pending = this.sqlite.prepare(`SELECT id,amount,relay_request_limit AS requestLimit FROM payment_orders
         WHERE user_id=? AND purpose='relay_subscription' AND status='pending' ORDER BY created_at DESC`)
@@ -1583,7 +1582,7 @@ export class PlatformService {
     }
     if (this.isRelayMode()) throw new Error("代转发模式不接受管理员节点 Key；用户节点自行在本地配置并保护 API Key");
     const owner = this.sqlite.prepare("SELECT owner_user_id FROM nodes WHERE id=?").get(nodeId) as { owner_user_id: string | null } | undefined;
-    if (owner?.owner_user_id) throw new Error("个人代转发节点的本地 Key 不能由管理员读取或修改");
+    if (owner?.owner_user_id && !this.isProviderMode()) throw new Error("当前模式下不能修改账户节点的本地 Key");
     const updated = this.sqlite.prepare("UPDATE nodes SET upstream_api_key=? WHERE id=?")
       .run(encryptSecret(apiKey, this.secret), nodeId);
     if (!updated.changes) throw new Error("节点不存在，请先让节点连接到服务器");
@@ -1597,7 +1596,7 @@ export class PlatformService {
     const row = this.sqlite.prepare("SELECT upstream_api_key,owner_user_id FROM nodes WHERE id=?")
       .get(nodeId) as { upstream_api_key: string | null; owner_user_id: string | null } | undefined;
     if (!row) throw new Error("节点不存在");
-    if (row.owner_user_id) throw new Error("个人代转发节点的本地 Key 不能由管理员验证");
+    if (row.owner_user_id && !this.isProviderMode()) throw new Error("当前模式下不能验证账户节点的本地 Key");
     if (!row.upstream_api_key) throw new Error("请先为节点配置 llama-server API Key");
     let valid: boolean;
     try {
@@ -1617,7 +1616,7 @@ export class PlatformService {
       const node = this.sqlite.prepare("SELECT id,owner_user_id FROM nodes WHERE id=?").get(nodeId) as
         { id: string; owner_user_id: string | null } | undefined;
       if (!node) return false;
-      if (node.owner_user_id) throw new Error("个人代转发节点的本地 Key 不能由管理员清除");
+      if (node.owner_user_id && !this.isProviderMode()) throw new Error("当前模式下不能清除账户节点的本地 Key");
       const dependent = this.sqlite.prepare(`SELECT COUNT(*) AS count FROM model_routes
         WHERE node_id=? AND enabled=1 AND upstream_key=''`).get(nodeId) as { count: number };
       if (dependent.count > 0) throw new NodeKeyInUseError(dependent.count);

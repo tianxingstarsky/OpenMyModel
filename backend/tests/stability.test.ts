@@ -259,7 +259,7 @@ test("personal mode exposes only its public dashboard and blocks provider signup
 });
 
 test("provider dashboards, keys, usage and orders remain isolated between accounts", async t => {
-  const { app, directory } = await fixture(t);
+  const { app, directory, node } = await fixture(t);
   const adminLogin = await app.inject({ method: "POST", url: "/api/admin/login", payload: { password: PASSWORD } });
   const adminCookie = String(adminLogin.headers["set-cookie"]).split(";", 1)[0];
   const personalKeyResponse = await app.inject({ method: "POST", url: "/api/admin/keys", headers: { cookie: adminCookie },
@@ -464,6 +464,45 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     const checkout = new URL(injectedHostOrder.json().paymentUrl);
     assert.equal(checkout.searchParams.get("notify_url"), "https://api.example.test/api/payments/alipay/notify");
     assert.equal(checkout.searchParams.get("return_url"), "https://api.example.test/console?payment=return");
+    const alphaNodeResponse = await app.inject({ method: "POST", url: "/api/user/relay/nodes",
+      headers: { cookie: alphaCookie }, payload: { name: "Alpha GPU" } });
+    const betaNodeResponse = await app.inject({ method: "POST", url: "/api/user/relay/nodes",
+      headers: { cookie: betaCookie }, payload: { name: "Beta GPU" } });
+    assert.equal(alphaNodeResponse.statusCode, 200);
+    assert.equal(betaNodeResponse.statusCode, 200);
+    const alphaNode = alphaNodeResponse.json();
+    const betaNode = betaNodeResponse.json();
+    const nodeAuth = sessions.authenticateRelayNodeToken(alphaNode.token, "127.0.0.1");
+    assert.equal(typeof nodeAuth === "string" ? nodeAuth : nodeAuth.ownerUserId, "user-alpha");
+    const providerNode = await node({ nodeId: "client-supplied", nodeName: "client-supplied" }, () => {}, true,
+      alphaNode.token);
+    assert.equal(providerNode.messages.some((message: Message) => message.type === "auth_ok" && message.nodeId === alphaNode.nodeId), true,
+      "provider nodes authenticate with the token issued to their own account");
+    sessions.saveNodeApiKey(alphaNode.nodeId, "alpha-node-key-123456");
+    const alphaModelId = (database.prepare("SELECT id FROM platform_models WHERE public_name='alpha-model'")
+      .get() as { id: string }).id;
+    const ownedRoute = sessions.saveRoute({ modelId: alphaModelId, nodeId: alphaNode.nodeId,
+      upstreamModel: "alpha-upstream", weight: 1 });
+    assert.equal(ownedRoute?.routes.some((route: Message) => route.nodeId === alphaNode.nodeId && route.keyConfigured), true,
+      "provider model scheduling accepts a user-owned node with an administrator-managed upstream key");
+    const ownedUsage = database.prepare(`INSERT INTO usage_logs(api_key_id,model,endpoint,prompt_tokens,
+      completion_tokens,total_tokens,timestamp,cost,node_id) VALUES(?,?,?,?,?,?,?,?,?)`);
+    ownedUsage.run(alphaKey.id, "alpha-model", "/v1/chat/completions", 20, 10, 30,
+      new Date().toISOString(), 3.25, alphaNode.nodeId);
+    ownedUsage.run(betaKey.id, "beta-model", "/v1/chat/completions", 10, 5, 15,
+      new Date().toISOString(), 4.5, betaNode.nodeId);
+    const alphaRevenue = await app.inject({ method: "GET", url: "/api/user/dashboard", headers: { cookie: alphaCookie } });
+    const betaRevenue = await app.inject({ method: "GET", url: "/api/user/dashboard", headers: { cookie: betaCookie } });
+    assert.deepEqual(alphaRevenue.json().nodeRevenue.map((item: Message) => [item.nodeId, item.revenue]),
+      [[alphaNode.nodeId, 3.25]]);
+    assert.deepEqual(betaRevenue.json().nodeRevenue.map((item: Message) => [item.nodeId, item.revenue]),
+      [[betaNode.nodeId, 4.5]]);
+    const revokedProviderNode = await app.inject({ method: "DELETE", url: `/api/user/relay/nodes/${alphaNode.nodeId}`,
+      headers: { cookie: alphaCookie } });
+    assert.equal(revokedProviderNode.json().ok, true);
+    assert.equal((database.prepare("SELECT enabled FROM model_routes WHERE node_id=?")
+      .get(alphaNode.nodeId) as { enabled: number }).enabled, 0,
+      "revoking a provider node disables its shared route");
     const unauthenticated = await app.inject({ method: "GET", url: "/api/user/dashboard" });
     assert.equal(unauthenticated.statusCode, 401);
     const unauthenticatedBalanceEntries = await app.inject({ method: "GET", url: "/api/user/balance-entries" });
@@ -1880,7 +1919,7 @@ test("relay mode isolates models and requests to each account's own nodes and AP
   } finally { database.close(); }
 });
 
-test("monthly relay orders apply signed Alipay payments once and enforce the stored request allowance", async t => {
+test("monthly relay orders apply signed Alipay payments once and grant time-based access", async t => {
   const { app, tunnel, directory } = await fixture(t);
   const database = new Database(join(directory, "openmymodel.db"));
   try {
@@ -1903,17 +1942,17 @@ test("monthly relay orders apply signed Alipay payments once and enforce the sto
 
     const staleOrder = platform.createRelaySubscriptionOrder("monthly-relay-user", "https://relay.example.test/console?payment=return");
     assert.equal(staleOrder.amount, 6.5);
-    assert.equal(staleOrder.requestLimit, 1);
+    assert.equal(staleOrder.requestLimit, 0);
     platform.saveAdminSettings({ relayMonthlyPrice: 7.25, relayMonthlyRequests: 2 });
     const order = platform.createRelaySubscriptionOrder("monthly-relay-user", "https://relay.example.test/console?payment=return");
-    assert.notEqual(order.orderId, staleOrder.orderId, "a changed price or quota must create a fresh checkout snapshot");
+    assert.notEqual(order.orderId, staleOrder.orderId, "a changed price must create a fresh checkout snapshot");
     assert.equal(platform.orders("monthly-relay-user").find((row: any) => row.id === staleOrder.orderId)?.status, "closed");
     assert.equal(order.amount, 7.25);
-    assert.equal(order.requestLimit, 2);
+    assert.equal(order.requestLimit, 0);
     assert.equal(new URL(order.paymentUrl).searchParams.get("notify_url"),
       "https://relay.example.test/api/payments/alipay/notify");
-    assert.equal(platform.orders("monthly-relay-user").find((row: any) => row.id === order.orderId)?.relayRequestLimit, 2,
-      "the order stores the allowance selected at checkout");
+    assert.equal(platform.orders("monthly-relay-user").find((row: any) => row.id === order.orderId)?.relayRequestLimit, 0,
+      "time subscriptions do not store a request allowance");
 
     const fields: Record<string, string> = {
       app_id: "2026092500000001", seller_id: "2088000000000000", sign_type: "RSA2",
@@ -1928,16 +1967,15 @@ test("monthly relay orders apply signed Alipay payments once and enforce the sto
     assert.equal(platform.processAlipayNotification(notification), true, "duplicate callbacks are acknowledged idempotently");
     const summary = platform.relaySubscriptionSummary("monthly-relay-user");
     assert.equal(summary.status, "active");
-    assert.equal(summary.current.requestLimit, 2);
-    assert.equal(summary.requestsRemaining, 2);
+    assert.equal(summary.requestLimit, 0);
+    assert.equal(summary.requestsRemaining, null);
 
     const createdKey = platform.createGatewayKey("monthly key", "monthly-relay-user");
     const gatewayKey = platform.findGatewayKey(createdKey.key)!;
     platform.checkGatewayKey(gatewayKey);
     platform.checkGatewayKey(gatewayKey);
-    assert.throws(() => platform.checkGatewayKey(gatewayKey), (error: any) => error.statusCode === 429,
-      "the allowance stored on the paid order blocks additional requests");
-    assert.equal(platform.relaySubscriptionSummary("monthly-relay-user").requestsUsed, 2);
+    platform.checkGatewayKey(gatewayKey);
+    assert.equal(platform.relaySubscriptionSummary("monthly-relay-user").requestsUsed, 3);
     assert.throws(() => platform.saveAdminSettings({ relayBillingMode: "free" }), /仍有有效订阅/,
       "billing mode changes wait until paid periods expire");
   } finally { database.close(); }

@@ -37,9 +37,10 @@ export async function buildApp(options: AppOptions = {}) {
   let platformService: PlatformService;
   const tunnel = options.tunnel ?? new WebSocketTunnel({
     ...options.tunnelOptions,
-    authenticate: (credential, address) => platformService.isRelayMode()
+    authenticate: (credential, address) => platformService.isUserPortalEnabled()
+      && typeof credential === "string" && credential.startsWith("omm-relay-node-")
       ? Promise.resolve(platformService.authenticateRelayNodeToken(credential, address))
-      : auth.authenticate(credential, address),
+      : platformService.isRelayMode() ? Promise.resolve("invalid" as const) : auth.authenticate(credential, address),
     onNodeChange: node => {
       const now = new Date().toISOString();
       const record = { id: node.id, name: node.name, modelName: node.modelName, modelConfig: node.modelConfig,

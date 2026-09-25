@@ -20,15 +20,15 @@ const config = {
 };
 
 if (!!config.nodeToken === !!config.adminPassword) {
-  throw new Error("Set exactly one of ADMIN_PASSWORD (personal/provider mode) or NODE_TOKEN (relay-only mode)");
+  throw new Error("Set exactly one of ADMIN_PASSWORD (personal mode) or NODE_TOKEN (provider/relay mode)");
 }
 if (config.nodeToken && (!config.nodeToken.startsWith("omm-relay-node-")
   || config.nodeToken.length < 40 || config.nodeToken.length > 256 || /[\r\n]/.test(config.nodeToken))) {
-  throw new Error("NODE_TOKEN must be a valid relay node token created in your user console");
+  throw new Error("NODE_TOKEN must be a valid node login token created in your user console");
 }
 if ((!config.nodeToken && (!config.nodeId || !config.nodeName || config.nodeId.length > 256))
   || config.apiKey.length < 16 || /[\r\n]/.test(config.apiKey)) {
-  throw new Error("Personal/provider nodes require NODE_ID and NODE_NAME; NODE_API_KEY must be at least 16 characters without line breaks");
+  throw new Error("Personal-mode nodes require NODE_ID and NODE_NAME; NODE_API_KEY must be at least 16 characters without line breaks");
 }
 
 const vllmUrl = new URL(config.vllmUrl);

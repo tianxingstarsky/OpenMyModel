@@ -131,7 +131,7 @@ class CloudPageState extends State<CloudPage> {
     _url.text = prefs.getString('cloud_url') ?? '';
     _autoConnect = prefs.getBool('cloud_auto_connect') ?? false;
     await _refreshServerConfig(_url.text, useStoredCredential: true);
-    if (_serverMode == 'relay') {
+    if (_serverMode == 'relay' || _serverMode == 'provider') {
       _password.text = prefs.getString('cloud_relay_node_token') ?? '';
     } else {
       _password.text = prefs.getString('cloud_password') ?? '';
@@ -256,7 +256,7 @@ class CloudPageState extends State<CloudPage> {
       }
       if (useStoredCredential && mounted && !_closing) {
         final prefs = await SharedPreferences.getInstance();
-        _password.text = mode == 'relay'
+        _password.text = mode == 'relay' || mode == 'provider'
             ? prefs.getString('cloud_relay_node_token') ?? ''
             : prefs.getString('cloud_password') ?? '';
       }
@@ -291,15 +291,16 @@ class CloudPageState extends State<CloudPage> {
       }
       if (_password.text.isEmpty) {
         throw FormatException(
-          _serverMode == 'relay' ? '请粘贴用户控制台创建的节点接入令牌' : '请输入管理员密码',
+          _serverMode == 'relay' || _serverMode == 'provider'
+              ? '请粘贴网页控制台发放的节点登录 Token' : '请输入管理员密码',
         );
       }
       final password = _password.text;
-      if (_serverMode == 'relay' &&
+      if ((_serverMode == 'relay' || _serverMode == 'provider') &&
           (!password.startsWith('omm-relay-node-') ||
               password.length < 40 ||
               password.length > 256)) {
-        throw const FormatException('请粘贴用户控制台创建的有效节点接入令牌');
+        throw const FormatException('请粘贴网页控制台发放的有效节点登录 Token');
       }
       setState(() {
         _connecting = true;
@@ -332,7 +333,7 @@ class CloudPageState extends State<CloudPage> {
         _connectedPassword = password;
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('cloud_url', url);
-        if (_serverMode == 'relay') {
+        if (_serverMode == 'relay' || _serverMode == 'provider') {
           await prefs.setString('cloud_relay_node_token', password);
         } else {
           await prefs.setString('cloud_password', password);
@@ -405,7 +406,7 @@ class CloudPageState extends State<CloudPage> {
   Future<void> _fetchNodes() async {
     if (!_connected || _polling || _connectedUrl == null || _closing) return;
     _polling = true;
-    if (_serverMode == 'relay') {
+    if (_serverMode == 'relay' || _serverMode == 'provider') {
       if (mounted && !_closing && _connected) {
         setState(
           () => _nodes = [
@@ -650,26 +651,33 @@ class CloudPageState extends State<CloudPage> {
           enabled: !_connected && !_connecting,
           placeholder: 'https://api.example.com 或 127.0.0.1:3000',
         ),
+        if (_serverMode.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 7),
+            child: Text(
+              '已识别网关模式：${_serverMode == 'relay' ? '代转发 · 节点登录 Token' : _serverMode == 'provider' ? '服务商 · 节点登录 Token' : '个人 · 管理员密码'}',
+              style: const TextStyle(color: Color(0xFF087F6E), fontSize: 12),
+            ),
+          ),
         const SizedBox(height: 12),
         Text(
-          _serverMode == 'relay'
-              ? '节点接入令牌'
-              : '管理员密码${_serverMode == 'provider' ? '（服务器）' : ''}',
+          _serverMode == 'relay' || _serverMode == 'provider'
+              ? '节点登录 Token' : '管理员密码',
         ),
         const SizedBox(height: 6),
         ft.TextBox(
           controller: _password,
           obscureText: true,
           enabled: !_connected && !_connecting,
-          placeholder: _serverMode == 'relay'
-              ? '在用户控制台「我的节点」中创建并复制一次性令牌'
+          placeholder: _serverMode == 'relay' || _serverMode == 'provider'
+              ? '从网页控制台的节点卡片复制一次性 Token'
               : '服务器管理员密码',
         ),
-        if (_serverMode == 'relay')
+        if (_serverMode == 'relay' || _serverMode == 'provider')
           const Padding(
             padding: EdgeInsets.only(top: 6),
             child: Text(
-              '先在服务器 /console 登录并创建节点。令牌只显示一次；网关调用者 API Key 也在该用户控制台单独创建。',
+              '先在服务器 /console 登录并创建节点。Token 只显示一次，用于此设备连接；API 调用密钥在网页另行管理。',
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
           )
@@ -714,7 +722,7 @@ class CloudPageState extends State<CloudPage> {
               child: const Text('断开'),
             ),
             ft.Button(
-              onPressed: _connected && !_testing ? _test : null,
+              onPressed: _serverMode == 'personal' && _connected && !_testing ? _test : null,
               child: Text(_testing ? '测试中…' : '测试连接'),
             ),
             Text(
@@ -768,6 +776,7 @@ class CloudPageState extends State<CloudPage> {
               ),
             ),
           ),
+        if (_serverMode == 'personal') ...[
         const SizedBox(height: 24),
         const Text(
           'API Key 管理',
@@ -861,6 +870,7 @@ class CloudPageState extends State<CloudPage> {
               ),
             ),
           ),
+        ],
       ],
     ),
   );

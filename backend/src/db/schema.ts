@@ -303,6 +303,10 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
   try { sqlite.exec("ALTER TABLE usage_logs ADD COLUMN cost REAL NOT NULL DEFAULT 0"); } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
   }
+  try { sqlite.exec("ALTER TABLE usage_logs ADD COLUMN node_id TEXT"); } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
+  }
+  sqlite.exec("CREATE INDEX IF NOT EXISTS idx_usage_node_time ON usage_logs(node_id, timestamp)");
   try { sqlite.exec("ALTER TABLE nodes ADD COLUMN upstream_api_key TEXT"); } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
   }
