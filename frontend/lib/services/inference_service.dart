@@ -17,8 +17,7 @@ class EngineException implements Exception {
   final int? exitCode;
   EngineException(this.message, [this.exitCode]);
   @override
-  String toString() =>
-      exitCode == null ? message : '$message (退出码 $exitCode)';
+  String toString() => exitCode == null ? message : '$message (退出码 $exitCode)';
 }
 
 enum EngineState {
@@ -61,7 +60,9 @@ class EngineInfo {
     this.bundled = false,
   });
 
-  String get label => 'llama.cpp $tag · ${backend.toUpperCase()}';
+  String get label => backend.toLowerCase() == 'vllm'
+      ? 'vLLM $tag · Docker NVIDIA'
+      : 'llama.cpp $tag · ${backend.toUpperCase()}';
 }
 
 /// 引擎运行时快照，状态变化时通过 [InferenceService.onChange] 发出。
@@ -105,18 +106,18 @@ class EngineRuntime {
     List<String>? logTail,
     Map<String, dynamic>? props,
   }) => EngineRuntime(
-        state: state ?? this.state,
-        engine: engine ?? this.engine,
-        pid: pid ?? this.pid,
-        exitCode: exitCode ?? this.exitCode,
-        modelPath: modelPath ?? this.modelPath,
-        host: host ?? this.host,
-        port: port ?? this.port,
-        startedAt: startedAt ?? this.startedAt,
-        lastError: lastError ?? this.lastError,
-        logTail: logTail ?? this.logTail,
-        props: props ?? this.props,
-      );
+    state: state ?? this.state,
+    engine: engine ?? this.engine,
+    pid: pid ?? this.pid,
+    exitCode: exitCode ?? this.exitCode,
+    modelPath: modelPath ?? this.modelPath,
+    host: host ?? this.host,
+    port: port ?? this.port,
+    startedAt: startedAt ?? this.startedAt,
+    lastError: lastError ?? this.lastError,
+    logTail: logTail ?? this.logTail,
+    props: props ?? this.props,
+  );
 
   bool get isTransitioning =>
       state == EngineState.starting || state == EngineState.stopping;
@@ -126,8 +127,9 @@ class EngineRuntime {
       state == EngineState.loading ||
       state == EngineState.ready;
 
-  Duration get uptime =>
-      isRunning && startedAt != null ? DateTime.now().difference(startedAt!) : Duration.zero;
+  Duration get uptime => isRunning && startedAt != null
+      ? DateTime.now().difference(startedAt!)
+      : Duration.zero;
 
   /// /props 中报告的模型是否具备视觉输入能力。
   bool get supportsVision {
@@ -136,20 +138,22 @@ class EngineRuntime {
   }
 
   Map<String, dynamic> toStatusJson() => {
-        'running': isRunning,
-        'ready': state == EngineState.ready,
-        'state': state.name,
-        'port': port,
-        'host': host,
-        'model': modelPath.isEmpty ? '' : modelPath.split(Platform.pathSeparator).last,
-        'pid': pid,
-        'exit_code': exitCode,
-        'uptime_seconds': uptime.inSeconds,
-        'last_error': lastError,
-        'engine_tag': engine?.tag ?? '',
-        'engine_backend': engine?.backend ?? '',
-        'log_tail': logTail,
-      };
+    'running': isRunning,
+    'ready': state == EngineState.ready,
+    'state': state.name,
+    'port': port,
+    'host': host,
+    'model': modelPath.isEmpty
+        ? ''
+        : modelPath.split(Platform.pathSeparator).last,
+    'pid': pid,
+    'exit_code': exitCode,
+    'uptime_seconds': uptime.inSeconds,
+    'last_error': lastError,
+    'engine_tag': engine?.tag ?? '',
+    'engine_backend': engine?.backend ?? '',
+    'log_tail': logTail,
+  };
 }
 
 /// 进程抽象，便于测试注入假进程。
@@ -204,7 +208,10 @@ Future<String> _probeDevicesDefault(String executable) async {
   return '${result.stdout ?? ''}\n${result.stderr ?? ''}';
 }
 
-final RegExp _gpuDeviceLine = RegExp(r'^\s*(CUDA|Vulkan)\d*\s*:', multiLine: true);
+final RegExp _gpuDeviceLine = RegExp(
+  r'^\s*(CUDA|Vulkan)\d*\s*:',
+  multiLine: true,
+);
 
 class InferenceService {
   final http.Client Function() _clientFactory;
@@ -229,7 +236,10 @@ class InferenceService {
   ServerConfig? _runningConfig;
   Directory? _apiKeyDirectory;
   bool _userStopping = false;
+  String? _runningContainerName;
   Future<void>? _lifecycleLock;
+  Future<void>? _stopInProgress;
+  int _startGeneration = 0;
   http.Client? _chatClient;
   bool _disposed = false;
 
@@ -243,13 +253,19 @@ class InferenceService {
     DeviceProber? deviceProber,
     this.healthInterval = const Duration(milliseconds: 400),
     this.healthTimeout = const Duration(minutes: 10),
-  })  : _clientFactory = clientFactory ?? http.Client.new,
-        _processFactory = processFactory ??
-            ((exe, args, {workingDirectory}) async => RealEngineProcess(
-                  await Process.start(exe, args, runInShell: false),
-                )),
-        _engineDirOverride = engineDirOverride ?? (() => null),
-        _deviceProber = deviceProber ?? _probeDevicesDefault;
+  }) : _clientFactory = clientFactory ?? http.Client.new,
+       _processFactory =
+           processFactory ??
+           ((exe, args, {workingDirectory}) async => RealEngineProcess(
+             await Process.start(
+               exe,
+               args,
+               runInShell: false,
+               workingDirectory: workingDirectory,
+             ),
+           )),
+       _engineDirOverride = engineDirOverride ?? (() => null),
+       _deviceProber = deviceProber ?? _probeDevicesDefault;
 
   EngineRuntime get runtime => _runtime;
 
@@ -273,17 +289,41 @@ class InferenceService {
   /// 扫描内置 runtime、开发目录和用户自定义目录，读出 engine.json 元数据。
   Future<void> discoverEngines() async {
     engines.clear();
+    if (Platform.isLinux) {
+      final engine = EngineInfo(
+        directory: Directory.current.path,
+        executable: 'docker',
+        tag: 'v0.30.0',
+        backend: 'vllm',
+        versionSummary:
+            'Official vLLM container; requires Docker Engine and an NVIDIA Container Toolkit GPU',
+      );
+      engines.add(engine);
+      selectedEngine = engine;
+      _autoSelectedEngine = false;
+      _emit(
+        _runtime.copyWith(
+          engine: engine,
+          state: _runtime.isRunning ? _runtime.state : EngineState.idle,
+        ),
+      );
+      return;
+    }
     final candidates = <String>[];
     final override = _engineDirOverride();
     if (override != null && override.isNotEmpty) {
       candidates.add(override);
     }
     final exeDir = File(Platform.resolvedExecutable).parent;
-    candidates.add('${exeDir.path}${Platform.pathSeparator}runtime${Platform.pathSeparator}llama');
+    candidates.add(
+      '${exeDir.path}${Platform.pathSeparator}runtime${Platform.pathSeparator}llama',
+    );
     // 开发模式：从构建目录向上找仓库根的 artifacts/engine。
     Directory? probe = exeDir.parent;
     for (var i = 0; i < 6 && probe != null; i++) {
-      candidates.add('${probe.path}${Platform.pathSeparator}artifacts${Platform.pathSeparator}engine');
+      candidates.add(
+        '${probe.path}${Platform.pathSeparator}artifacts${Platform.pathSeparator}engine',
+      );
       probe = probe.parent;
     }
     final seen = <String>{};
@@ -312,19 +352,20 @@ class InferenceService {
         selectedEngine = null;
       }
     }
-    _emit(_runtime.copyWith(
-      engine: selectedEngine,
-      state: selectedEngine == null ? EngineState.notFound : _runtime.state,
-    ));
+    _emit(
+      _runtime.copyWith(
+        engine: selectedEngine,
+        state: selectedEngine == null ? EngineState.notFound : _runtime.state,
+      ),
+    );
   }
 
   Future<void> _upgradeSelectionByDevices() async {
     if (_disposed || !_autoSelectedEngine) return;
     // 按优先级逐个探测非 CPU 引擎，命中第一个报告真实 GPU 的。
-    final candidates = engines
-        .where((e) => e.backend.toLowerCase() != 'cpu')
-        .toList()
-      ..sort(_backendPriority);
+    final candidates =
+        engines.where((e) => e.backend.toLowerCase() != 'cpu').toList()
+          ..sort(_backendPriority);
     for (final engine in candidates) {
       if (_disposed || !_autoSelectedEngine || _runtime.isRunning) return;
       String output;
@@ -372,7 +413,10 @@ class InferenceService {
             executable: exe,
             tag: '${data['tag'] ?? '未知版本'}',
             backend: '${data['backend'] ?? 'unknown'}',
-            versionSummary: (data['versionOutput'] ?? '').toString().split('\n').first,
+            versionSummary: (data['versionOutput'] ?? '')
+                .toString()
+                .split('\n')
+                .first,
             bundled: true,
           );
         }
@@ -411,32 +455,69 @@ class InferenceService {
     return InternetAddress.tryParse(normalized)?.isLoopback ?? false;
   }
 
-  Future<String?> _writeApiKeyFile(String apiKey) async {
-    if (apiKey.isEmpty) return null;
+  Future<String?> _writeApiKeyFile(
+    String apiKey, {
+    required EngineInfo engine,
+    String hfToken = '',
+  }) async {
+    if (apiKey.isEmpty && engine.backend.toLowerCase() != 'vllm') return null;
     Directory? directory;
     try {
-      directory = await Directory.systemTemp.createTemp('openmymodel-node-key-');
+      directory = await Directory.systemTemp.createTemp(
+        'openmymodel-node-key-',
+      );
       if (Platform.isWindows) {
-        final identity = await Process.run('whoami', ['/user', '/fo', 'csv', '/nh'], runInShell: false);
-        final sid = RegExp(r'S-\d+(?:-\d+)+')
-            .firstMatch('${identity.stdout}\n${identity.stderr}')?.group(0);
+        final identity = await Process.run('whoami', [
+          '/user',
+          '/fo',
+          'csv',
+          '/nh',
+        ], runInShell: false);
+        final sid = RegExp(
+          r'S-\d+(?:-\d+)+',
+        ).firstMatch('${identity.stdout}\n${identity.stderr}')?.group(0);
         if (identity.exitCode != 0 || sid == null) {
           throw EngineException('无法安全限制节点 API Key 临时文件的访问权限');
         }
         final acl = await Process.run('icacls', [
-          directory.path, '/inheritance:r', '/grant:r', '*${sid}:(OI)(CI)F',
+          directory.path,
+          '/inheritance:r',
+          '/grant:r',
+          '*${sid}:(OI)(CI)F',
         ], runInShell: false);
         if (acl.exitCode != 0) {
           throw EngineException('无法安全限制节点 API Key 临时文件的访问权限');
         }
+      } else if (Platform.isLinux) {
+        final permissions = await Process.run('chmod', [
+          '700',
+          directory.path,
+        ], runInShell: false);
+        if (permissions.exitCode != 0) {
+          throw EngineException('无法安全限制节点 API Key 临时目录的访问权限');
+        }
       }
       final file = File('${directory.path}${Platform.pathSeparator}api-key');
-      await file.writeAsString('$apiKey\n', flush: true);
+      final contents = engine.backend.toLowerCase() == 'vllm'
+          ? 'VLLM_API_KEY=$apiKey\n${hfToken.isEmpty ? '' : 'HF_TOKEN=$hfToken\n'}'
+          : '$apiKey\n';
+      await file.writeAsString(contents, flush: true);
+      if (Platform.isLinux) {
+        final permissions = await Process.run('chmod', [
+          '600',
+          file.path,
+        ], runInShell: false);
+        if (permissions.exitCode != 0) {
+          throw EngineException('无法安全限制节点 API Key 文件的访问权限');
+        }
+      }
       _apiKeyDirectory = directory;
       return file.path;
     } catch (error) {
       if (directory != null && await directory.exists()) {
-        try { await directory.delete(recursive: true); } catch (_) {}
+        try {
+          await directory.delete(recursive: true);
+        } catch (_) {}
       }
       if (error is EngineException) rethrow;
       throw EngineException('无法安全创建节点 API Key 临时文件: $error');
@@ -452,7 +533,10 @@ class InferenceService {
         _apiKeyDirectory = null;
         return;
       } catch (_) {
-        if (attempt < 4) await Future<void>.delayed(Duration(milliseconds: 50 * (attempt + 1)));
+        if (attempt < 4)
+          await Future<void>.delayed(
+            Duration(milliseconds: 50 * (attempt + 1)),
+          );
       }
     }
     throw EngineException('无法删除节点 API Key 临时文件；服务启动已中止以避免遗留密钥');
@@ -529,7 +613,7 @@ class InferenceService {
     }
     // 干净的 API 模型名，云端/本地展示一致。
     final stem = config.modelPath
-        .split(Platform.pathSeparator)
+        .split(RegExp(r'[/\\]'))
         .last
         .replaceAll(RegExp(r'\.gguf$', caseSensitive: false), '');
     if (stem.isNotEmpty) args.addAll(['-a', stem]);
@@ -546,12 +630,101 @@ class InferenceService {
       final extra = splitCommandLine(config.extraArgs);
       for (final token in extra) {
         final name = token.split('=').first.trim();
-        if (['--host', '--port', '--api-key', '--api-key-file'].contains(name)) {
+        if ([
+          '--host',
+          '--port',
+          '--api-key',
+          '--api-key-file',
+        ].contains(name)) {
           throw EngineException('请使用 host/port/api_key 配置项，不要在额外参数中覆盖服务地址或密钥');
         }
         args.add(token);
       }
     }
+    return args;
+  }
+
+  /// Build an argument vector for the Linux vLLM Docker runtime. The API key is
+  /// supplied through a short-lived mode-0600 env file and the host port binds
+  /// to loopback because vLLM does not protect every route with its API key.
+  static List<String> buildVllmArgs(
+    ServerConfig config, {
+    required String envFile,
+    required String containerName,
+  }) {
+    final model = config.modelPath.trim();
+    if (model.isEmpty || model.contains('\n') || model.contains('\r')) {
+      throw EngineException('请输入 Hugging Face 模型 ID 或本地模型目录');
+    }
+    final key = config.apiKey.trim();
+    if (key.length < 16 || key.contains('\n') || key.contains('\r')) {
+      throw EngineException('vLLM 节点必须设置至少 16 个字符的节点 API Key');
+    }
+    if (config.hfToken.contains('\n') || config.hfToken.contains('\r')) {
+      throw EngineException('Hugging Face Token 不能包含换行符');
+    }
+    if (config.port < 1 || config.port > 65535) {
+      throw EngineException('端口必须在 1-65535 之间');
+    }
+    if (config.contextSize < 0 || config.contextSize > 1_048_576) {
+      throw EngineException('上下文长度必须在 0-1048576 之间');
+    }
+    if (config.slots < 0 || config.slots > 1024) {
+      throw EngineException('并行槽位必须在 0-1024 之间');
+    }
+    if (!RegExp(
+      r'^vllm/vllm-openai:[A-Za-z0-9][A-Za-z0-9._-]*$',
+    ).hasMatch(config.vllmImage.trim())) {
+      throw EngineException('仅支持官方 NVIDIA 镜像 vllm/vllm-openai:<tag>');
+    }
+    final alias = config.servedModelName.trim().isEmpty
+        ? model.split(RegExp(r'[/\\]')).last
+        : config.servedModelName.trim();
+    if (alias.isEmpty ||
+        alias.length > 256 ||
+        alias.contains('\n') ||
+        alias.contains('\r')) {
+      throw EngineException('服务模型名必须为 1-256 个字符且不能包含换行符');
+    }
+
+    final args = <String>[
+      'run',
+      '--rm',
+      '--init',
+      '--name',
+      containerName,
+      '--gpus',
+      'all',
+      '--ipc=host',
+      '--publish',
+      '127.0.0.1:${config.port}:8000',
+      '--env-file',
+      envFile,
+      '--env',
+      'HF_HOME=/root/.cache/huggingface',
+      '--volume',
+      'openmymodel-hf-cache:/root/.cache/huggingface',
+    ];
+    var servedModel = model;
+    final localModel = Directory(model).absolute;
+    if (localModel.existsSync()) {
+      args.addAll(['--volume', '${localModel.path}:/openmymodel-model:ro']);
+      servedModel = '/openmymodel-model';
+    }
+    args.addAll([
+      config.vllmImage.trim(),
+      '--model',
+      servedModel,
+      '--served-model-name',
+      alias,
+      '--host',
+      '0.0.0.0',
+      '--port',
+      '8000',
+      '--max-model-len',
+      '${config.contextSize > 0 ? config.contextSize : 8192}',
+    ]);
+    if (config.slots > 0) args.addAll(['--max-num-seqs', '${config.slots}']);
     return args;
   }
 
@@ -588,9 +761,9 @@ class InferenceService {
   }
 
   Map<String, String> _authHeaders(ServerConfig config) => {
-        if (config.apiKey.trim().isNotEmpty)
-          'Authorization': 'Bearer ${config.apiKey.trim()}',
-      };
+    if (config.apiKey.trim().isNotEmpty)
+      'Authorization': 'Bearer ${config.apiKey.trim()}',
+  };
 
   Future<void> start(ServerConfig config) async {
     if (_disposed) throw EngineException('推理服务已关闭');
@@ -600,8 +773,11 @@ class InferenceService {
     while (_lifecycleLock != null) {
       await _lifecycleLock;
     }
+    if (_disposed) throw EngineException('推理服务已关闭');
     final existing = _runningConfig;
-    if (_runtime.isRunning && existing != null && _sameConfig(existing, normalizedConfig)) {
+    if (_runtime.isRunning &&
+        existing != null &&
+        _sameConfig(existing, normalizedConfig)) {
       return; // 幂等：相同配置重复启动无副作用。
     }
     if (_runtime.isRunning) {
@@ -609,12 +785,13 @@ class InferenceService {
     }
     final engine = selectedEngine;
     if (engine == null) {
-      throw EngineException('未发现可用的 llama-server 引擎');
+      throw EngineException('未发现可用的推理引擎');
     }
     final completer = Completer<void>();
     _lifecycleLock = completer.future;
+    final generation = ++_startGeneration;
     try {
-      await _startLocked(normalizedConfig, engine);
+      await _startLocked(normalizedConfig, engine, generation);
     } finally {
       _lifecycleLock = null;
       if (!completer.isCompleted) completer.complete();
@@ -626,27 +803,75 @@ class InferenceService {
     return jsonEncode(a.toJson()) == jsonEncode(b.toJson());
   }
 
-  Future<void> _startLocked(ServerConfig config, EngineInfo engine) async {
-    buildArgs(config); // Validate before creating a secret file.
-    final apiKeyFile = await _writeApiKeyFile(config.apiKey.trim());
-    final args = buildArgs(config, apiKeyFile: apiKeyFile);
+  Future<void> _startLocked(
+    ServerConfig config,
+    EngineInfo engine,
+    int generation,
+  ) async {
+    final isVllm = engine.backend.toLowerCase() == 'vllm';
+    if (isVllm) await _checkVllmRuntime();
+    if (_disposed || generation != _startGeneration) {
+      throw EngineException('启动已取消');
+    }
+    final containerName = isVllm
+        ? 'openmymodel-vllm-${DateTime.now().microsecondsSinceEpoch}'
+        : null;
+    if (isVllm) {
+      buildVllmArgs(
+        config,
+        envFile: 'validated-before-secret-file',
+        containerName: containerName!,
+      );
+    } else {
+      buildArgs(config); // Validate before creating a secret file.
+    }
+    final apiKeyFile = await _writeApiKeyFile(
+      config.apiKey.trim(),
+      engine: engine,
+      hfToken: config.hfToken.trim(),
+    );
+    if (_disposed || generation != _startGeneration) {
+      await _deleteApiKeyFile();
+      throw EngineException('启动已取消');
+    }
+    final args = isVllm
+        ? buildVllmArgs(
+            config,
+            envFile: apiKeyFile!,
+            containerName: containerName!,
+          )
+        : buildArgs(config, apiKeyFile: apiKeyFile);
     _logs.clear();
     _userStopping = false;
+    _runningContainerName = containerName;
     // 全新运行时快照，避免上一次运行的 props/exitCode 残留。
-    _emit(EngineRuntime(
-      state: EngineState.starting,
-      engine: engine,
-      modelPath: config.modelPath,
-      host: config.host,
-      port: config.port,
-      startedAt: DateTime.now(),
-      logTail: const [],
-    ));
+    _emit(
+      EngineRuntime(
+        state: EngineState.starting,
+        engine: engine,
+        modelPath: config.modelPath,
+        host: isVllm ? '127.0.0.1' : config.host,
+        port: config.port,
+        startedAt: DateTime.now(),
+        logTail: const [],
+      ),
+    );
     try {
-      final process = await _processFactory(engine.executable, args,
-          workingDirectory: engine.directory);
+      final process = await _processFactory(
+        engine.executable,
+        args,
+        workingDirectory: engine.directory,
+      );
       _process = process;
       _runningConfig = config;
+      if (_disposed || generation != _startGeneration) {
+        // stop() may have raced the Docker CLI before the named container was
+        // fully created. Restore its identity and issue another stop attempt.
+        _runningContainerName = containerName;
+        await _killOwnedProcess();
+        await _deleteApiKeyFile();
+        throw EngineException('启动已取消');
+      }
       _emit(_runtime.copyWith(pid: '${process.pid}'));
       _stdoutSub = process.stdoutText.listen(_onLog);
       _stderrSub = process.stderrText.listen(_onLog);
@@ -654,20 +879,36 @@ class InferenceService {
     } catch (e) {
       _runningConfig = null;
       await _deleteApiKeyFile();
-      _fail('启动 llama-server 失败: $e');
+      _runningContainerName = null;
+      if (_disposed || generation != _startGeneration) {
+        throw EngineException('启动已取消');
+      }
+      _fail('启动推理引擎失败: $e');
       throw EngineException(_runtime.lastError);
     }
     // 进程秒退检测（如缺 DLL、参数非法）。
     await Future<void>.delayed(const Duration(milliseconds: 150));
+    if (_disposed || generation != _startGeneration) {
+      throw EngineException('启动已取消');
+    }
     if (!_runtime.isRunning) {
-      final err = _runtime.lastError.isEmpty ? 'llama-server 启动后立即退出' : _runtime.lastError;
+      final err = _runtime.lastError.isEmpty
+          ? '推理引擎启动后立即退出'
+          : _runtime.lastError;
       await _deleteApiKeyFile();
       _fail(err);
       throw EngineException(err);
     }
     _emit(_runtime.copyWith(state: EngineState.loading));
     try {
-      await _waitUntilHealthy(config, onListening: apiKeyFile == null ? null : _deleteApiKeyFile);
+      await _waitUntilHealthy(
+        config,
+        timeout: isVllm ? const Duration(hours: 1) : healthTimeout,
+        onListening: apiKeyFile == null ? null : _deleteApiKeyFile,
+      );
+      if (_disposed || generation != _startGeneration) {
+        throw EngineException('启动已取消');
+      }
     } on EngineException {
       _runningConfig = null;
       await _killOwnedProcess();
@@ -675,44 +916,110 @@ class InferenceService {
       rethrow;
     }
     final props = await _fetchPropsSafe(config);
-    _emit(_runtime.copyWith(state: EngineState.ready, props: props, lastError: ''));
+    if (_disposed || generation != _startGeneration) {
+      throw EngineException('启动已取消');
+    }
+    _emit(
+      _runtime.copyWith(state: EngineState.ready, props: props, lastError: ''),
+    );
+  }
+
+  Future<void> _checkVllmRuntime() async {
+    try {
+      final result = await Process.run('docker', [
+        'info',
+        '--format',
+        '{{.ServerVersion}}',
+      ], runInShell: false).timeout(const Duration(seconds: 20));
+      if (result.exitCode != 0) {
+        final details = (result.stderr ?? result.stdout ?? '')
+            .toString()
+            .trim();
+        throw EngineException(
+          '请启动 Docker Engine 并确认当前用户有权访问 Docker。\n'
+          '$details',
+        );
+      }
+    } on EngineException {
+      rethrow;
+    } on TimeoutException {
+      throw EngineException('Docker Engine 检查超时，请确认服务正在运行');
+    } catch (error) {
+      throw EngineException(
+        '找不到 Docker Engine；请先安装 Docker Engine 与 NVIDIA Container Toolkit。\n$error',
+      );
+    }
   }
 
   void _onLog(String line) {
     if (line.isEmpty) return;
-    var text = line.length > _maxLineLength ? line.substring(0, _maxLineLength) : line;
-    final key = _runningConfig?.apiKey;
-    if (key != null && key.isNotEmpty) text = text.replaceAll(key, '[REDACTED]');
+    var text = line.length > _maxLineLength
+        ? line.substring(0, _maxLineLength)
+        : line;
+    for (final key in [_runningConfig?.apiKey, _runningConfig?.hfToken]) {
+      if (key != null && key.isNotEmpty)
+        text = text.replaceAll(key, '[REDACTED]');
+    }
     _logs.add(text);
-    if (_logs.length > _maxLogLines) _logs.removeRange(0, _logs.length - _maxLogLines);
+    if (_logs.length > _maxLogLines)
+      _logs.removeRange(0, _logs.length - _maxLogLines);
   }
 
-  void _onProcessExit(int code) {
-    if (_userStopping || _disposed) return;
+  Future<void> _onProcessExit(int code) async {
+    _process = null;
+    _runningContainerName = null;
+    await _stdoutSub?.cancel();
+    await _stderrSub?.cancel();
+    _stdoutSub = null;
+    _stderrSub = null;
+    if (_userStopping || _disposed) {
+      await _deleteApiKeyFile();
+      return;
+    }
     if (_runtime.state == EngineState.ready ||
         _runtime.state == EngineState.loading ||
         _runtime.state == EngineState.starting) {
-      final tail = _logs.take(5).join('\n');
+      final tail = _logs
+          .skip(_logs.length > 5 ? _logs.length - 5 : 0)
+          .join('\n');
       _runningConfig = null;
-      _emit(_runtime.copyWith(
-        state: EngineState.error,
-        exitCode: code,
-        lastError: 'llama-server 进程已退出 (退出码 $code)${tail.isEmpty ? '' : '\n$tail'}',
-      ));
+      _emit(
+        _runtime.copyWith(
+          state: EngineState.error,
+          exitCode: code,
+          lastError: '推理引擎进程已退出 (退出码 $code)${tail.isEmpty ? '' : '\n$tail'}',
+        ),
+      );
     } else {
       _emit(_runtime.copyWith(exitCode: code));
     }
+    try {
+      await _deleteApiKeyFile();
+    } catch (error) {
+      _emit(
+        _runtime.copyWith(
+          lastError: '${_runtime.lastError}\n密钥临时文件清理失败: $error',
+        ),
+      );
+    }
   }
 
-  Future<void> _waitUntilHealthy(ServerConfig config, {Future<void> Function()? onListening}) async {
-    final deadline = DateTime.now().add(healthTimeout);
+  Future<void> _waitUntilHealthy(
+    ServerConfig config, {
+    Future<void> Function()? onListening,
+    Duration? timeout,
+  }) async {
+    final effectiveTimeout = timeout ?? healthTimeout;
+    final deadline = DateTime.now().add(effectiveTimeout);
     final health = _baseUri(config).replace(path: '/health');
     Object? lastError;
     while (DateTime.now().isBefore(deadline)) {
       if (!_runtime.isRunning || _process == null) {
-        throw EngineException(_runtime.lastError.isEmpty
-            ? 'llama-server 在加载过程中退出'
-            : _runtime.lastError);
+        throw EngineException(
+          _runtime.lastError.isEmpty
+              ? 'llama-server 在加载过程中退出'
+              : _runtime.lastError,
+        );
       }
       final client = _clientFactory();
       try {
@@ -727,7 +1034,8 @@ class InferenceService {
           _emit(_runtime.copyWith(state: EngineState.loading));
         } else {
           throw EngineException(
-              'health 检查返回 HTTP ${response.statusCode}: ${response.body}');
+            'health 检查返回 HTTP ${response.statusCode}: ${response.body}',
+          );
         }
       } on EngineException {
         rethrow;
@@ -741,18 +1049,24 @@ class InferenceService {
       }
       await Future<void>.delayed(healthInterval);
     }
-    throw EngineException('模型加载超时（>${healthTimeout.inSeconds} 秒）${lastError == null ? '' : '：$lastError'}');
+    throw EngineException(
+      '模型加载超时（>${effectiveTimeout.inSeconds} 秒）${lastError == null ? '' : '：$lastError'}',
+    );
   }
 
   Future<Map<String, dynamic>?> _fetchPropsSafe(ServerConfig config) async {
     final client = _clientFactory();
     try {
       final response = await client
-          .get(_baseUri(config).replace(path: '/props'),
-              headers: _authHeaders(config))
+          .get(
+            _baseUri(config).replace(path: '/props'),
+            headers: _authHeaders(config),
+          )
           .timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) {
-        final data = jsonDecode(utf8.decode(response.bodyBytes, allowMalformed: true));
+        final data = jsonDecode(
+          utf8.decode(response.bodyBytes, allowMalformed: true),
+        );
         if (data is Map<String, dynamic>) return data;
       }
     } catch (_) {
@@ -763,43 +1077,101 @@ class InferenceService {
     return null;
   }
 
-  Future<void> stop() async {
-    while (_lifecycleLock != null) {
-      await _lifecycleLock;
-    }
-    final completer = Completer<void>();
-    _lifecycleLock = completer.future;
+  Future<void> stop() {
+    final existing = _stopInProgress;
+    if (existing != null) return existing;
+    final stopping = _stopInternal();
+    _stopInProgress = stopping;
+    unawaited(
+      stopping.whenComplete(() {
+        if (identical(_stopInProgress, stopping)) _stopInProgress = null;
+      }),
+    );
+    return stopping;
+  }
+
+  Future<void> _stopInternal() async {
+    final startLock = _lifecycleLock;
+    final ownsLock = startLock == null;
+    final completer = ownsLock ? Completer<void>() : null;
+    if (completer != null) _lifecycleLock = completer.future;
+    ++_startGeneration;
     try {
       _userStopping = true;
-      if (_runtime.isRunning || _process != null) {
+      if (_runtime.isRunning ||
+          _process != null ||
+          _runningContainerName != null) {
         _emit(_runtime.copyWith(state: EngineState.stopping));
         await _killOwnedProcess();
+        await _deleteApiKeyFile();
       }
+      if (startLock != null) await startLock;
       _runningConfig = null;
-      _emit(EngineRuntime(
-        state: EngineState.idle,
-        engine: selectedEngine,
-        lastError: '',
-      ));
+      _emit(
+        EngineRuntime(
+          state: EngineState.idle,
+          engine: selectedEngine,
+          lastError: '',
+        ),
+      );
     } finally {
-      _lifecycleLock = null;
-      if (!completer.isCompleted) completer.complete();
+      if (completer != null) {
+        if (identical(_lifecycleLock, completer.future)) _lifecycleLock = null;
+        if (!completer.isCompleted) completer.complete();
+      }
       _userStopping = false;
     }
   }
 
   Future<void> _killOwnedProcess() async {
     final process = _process;
-    if (process == null) return;
+    final containerName = _runningContainerName;
     _process = null;
-    process.kill();
-    try {
-      await process.exitCode.timeout(const Duration(seconds: 5));
-    } on TimeoutException {
-      // Windows 上 TerminateProcess 很少失败；再试一次后放弃等待。
-      process.kill();
-      await process.exitCode.timeout(const Duration(seconds: 3), onTimeout: () => -1);
+    var containerStopped = containerName == null;
+    if (containerName != null) {
+      for (var attempt = 0; attempt < 2 && !containerStopped; attempt++) {
+        try {
+          final result = await Process.run('docker', [
+            'stop',
+            '--time',
+            '10',
+            containerName,
+          ], runInShell: false).timeout(const Duration(seconds: 15));
+          containerStopped = result.exitCode == 0;
+        } catch (_) {
+          // Fall through to terminating the client process if Docker is unavailable.
+        }
+        if (!containerStopped && attempt == 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 250));
+        }
+      }
     }
+    if (process != null) {
+      process.kill();
+      try {
+        await process.exitCode.timeout(const Duration(seconds: 5));
+      } on TimeoutException {
+        process.kill();
+        await process.exitCode.timeout(
+          const Duration(seconds: 3),
+          onTimeout: () => -1,
+        );
+      }
+    }
+    if (containerName != null && !containerStopped) {
+      // A Docker run command can create its container just as an earlier stop
+      // reports that the name does not exist. Retry after terminating the CLI.
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      try {
+        await Process.run('docker', [
+          'stop',
+          '--time',
+          '10',
+          containerName,
+        ], runInShell: false).timeout(const Duration(seconds: 15));
+      } catch (_) {}
+    }
+    _runningContainerName = null;
     await _stdoutSub?.cancel();
     await _stderrSub?.cancel();
     _stdoutSub = null;
@@ -808,11 +1180,13 @@ class InferenceService {
 
   void _fail(String message) {
     _runningConfig = null;
-    _emit(_runtime.copyWith(
-      state: EngineState.error,
-      lastError: message,
-      logTail: List<String>.from(_logs.take(20)),
-    ));
+    _emit(
+      _runtime.copyWith(
+        state: EngineState.error,
+        lastError: message,
+        logTail: List<String>.from(_logs.take(20)),
+      ),
+    );
   }
 
   // ---------- HTTP API ----------
@@ -842,17 +1216,22 @@ class InferenceService {
         if (maxTokens != null) 'max_tokens': maxTokens,
         ...?extra,
       };
-      final request = http.Request(
-        'POST',
-        _baseUri(config).replace(path: '/v1/chat/completions'),
-      )
-        ..headers['Content-Type'] = 'application/json'
-        ..headers['Accept'] = 'text/event-stream'
-        ..headers.addAll(_authHeaders(config))
-        ..body = jsonEncode(body);
-      final response = await client.send(request).timeout(const Duration(seconds: 60));
+      final request =
+          http.Request(
+              'POST',
+              _baseUri(config).replace(path: '/v1/chat/completions'),
+            )
+            ..headers['Content-Type'] = 'application/json'
+            ..headers['Accept'] = 'text/event-stream'
+            ..headers.addAll(_authHeaders(config))
+            ..body = jsonEncode(body);
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 60));
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        final bytes = await response.stream.bytesToString().timeout(const Duration(seconds: 10));
+        final bytes = await response.stream.bytesToString().timeout(
+          const Duration(seconds: 10),
+        );
         String message = bytes;
         try {
           final decoded = jsonDecode(bytes);
@@ -871,8 +1250,9 @@ class InferenceService {
         final bytes = await response.stream.bytesToString();
         throw EngineException(bytes, response.statusCode);
       }
-      await for (final event
-          in decodeSse(response.stream.timeout(const Duration(seconds: 300)))) {
+      await for (final event in decodeSse(
+        response.stream.timeout(const Duration(seconds: 300)),
+      )) {
         try {
           final data = jsonDecode(event);
           if (data is Map<String, dynamic>) yield data;
@@ -898,12 +1278,19 @@ class InferenceService {
   Map<String, dynamic> statusForCloud() => _runtime.toStatusJson();
 
   void dispose() {
+    if (_disposed) return;
     _disposed = true;
+    ++_startGeneration;
     cancelChat();
     _userStopping = true;
-    _process?.kill();
-    _stdoutSub?.cancel();
-    _stderrSub?.cancel();
-    _changes.close();
+    unawaited(() async {
+      try {
+        await _killOwnedProcess();
+        await _deleteApiKeyFile();
+      } catch (_) {}
+      await _stdoutSub?.cancel();
+      await _stderrSub?.cancel();
+      await _changes.close();
+    }());
   }
 }

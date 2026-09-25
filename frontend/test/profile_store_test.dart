@@ -22,6 +22,10 @@ void main() {
       modelPath: r'C:\models\qwen.gguf',
       nGpuLayers: -1,
       contextSize: 32768,
+      servedModelName: 'chat-balanced',
+      hfToken: 'hf-test-token',
+      vllmImage: 'vllm/vllm-openai:v0.30.0',
+      apiKey: 'sk-omm-node-test',
       flashAttnMode: 'on',
       contBatchingMode: 'off',
       reranking: true,
@@ -31,6 +35,10 @@ void main() {
     await store.save('默认 配置.1', config);
     final loaded = await store.load('默认 配置.1');
     expect(loaded!.modelPath, config.modelPath);
+    expect(loaded.servedModelName, config.servedModelName);
+    expect(loaded.hfToken, config.hfToken);
+    expect(loaded.vllmImage, config.vllmImage);
+    expect(loaded.apiKey, config.apiKey);
     expect(loaded.nGpuLayers, -1);
     expect(loaded.flashAttnMode, 'on');
     expect(loaded.contBatchingMode, 'off');
@@ -106,8 +114,9 @@ void main() {
 
   test('删除档案，缺失返回 false；损坏档案跳过列表', () async {
     await store.save('ok', ServerConfig());
-    File('${tempDir.path}${Platform.pathSeparator}broken.json')
-        .writeAsStringSync('{not json');
+    File(
+      '${tempDir.path}${Platform.pathSeparator}broken.json',
+    ).writeAsStringSync('{not json');
     expect((await store.list()).map((p) => p['name']), ['ok']);
     expect(await store.delete('ok'), true);
     expect(await store.delete('ok'), false);

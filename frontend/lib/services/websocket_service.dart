@@ -69,10 +69,11 @@ class WebSocketService {
   }
 
   String _node(String script) {
+    final executable = Platform.isWindows ? 'node.exe' : 'node';
     for (final path in [
-      '${File(script).parent.path}/node.exe',
-      '${File(script).parent.path}/node/node.exe',
-      '${File(Platform.resolvedExecutable).parent.path}/scripts/node.exe',
+      '${File(script).parent.path}/$executable',
+      '${File(script).parent.path}/node/$executable',
+      '${File(Platform.resolvedExecutable).parent.path}/scripts/$executable',
     ]) {
       if (File(path).existsSync()) return File(path).absolute.path;
     }
@@ -100,7 +101,13 @@ class WebSocketService {
   }) {
     if (_disposed) return Future.value(false);
     if (_connecting != null) return _connecting!;
-    final attempt = _connect(serverUrl, password, nodeName, serverRunning, slots);
+    final attempt = _connect(
+      serverUrl,
+      password,
+      nodeName,
+      serverRunning,
+      slots,
+    );
     _connecting = attempt;
     unawaited(
       attempt.whenComplete(() {

@@ -32,7 +32,8 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> with WindowListener {
-  late final InferenceService _inference = widget.inference ?? InferenceService();
+  late final InferenceService _inference =
+      widget.inference ?? InferenceService();
   late final bool _ownsInference = widget.inference == null;
   late final ProfileStore _profileStore = widget.profiles ?? ProfileStore();
   final GlobalKey<ChatPageState> _chatKey = GlobalKey<ChatPageState>();
@@ -40,6 +41,9 @@ class _HomePageState extends State<HomePage> with WindowListener {
   final ScrollController _scrollCtrl = ScrollController();
   final TextEditingController tcFolder = TextEditingController();
   final TextEditingController tcModel = TextEditingController();
+  final TextEditingController tcServedModel = TextEditingController();
+  final TextEditingController tcVllmImage = TextEditingController();
+  final TextEditingController tcHfToken = TextEditingController();
   final TextEditingController tcMmproj = TextEditingController();
   final TextEditingController tcProfile = TextEditingController();
   final TextEditingController tcExtraArgs = TextEditingController();
@@ -51,13 +55,14 @@ class _HomePageState extends State<HomePage> with WindowListener {
   StreamSubscription<EngineRuntime>? _engineSub;
   List<Map<String, dynamic>> _files = [];
   List<Map<String, dynamic>> _profiles = [];
-  ServerConfig _cfg = ServerConfig();
+  ServerConfig _cfg = ServerConfig(contextSize: Platform.isLinux ? 8192 : 0);
   bool _starting = false;
   bool _stopping = false;
   bool _closing = false;
   bool _showNodeApiKey = false;
   int _currentIndex = 0;
   int _scanGeneration = 0;
+  int _startIntent = 0;
 
   @override
   void initState() {
@@ -76,6 +81,16 @@ class _HomePageState extends State<HomePage> with WindowListener {
     await _loadPrefs();
     if (!mounted || _closing) return;
     await _inference.discoverEngines();
+    if (!mounted || _closing) return;
+    if (Platform.isLinux) {
+      try {
+        final saved = await _profileStore.load('linux-vllm-node');
+        if (saved != null) _setConfig(saved);
+      } catch (error) {
+        if (mounted && !_closing) _msg('读取 Linux 节点设置失败: $error');
+      }
+      if (_cfg.apiKey.trim().isEmpty) _generateNodeApiKey();
+    }
     await _refresh();
     if (!mounted || _closing) return;
     await _loadP();
@@ -116,11 +131,19 @@ class _HomePageState extends State<HomePage> with WindowListener {
     _cfg = config;
     _numErrors.clear();
     tcModel.text = config.modelPath;
+    tcServedModel.text = config.servedModelName;
+    tcVllmImage.text = config.vllmImage;
+    tcHfToken.text = config.hfToken;
     tcMmproj.text = config.mmprojPath;
     tcExtraArgs.text = config.extraArgs;
     tcApiKey.text = config.apiKey;
     for (final entry in _numCtrls.entries) {
-      final value = _numberValue(entry.key, config);
+      final value = switch (entry.key) {
+        'vllm-context' => config.contextSize,
+        'vllm-slots' => config.slots,
+        'vllm-port' => config.port,
+        _ => _numberValue(entry.key, config),
+      };
       if (value != null) entry.value.text = value.toString();
     }
   }
@@ -156,31 +179,42 @@ class _HomePageState extends State<HomePage> with WindowListener {
   Future<void> _start() async {
     if (_starting || _stopping || _closing) return;
     if (_inference.selectedEngine == null) {
-      return _msg('未发现 llama-server 引擎，请检查安装目录');
+      return _msg('未发现可用的推理引擎');
     }
     if (tcModel.text.trim().isEmpty) return _msg('请选择模型');
     if (_numErrors.values.any((error) => error.isNotEmpty))
       return _msg('请先修正无效参数');
+    final startIntent = ++_startIntent;
     setState(() => _starting = true);
     try {
       _cfg
         ..modelPath = tcModel.text.trim()
+        ..servedModelName = tcServedModel.text.trim()
+        ..vllmImage = tcVllmImage.text.trim()
+        ..hfToken = tcHfToken.text.trim()
         ..mmprojPath = tcMmproj.text.trim()
         ..extraArgs = tcExtraArgs.text.trim()
         ..apiKey = tcApiKey.text.trim();
+      if (Platform.isLinux) {
+        await _profileStore.save('linux-vllm-node', _cfg);
+      }
+      if (startIntent != _startIntent || _stopping || _closing) return;
       await _inference.start(_cfg);
       await _savePrefs();
-      if (mounted && _inference.isReady) _msg('模型已就绪', ok: true);
+      if (mounted && !_stopping && _inference.isReady) {
+        _msg('模型已就绪', ok: true);
+      }
     } catch (error) {
-      if (mounted) _msg('启动失败: $error');
+      if (mounted && !_stopping && !_closing) _msg('启动失败: $error');
     } finally {
       if (mounted && !_closing) setState(() => _starting = false);
     }
   }
 
   Future<void> _stop() async {
-    if (_starting || _stopping || _closing) return;
-    if (!_inference.runtime.isRunning) return;
+    if (_stopping || _closing) return;
+    if (!_inference.runtime.isRunning && !_starting) return;
+    ++_startIntent;
     setState(() => _stopping = true);
     try {
       await _inference.stop();
@@ -224,6 +258,9 @@ class _HomePageState extends State<HomePage> with WindowListener {
     }
     _cfg
       ..modelPath = tcModel.text.trim()
+      ..servedModelName = tcServedModel.text.trim()
+      ..vllmImage = tcVllmImage.text.trim()
+      ..hfToken = tcHfToken.text.trim()
       ..mmprojPath = tcMmproj.text.trim()
       ..extraArgs = tcExtraArgs.text.trim()
       ..apiKey = tcApiKey.text.trim();
@@ -319,24 +356,31 @@ class _HomePageState extends State<HomePage> with WindowListener {
   }
 
   String _modelName(EngineRuntime runtime) {
-    final path = _inference.runningConfig?.modelPath ?? runtime.modelPath;
+    final config = _inference.runningConfig;
+    final alias = config?.servedModelName.trim() ?? '';
+    if (alias.isNotEmpty) return alias;
+    final path = config?.modelPath ?? runtime.modelPath;
     if (path.isEmpty) return '';
-    return path.split(Platform.pathSeparator).last;
+    return path.split(RegExp(r'[/\\]')).last;
   }
 
   String get _status {
     final runtime = _inference.runtime;
     switch (runtime.state) {
       case EngineState.notFound:
-        return '未发现 llama-server 引擎；请确认安装目录 runtime/llama 完整后重新启动应用';
+        return Platform.isLinux
+            ? 'vLLM 节点尚未初始化'
+            : '未发现 llama-server 引擎；请确认安装目录 runtime/llama 完整后重新启动应用';
       case EngineState.idle:
         return runtime.lastError.isNotEmpty
             ? runtime.lastError
             : (_inference.selectedEngine == null
-                ? '选择模型后启动'
-                : '引擎就绪：${_inference.selectedEngine!.label}');
+                  ? '选择模型后启动'
+                  : '引擎就绪：${_inference.selectedEngine!.label}');
       case EngineState.starting:
-        return '正在启动 llama-server...';
+        return _inference.selectedEngine?.backend == 'vllm'
+            ? '正在启动 vLLM Docker 容器...'
+            : '正在启动 llama-server...';
       case EngineState.loading:
         return '模型加载中...';
       case EngineState.ready:
@@ -369,6 +413,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
   @override
   Widget build(BuildContext context) {
     final runtime = _inference.runtime;
+    final isVllm = _inference.selectedEngine?.backend.toLowerCase() == 'vllm';
     final models = _files
         .where(
           (file) => !file['name'].toString().toLowerCase().startsWith('mmproj'),
@@ -411,7 +456,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
       paneBodyBuilder: (_, __) => IndexedStack(
         index: _currentIndex,
         children: [
-          _page(models, mmprojs, runtime),
+          _page(models, mmprojs, runtime, isVllm: isVllm),
           ChatPage(key: _chatKey, inference: _inference),
           CloudPage(
             key: _cloudKey,
@@ -430,8 +475,9 @@ class _HomePageState extends State<HomePage> with WindowListener {
   Widget _page(
     List<Map<String, dynamic>> models,
     List<Map<String, dynamic>> mmprojs,
-    EngineRuntime runtime,
-  ) {
+    EngineRuntime runtime, {
+    required bool isVllm,
+  }) {
     return SingleChildScrollView(
       controller: _scrollCtrl,
       padding: const EdgeInsets.all(28),
@@ -443,7 +489,9 @@ class _HomePageState extends State<HomePage> with WindowListener {
             style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
           ),
           Text(
-            '本地算力 / 云端共享 · 内置 llama.cpp ${runtime.engine?.tag ?? ''}',
+            isVllm
+                ? 'Linux GPU 推理 / 云端共享 · vLLM ${runtime.engine?.tag ?? ''}'
+                : '本地算力 / 云端共享 · 内置 llama.cpp ${runtime.engine?.tag ?? ''}',
             style: TextStyle(fontSize: 14, color: Colors.grey[600]),
           ),
           const SizedBox(height: 20),
@@ -484,9 +532,11 @@ class _HomePageState extends State<HomePage> with WindowListener {
                   ],
                 ),
               ),
-              if (runtime.isRunning || runtime.state == EngineState.stopping)
+              if (runtime.isRunning ||
+                  _starting ||
+                  runtime.state == EngineState.stopping)
                 ft.Button(
-                  onPressed: _starting || _stopping || _closing ? null : _stop,
+                  onPressed: _stopping || _closing ? null : _stop,
                   child: Text(_stopping ? '停止中…' : '停止'),
                 )
               else
@@ -510,8 +560,9 @@ class _HomePageState extends State<HomePage> with WindowListener {
                       )
                       .toList(),
                   onChanged: (label) {
-                    final match = _inference.engines
-                        .where((engine) => engine.label == label);
+                    final match = _inference.engines.where(
+                      (engine) => engine.label == label,
+                    );
                     if (match.isNotEmpty) {
                       _inference.selectEngine(match.first);
                       setState(() {});
@@ -531,42 +582,46 @@ class _HomePageState extends State<HomePage> with WindowListener {
               ),
             ),
           const SizedBox(height: 14),
-          _lbl('模型文件夹'),
-          Row(
-            children: [
-              Expanded(
-                child: ft.TextBox(
-                  controller: tcFolder,
-                  placeholder: '选择模型文件夹',
-                  onChanged: (_) => _refresh(),
+          if (isVllm)
+            _vllmSettings()
+          else ...[
+            _lbl('模型文件夹'),
+            Row(
+              children: [
+                Expanded(
+                  child: ft.TextBox(
+                    controller: tcFolder,
+                    placeholder: '选择模型文件夹',
+                    onChanged: (_) => _refresh(),
+                  ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              ft.Button(onPressed: _pickF, child: const Text('浏览')),
-            ],
-          ),
-          const SizedBox(height: 14),
-          _lbl('模型'),
-          _grid(models, tcModel),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              _lbl('mmproj (可选，多模态投影)'),
-              ft.HyperlinkButton(
-                onPressed: () => setState(() => tcMmproj.clear()),
-                child: const Text('清除'),
-              ),
-            ],
-          ),
-          _grid(mmprojs, tcMmproj),
-          const SizedBox(height: 16),
-          ft.Expander(
-            header: const Text(
-              '推理参数',
-              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                const SizedBox(width: 8),
+                ft.Button(onPressed: _pickF, child: const Text('浏览')),
+              ],
             ),
-            content: _params(),
-          ),
+            const SizedBox(height: 14),
+            _lbl('模型'),
+            _grid(models, tcModel),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                _lbl('mmproj (可选，多模态投影)'),
+                ft.HyperlinkButton(
+                  onPressed: () => setState(() => tcMmproj.clear()),
+                  child: const Text('清除'),
+                ),
+              ],
+            ),
+            _grid(mmprojs, tcMmproj),
+            const SizedBox(height: 16),
+            ft.Expander(
+              header: const Text(
+                '推理参数',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+              ),
+              content: _params(),
+            ),
+          ],
           const SizedBox(height: 8),
           ft.Expander(
             header: const Text(
@@ -576,10 +631,7 @@ class _HomePageState extends State<HomePage> with WindowListener {
             content: _profs(),
           ),
           const SizedBox(height: 8),
-          ft.Expander(
-            header: const Text('运行日志'),
-            content: _logsView(),
-          ),
+          ft.Expander(header: const Text('运行日志'), content: _logsView()),
           const SizedBox(height: 40),
         ],
       ),
@@ -596,6 +648,197 @@ class _HomePageState extends State<HomePage> with WindowListener {
       child: SelectableText(
         logs.join('\n'),
         style: const TextStyle(fontSize: 12),
+      ),
+    );
+  }
+
+  Future<void> _pickVllmModelDirectory() async {
+    final path = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: '选择 Hugging Face 模型目录',
+    );
+    if (!mounted || path == null) return;
+    setState(() => tcModel.text = path);
+  }
+
+  Widget _vllmSettings() => Padding(
+    padding: const EdgeInsets.only(top: 2),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '通过 Docker 启动官方 vLLM NVIDIA 容器。填写 Hugging Face 模型 ID，或选择已下载的模型目录。节点 API 仅绑定本机回环地址，外部访问请通过云端网关。',
+          style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+        ),
+        const SizedBox(height: 14),
+        _lbl('Hugging Face 模型 ID 或本地目录'),
+        Row(
+          children: [
+            Expanded(
+              child: ft.TextBox(
+                controller: tcModel,
+                placeholder: '例如 Qwen/Qwen3-8B 或 /models/Qwen3-8B',
+              ),
+            ),
+            const SizedBox(width: 8),
+            ft.Button(
+              onPressed: _pickVllmModelDirectory,
+              child: const Text('选择目录'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: 560,
+          child: ft.TextBox(
+            controller: tcServedModel,
+            placeholder: '网关和客户端使用的模型名称；留空时使用模型 ID',
+            onChanged: (value) => _cfg.servedModelName = value,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '服务模型名（统一 API 中的 model 值）',
+          style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+        ),
+        const SizedBox(height: 14),
+        _lbl('vLLM Docker 镜像'),
+        SizedBox(
+          width: 560,
+          child: ft.TextBox(
+            controller: tcVllmImage,
+            placeholder: 'vllm/vllm-openai:v0.30.0',
+            onChanged: (value) => _cfg.vllmImage = value,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '目前限定官方 NVIDIA 镜像；启动时 Docker 会按需拉取镜像。',
+          style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+        ),
+        const SizedBox(height: 14),
+        Wrap(
+          spacing: 12,
+          runSpacing: 8,
+          children: [
+            _vllmIntegerField(
+              keyName: 'vllm-context',
+              label: '最大上下文长度',
+              hint: '默认 8192',
+              value: _cfg.contextSize,
+              min: 0,
+              max: 1048576,
+              onChanged: (value) => _cfg.contextSize = value,
+            ),
+            _vllmIntegerField(
+              keyName: 'vllm-slots',
+              label: '最大并发序列',
+              hint: '0 使用引擎默认值',
+              value: _cfg.slots,
+              min: 0,
+              max: 1024,
+              onChanged: (value) => _cfg.slots = value,
+            ),
+            _vllmIntegerField(
+              keyName: 'vllm-port',
+              label: '本机服务端口',
+              hint: '1-65535',
+              value: _cfg.port,
+              min: 1,
+              max: 65535,
+              onChanged: (value) => _cfg.port = value,
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _section('节点访问保护'),
+        SizedBox(
+          width: 560,
+          child: Text(
+            '此密钥由 vLLM 校验。桌面应用会将节点仅绑定到 127.0.0.1，并在运行时通过权限受限的临时环境文件交给容器。云端管理端需要配置相同密钥。',
+            style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+          ),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          width: 560,
+          child: ft.TextBox(
+            controller: tcApiKey,
+            obscureText: !_showNodeApiKey,
+            placeholder: '必填，至少 16 个字符',
+            onChanged: (value) => _cfg.apiKey = value,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          children: [
+            ft.Button(
+              onPressed: _generateNodeApiKey,
+              child: const Text('生成随机密钥'),
+            ),
+            ft.Button(onPressed: _copyNodeApiKey, child: const Text('复制密钥')),
+            ft.Button(
+              onPressed: () =>
+                  setState(() => _showNodeApiKey = !_showNodeApiKey),
+              child: Text(_showNodeApiKey ? '隐藏密钥' : '显示密钥'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _section('Hugging Face 私有模型（可选）'),
+        SizedBox(
+          width: 560,
+          child: ft.TextBox(
+            controller: tcHfToken,
+            obscureText: true,
+            placeholder: 'hf_…',
+            onChanged: (value) => _cfg.hfToken = value,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _vllmIntegerField({
+    required String keyName,
+    required String label,
+    required String hint,
+    required int value,
+    required int min,
+    required int max,
+    required void Function(int) onChanged,
+  }) {
+    final controller = _numCtrls.putIfAbsent(
+      keyName,
+      () => TextEditingController(text: value.toString()),
+    );
+    return SizedBox(
+      width: 180,
+      child: ft.InfoLabel(
+        label: label,
+        child: ft.TextBox(
+          controller: controller,
+          placeholder: hint,
+          inputFormatters: [
+            TextInputFormatter.withFunction(
+              (oldValue, newValue) => RegExp(r'^\d*$').hasMatch(newValue.text)
+                  ? newValue
+                  : oldValue,
+            ),
+          ],
+          onChanged: (text) {
+            final parsed = int.tryParse(text);
+            if (parsed == null) {
+              _numErrors[keyName] = '请输入有效整数';
+            } else if (parsed < min || parsed > max) {
+              _numErrors[keyName] = '范围为 $min-$max';
+            } else {
+              _numErrors[keyName] = '';
+              onChanged(parsed);
+            }
+            if (mounted) setState(() {});
+          },
+        ),
       ),
     );
   }
@@ -1183,6 +1426,9 @@ class _HomePageState extends State<HomePage> with WindowListener {
     for (final controller in _numCtrls.values) controller.dispose();
     tcFolder.dispose();
     tcModel.dispose();
+    tcServedModel.dispose();
+    tcVllmImage.dispose();
+    tcHfToken.dispose();
     tcMmproj.dispose();
     tcProfile.dispose();
     tcExtraArgs.dispose();

@@ -11,12 +11,12 @@
 
 ---
 
-OpenMyModel 将桌面电脑上的 <code>llama-server</code> 通过 WebSocket 隧道连接到自有服务器。节点无需公网 IP；调用者使用统一网关地址和 API Key，由服务器按模型路由到合适节点。
+OpenMyModel 将本地推理节点通过 WebSocket 隧道连接到自有服务器。Windows 桌面端运行 <code>llama-server</code>；Linux 桌面端可通过 Docker 管理 NVIDIA vLLM 节点；Linux 服务器也可运行无界面节点包。节点无需公网 IP；调用者使用统一网关地址和 API Key，由服务器按模型路由到合适节点。
 
 ## 能做什么
 
-- **本地 GPU 推理**：桌面应用管理内置 llama.cpp 引擎、模型参数、对话和节点连接；Windows 发布包包含 CPU、CUDA 与 Vulkan 引擎。
-- **保护节点服务**：每个节点使用独立的 llama-server API Key。管理端加密保存节点 Key，并在路由时交给对应节点使用。
+- **本地 GPU 推理**：Windows 桌面版管理 llama.cpp（CPU、CUDA、Vulkan）；Linux 桌面版通过 Docker 管理 NVIDIA vLLM，支持 Hugging Face 模型 ID 和本地模型目录。
+- **保护节点服务**：每个节点使用独立 API Key。管理端加密保存节点 Key，并在路由时交给对应节点使用。
 - **统一网关与模型调度**：为调用者发放统一 API Key；公开模型名可映射到节点真实模型名，并配置多节点权重与路由。
 - **兼容 OpenAI 客户端**：提供 <code>/v1/models</code> 和 <code>/v1/chat/completions</code>，支持流式 SSE，可接入 Open WebUI 与 OpenAI SDK。
 - **个人与服务商模式**：个人模式关闭用户注册；服务商模式提供邮箱验证码账户、用户专属 Key、用量和订单、支付宝充值与按 Token 计费。
@@ -33,7 +33,34 @@ OpenMyModel 将桌面电脑上的 <code>llama-server</code> 通过 WebSocket 隧
 
 ### 1. 在桌面端启动本地模型
 
-下载并打开 Windows 桌面版，在首页选择推理引擎、模型目录和 GGUF 文件，再点击“启动模型”。首次使用时可展开推理参数调整上下文长度、GPU 层数等设置；等状态显示模型已就绪后，再进行云端连接。
+Windows 用户打开桌面版，在首页选择推理引擎、模型目录和 GGUF 文件，再点击“启动模型”。首次使用时可展开推理参数调整上下文长度、GPU 层数等设置。
+
+Linux 用户可安装桌面版 vLLM 节点管理器。当前默认镜像为官方 <code>vllm/vllm-openai:v0.30.0</code>（NVIDIA CUDA）；Linux 主机需先安装 Docker Engine 与 NVIDIA Container Toolkit，并确认 <code>nvidia-smi</code> 能正常识别 GPU。运行应用后，在首页填写 Hugging Face 模型 ID（例如 <code>Qwen/Qwen3-8B</code>）或选取本地模型目录，设置服务模型名、上下文长度、并发数、端口和节点 API Key；私有模型可填写 Hugging Face Token。按“启动模型”后，应用会拉取镜像并等待模型就绪。首次下载模型会占用较多时间和磁盘空间。
+
+<p align="center"><img src="docs/assets/linux-vllm-desktop.png" alt="Linux 桌面端 vLLM 节点配置页面" width="100%"></p>
+<p align="center"><sub>Ubuntu 测试会话中的配置界面截图。节点密钥保持隐藏；本截图没有连接服务器或启动模型。</sub></p>
+
+可从 Linux x86_64 主机源码构建桌面包：
+
+```bash
+npm ci --prefix scripts
+python3 scripts/package_linux.py --output dist/linux --format both --node "$(command -v node)"
+```
+
+在仓库根目录安装 Debian 包：
+
+```bash
+sudo apt install ./dist/linux/openmymodel_1.0.0-1_amd64.deb
+```
+
+或解压便携包并启动：
+
+```bash
+tar -xzf dist/linux/openmymodel-1.0.0-linux-x86_64.tar.gz
+./openmymodel/openmymodel
+```
+
+安装后也可从应用菜单启动 OpenMyModel；将节点连接到服务器的步骤与 Windows 版相同。Linux vLLM API 仅监听本机回环地址，再由桌面端云端连接页建立加密隧道，不会为了公网访问而直接开放 vLLM 端口。该包适用于 Linux x86_64。启动 vLLM 还需要已配置 NVIDIA GPU 的 Docker 主机；应用本身不会捆绑 CUDA 驱动、Docker 或模型权重。
 
 <p align="center"><img src="首页.png" alt="桌面端选择 GGUF 模型并启动推理" width="960"></p>
 
@@ -110,7 +137,7 @@ curl https://api.example.com/v1/chat/completions \
 ```mermaid
 flowchart LR
     subgraph Local["本地节点"]
-        UI["Flutter 桌面应用"] --> Engine["llama-server<br/>本地 GPU 推理"]
+        UI["Flutter 桌面应用"] --> Engine["llama-server / vLLM Docker<br/>本地 GPU 推理"]
         UI --> Bridge["Node Bridge<br/>节点身份验证与 HTTP 隧道"]
         Bridge --> Engine
     end
@@ -123,11 +150,11 @@ flowchart LR
     Bridge <-->|"WSS 隧道"| Gateway
 ```
 
-节点 Key 保护对应机器上的 llama-server HTTP 服务；网关 Key 用于识别调用者、执行访问控制、限流和计量。
+节点 Key 保护对应机器上的模型服务；网关 Key 用于识别调用者、执行访问控制、限流和计量。vLLM API Key 只校验部分 API 路径，因此桌面端把本机端口限制在回环地址，再通过云端隧道提供服务。
 
 | 组件 | 用途 |
 | --- | --- |
-| Flutter 桌面端 | 管理引擎进程、GGUF 模型、推理参数、本地 API Key 与云端连接 |
+| Flutter 桌面端 | Windows 管理 llama.cpp；Linux 管理 vLLM Docker 容器；两端均提供对话与云端连接 |
 | Node Bridge | 建立认证后的 WebSocket 隧道，并转发 HTTP/SSE 请求 |
 | 云端后端 | Node.js 22、Fastify、SQLite；提供模型调度、API 网关、管理端和用户控制台 |
 
@@ -135,11 +162,11 @@ flowchart LR
 
 ### 下载桌面版
 
-从 [GitHub Releases](https://github.com/tianxingstarsky/OpenMyModel/releases/latest) 下载 Windows 安装包或压缩包。Windows 10 及以上系统可直接启动；引擎已随包提供，无需安装 Python。
+从 [GitHub Releases](https://github.com/tianxingstarsky/OpenMyModel/releases/latest) 下载 Windows 安装包或压缩包。Windows 10 及以上系统可直接启动；llama.cpp 引擎已随包提供，无需安装 Python。Linux 用户可使用上面的打包命令生成 vLLM 桌面包；Docker 和 NVIDIA Container Toolkit 需预先安装。
 
 ### 从源码运行桌面端
 
-需要 Node.js 22+、支持 Dart 3.11+ 的 Flutter stable、CMake 3.28+ 与 Visual Studio 2022 C++ 工具集。
+Windows 开发需要 Node.js 22+、Flutter stable、CMake 3.28+ 与 Visual Studio 2022 C++ 工具集。Linux 桌面构建需要 Flutter stable、CMake、Ninja、GTK 3 开发库和 Node.js 22+。
 
 ```bash
 npm --prefix scripts ci

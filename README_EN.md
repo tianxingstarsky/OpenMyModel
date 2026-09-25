@@ -11,12 +11,12 @@
 
 ---
 
-OpenMyModel connects desktop <code>llama-server</code> instances to your cloud server through authenticated WebSocket tunnels. Nodes need no public IP. Clients use one OpenAI-compatible endpoint and gateway key while the server routes each request to an eligible node.
+OpenMyModel connects local inference nodes to your cloud server through authenticated WebSocket tunnels. The Windows desktop app runs <code>llama-server</code>; the Linux desktop app can manage an NVIDIA vLLM node through Docker, and Linux servers can run a headless node package. Nodes need no public IP. Clients use one OpenAI-compatible endpoint and gateway key while the server routes each request to an eligible node.
 
 ## Features
 
-- **Local GPU inference** — The desktop app manages the bundled llama.cpp engine, model settings, chat and node connection. Windows releases include CPU, CUDA and Vulkan engines.
-- **Protected nodes** — Each node has its own llama-server API key. The admin console stores it encrypted and supplies it to that node when routing requests.
+- **Local GPU inference** — The Windows desktop app manages llama.cpp (CPU, CUDA and Vulkan); the Linux desktop app manages NVIDIA vLLM through Docker and accepts Hugging Face model IDs or local model directories.
+- **Protected nodes** — Each node has its own API key. The admin console stores it encrypted and supplies it to that node when routing requests.
 - **Unified gateway and model routing** — Issue caller-facing gateway keys, map public model names to upstream names, and configure weighted routes across nodes.
 - **OpenAI-compatible API** — <code>GET /v1/models</code> and <code>POST /v1/chat/completions</code>, including streaming SSE. Works with Open WebUI and OpenAI SDKs.
 - **Personal and provider modes** — Personal mode has no end-user registration. Provider mode adds email-code accounts, user-owned keys, usage and orders, Alipay top-ups and token billing.
@@ -33,7 +33,34 @@ Follow these steps in order: start a node, connect it to the server, configure m
 
 ### 1. Start a local model
 
-Open the Windows desktop app, choose an inference engine, model directory and GGUF file, then click **Start Model**. Expand the inference settings to tune context length, GPU layers and other options if needed. Wait until the model reports that it is ready before connecting it to the cloud.
+On Windows, open the desktop app, choose an inference engine, model directory and GGUF file, then click **Start Model**. Expand the inference settings to tune context length, GPU layers and other options.
+
+On Linux, install the vLLM desktop node manager. The default image is the official <code>vllm/vllm-openai:v0.30.0</code> NVIDIA CUDA image. Install Docker Engine and NVIDIA Container Toolkit first, and verify Docker can access the GPU. In the app, enter a Hugging Face model ID (for example <code>Qwen/Qwen3-8B</code>) or select a local model directory. Set the served model name, context length, concurrency, port and node API key; add a Hugging Face token for gated models. Click **Start Model** and wait for the model to load. The first image and model downloads can take time and disk space.
+
+<p align="center"><img src="docs/assets/linux-vllm-desktop.png" alt="Linux desktop vLLM node settings" width="100%"></p>
+<p align="center"><sub>Settings screen captured in an Ubuntu test session. The node key is hidden; this screenshot does not connect to a server or start a model.</sub></p>
+
+Build Linux x86_64 packages from source:
+
+```bash
+npm ci --prefix scripts
+python3 scripts/package_linux.py --output dist/linux --format both --node "$(command -v node)"
+```
+
+Install the Debian package from the repository root:
+
+```bash
+sudo apt install ./dist/linux/openmymodel_1.0.0-1_amd64.deb
+```
+
+Or extract and launch the portable archive:
+
+```bash
+tar -xzf dist/linux/openmymodel-1.0.0-linux-x86_64.tar.gz
+./openmymodel/openmymodel
+```
+
+You can also start OpenMyModel from the applications menu and connect it to your server as on Windows. vLLM listens only on the local loopback address; the desktop cloud connector carries requests through the authenticated tunnel. This package targets Linux x86_64. Running vLLM also requires Docker configured to use an NVIDIA GPU; the app does not bundle Docker, CUDA drivers or model weights.
 
 <p align="center"><img src="首页.png" alt="Choose a GGUF model and start local inference" width="960"></p>
 
@@ -110,7 +137,7 @@ Provider-mode prebilling currently supports text chat messages. llama.cpp nodes 
 ```mermaid
 flowchart LR
     subgraph Local["Local nodes"]
-        UI["Flutter desktop app"] --> Engine["llama-server<br/>Local GPU inference"]
+        UI["Flutter desktop app"] --> Engine["llama-server / vLLM Docker<br/>Local GPU inference"]
         UI --> Bridge["Node Bridge<br/>Node authentication and HTTP tunnel"]
         Bridge --> Engine
     end
@@ -123,11 +150,11 @@ flowchart LR
     Bridge <-->|"WSS tunnel"| Gateway
 ```
 
-A node key protects the llama-server HTTP service on its machine. A gateway key identifies API callers for access control, rate limits and metering.
+A node key protects the inference service on its machine. A gateway key identifies API callers for access control, rate limits and metering. Since vLLM API keys protect only some API paths, the Linux app binds its local port to loopback and exposes it through the cloud tunnel.
 
 | Component | Role |
 | --- | --- |
-| Flutter desktop app | Manages the inference process, GGUF models, settings, local API keys and cloud connection |
+| Flutter desktop app | Manages llama.cpp on Windows and a vLLM Docker container on Linux; both provide chat and cloud connection |
 | Node Bridge | Authenticated WebSocket tunnel between desktop and cloud; relays HTTP and SSE |
 | Cloud backend | Node.js 22, Fastify and SQLite; model routing, API gateway, admin console and user portal |
 
@@ -135,11 +162,11 @@ A node key protects the llama-server HTTP service on its machine. A gateway key 
 
 ### Download the desktop app
 
-Download a Windows installer or archive from [GitHub Releases](https://github.com/tianxingstarsky/OpenMyModel/releases/latest). Windows 10 or later is supported. The inference engine is bundled; Python is not required.
+Download a Windows installer or archive from [GitHub Releases](https://github.com/tianxingstarsky/OpenMyModel/releases/latest). Windows 10 or later is supported; the llama.cpp engine is bundled and Python is not required. Linux users can build the vLLM desktop package with the command above; Docker and NVIDIA Container Toolkit must be installed on the host.
 
 ### Run the desktop app from source
 
-Requires Node.js 22+, stable Flutter with Dart 3.11+, CMake 3.28+, and the Visual Studio 2022 C++ toolchain.
+Windows development requires Node.js 22+, stable Flutter, CMake 3.28+ and the Visual Studio 2022 C++ toolchain. Linux desktop builds require stable Flutter, CMake, Ninja, GTK 3 development libraries and Node.js 22+.
 
 ```bash
 npm --prefix scripts ci

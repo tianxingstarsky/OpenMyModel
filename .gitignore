@@ -26,6 +26,7 @@ scripts/*.py
 !scripts/make_installer.py
 !scripts/sync_bridge.py
 !scripts/package_windows.py
+!scripts/package_linux.py
 scripts/node_modules/
 
 # OS

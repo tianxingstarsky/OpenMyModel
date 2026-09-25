@@ -7,6 +7,15 @@ class ServerConfig {
   String serverPath;
   String modelPath;
 
+  /// Optional public model alias advertised to local clients and the cloud router.
+  String servedModelName;
+
+  /// Hugging Face token used by the vLLM container to download gated models.
+  String hfToken;
+
+  /// Docker image for the Linux vLLM runtime.
+  String vllmImage;
+
   // 多模态
   String mmprojPath;
 
@@ -50,6 +59,9 @@ class ServerConfig {
   ServerConfig({
     this.serverPath = "",
     this.modelPath = "",
+    this.servedModelName = "",
+    this.hfToken = "",
+    this.vllmImage = "vllm/vllm-openai:v0.30.0",
     this.mmprojPath = "",
     this.nGpuLayers = 0,
     this.contextSize = 0,
@@ -86,6 +98,9 @@ class ServerConfig {
   Map<String, dynamic> toJson() => {
     "server_path": serverPath,
     "model_path": modelPath,
+    "served_model_name": servedModelName,
+    "hf_token": hfToken,
+    "vllm_image": vllmImage,
     "mmproj_path": mmprojPath,
     "n_gpu_layers": nGpuLayers,
     "context_size": contextSize,
@@ -118,6 +133,9 @@ class ServerConfig {
   factory ServerConfig.fromJson(Map<String, dynamic> json) => ServerConfig(
     serverPath: json["server_path"] ?? "",
     modelPath: json["model_path"] ?? "",
+    servedModelName: json["served_model_name"] ?? "",
+    hfToken: json["hf_token"] ?? "",
+    vllmImage: json["vllm_image"] ?? "vllm/vllm-openai:v0.30.0",
     mmprojPath: json["mmproj_path"] ?? "",
     nGpuLayers: json["n_gpu_layers"] ?? 0,
     contextSize: json["context_size"] ?? 0,

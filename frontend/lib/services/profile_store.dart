@@ -16,15 +16,60 @@ class ProfileStore {
   final String directory;
 
   ProfileStore({String? dir})
-      : directory = dir ??
-            '${Platform.environment['USERPROFILE'] ?? Directory.systemTemp.path}'
-            '${Platform.pathSeparator}.openmymodel${Platform.pathSeparator}profiles';
+    : directory =
+          dir ??
+          '${Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'] ?? Directory.systemTemp.path}'
+              '${Platform.pathSeparator}.openmymodel${Platform.pathSeparator}profiles';
 
   static const _reservedNames = {
-    'CON', 'PRN', 'AUX', 'NUL', 'CONIN\$', 'CONOUT\$',
-    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
-    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+    'CON',
+    'PRN',
+    'AUX',
+    'NUL',
+    'CONIN\$',
+    'CONOUT\$',
+    'COM1',
+    'COM2',
+    'COM3',
+    'COM4',
+    'COM5',
+    'COM6',
+    'COM7',
+    'COM8',
+    'COM9',
+    'LPT1',
+    'LPT2',
+    'LPT3',
+    'LPT4',
+    'LPT5',
+    'LPT6',
+    'LPT7',
+    'LPT8',
+    'LPT9',
   };
+
+  Future<void> _secureLinuxStorage({File? file}) async {
+    if (!Platform.isLinux) return;
+    final dir = Directory(directory);
+    if (await dir.exists()) {
+      final result = await Process.run('chmod', [
+        '700',
+        dir.path,
+      ], runInShell: false);
+      if (result.exitCode != 0) {
+        throw FileSystemException('无法限制配置档案目录的访问权限', dir.path);
+      }
+    }
+    if (file != null && await file.exists()) {
+      final result = await Process.run('chmod', [
+        '600',
+        file.path,
+      ], runInShell: false);
+      if (result.exitCode != 0) {
+        throw FileSystemException('无法限制配置档案文件的访问权限', file.path);
+      }
+    }
+  }
 
   /// 与旧 Python 实现相同的名称规则：文字/数字/空格/._-，防保留名与大小写别名冲突。
   File _profileFile(String name) {
@@ -52,20 +97,26 @@ class ProfileStore {
 
   static String _basename(String path) {
     if (path.isEmpty) return '';
-    return path.split(Platform.pathSeparator).last.split('/').last;
+    return path.split(RegExp(r'[/\\]')).last;
   }
 
   Future<List<Map<String, dynamic>>> list() async {
     final dir = Directory(directory);
     if (!dir.existsSync()) return [];
+    await _secureLinuxStorage();
     final result = <Map<String, dynamic>>[];
-    final entries = dir.listSync(followLinks: false)
-        .whereType<File>()
-        .where((f) => f.path.toLowerCase().endsWith('.json'))
-        .toList()
-      ..sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
+    final entries =
+        dir
+            .listSync(followLinks: false)
+            .whereType<File>()
+            .where((f) => f.path.toLowerCase().endsWith('.json'))
+            .toList()
+          ..sort(
+            (a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()),
+          );
     for (final file in entries) {
       try {
+        await _secureLinuxStorage(file: file);
         final data = jsonDecode(await file.readAsString());
         if (data is! Map) continue;
         result.add({
@@ -89,11 +140,15 @@ class ProfileStore {
     final dir = Directory(directory);
     if (!dir.existsSync()) return [];
     final result = <Map<String, dynamic>>[];
-    final entries = dir.listSync(followLinks: false)
-        .whereType<File>()
-        .where((f) => f.path.toLowerCase().endsWith('.json'))
-        .toList()
-      ..sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
+    final entries =
+        dir
+            .listSync(followLinks: false)
+            .whereType<File>()
+            .where((f) => f.path.toLowerCase().endsWith('.json'))
+            .toList()
+          ..sort(
+            (a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()),
+          );
     for (final file in entries) {
       try {
         final data = jsonDecode(file.readAsStringSync());
@@ -116,6 +171,7 @@ class ProfileStore {
   Future<void> save(String name, ServerConfig config) async {
     final file = _profileFile(name);
     await Directory(directory).create(recursive: true);
+    await _secureLinuxStorage();
     final now = DateTime.now().toIso8601String();
     var createdAt = now;
     if (file.existsSync()) {
@@ -134,12 +190,15 @@ class ProfileStore {
     };
     // 原子写：同目录临时文件 + rename。
     final tmp = File(
-        '$directory${Platform.pathSeparator}.profile-${DateTime.now().microsecondsSinceEpoch}.tmp');
-    await tmp.writeAsString(jsonEncode(data), flush: true);
+      '$directory${Platform.pathSeparator}.profile-${DateTime.now().microsecondsSinceEpoch}.tmp',
+    );
     try {
+      await tmp.create(exclusive: true);
+      await _secureLinuxStorage(file: tmp);
+      await tmp.writeAsString(jsonEncode(data), flush: true);
       await tmp.rename(file.path);
     } catch (_) {
-      await tmp.delete();
+      if (await tmp.exists()) await tmp.delete();
       rethrow;
     }
   }
@@ -147,6 +206,7 @@ class ProfileStore {
   Future<ServerConfig?> load(String name) async {
     final file = _profileFile(name);
     if (!file.existsSync()) return null;
+    await _secureLinuxStorage(file: file);
     final data = jsonDecode(await file.readAsString());
     if (data is! Map) {
       throw const FormatException('配置档案必须是 JSON 对象');
@@ -157,6 +217,7 @@ class ProfileStore {
   Future<bool> delete(String name) async {
     final file = _profileFile(name);
     if (!file.existsSync()) return false;
+    await _secureLinuxStorage(file: file);
     await file.delete();
     return true;
   }

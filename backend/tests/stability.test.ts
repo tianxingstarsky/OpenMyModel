@@ -1620,7 +1620,10 @@ test("provider gateway preflights node tokens and reserves no more than the avai
       value = { prompt: "formatted prompt" };
     } else if (msg.path === "/tokenize") {
       const body = JSON.parse(msg.body);
-      if (body.content === "formatted prompt") {
+      if (typeof body.prompt === "string") {
+        assert.equal(body.add_special_tokens, false);
+        value = { tokens: body.prompt === "ok" ? [6, 7, 8] : [9, 10, 11, 12] };
+      } else if (body.content === "formatted prompt") {
         assert.equal(body.add_special, true);
         value = { tokens: [1, 2, 3, 4, 5] };
       } else {

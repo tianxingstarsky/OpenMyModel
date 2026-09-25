@@ -98,8 +98,11 @@ final EngineInfo _engineOf = EngineInfo(
   backend: 'cpu',
 );
 
-InferenceService _serviceWith(_ScriptedProcess process, Uri base,
-    {Future<void> Function(List<String>)? onStart}) {
+InferenceService _serviceWith(
+  _ScriptedProcess process,
+  Uri base, {
+  Future<void> Function(List<String>)? onStart,
+}) {
   final service = InferenceService(
     processFactory: (exe, args, {workingDirectory}) async {
       await onStart?.call(args);
@@ -158,7 +161,11 @@ void main() {
         containsAllInOrder(['-fa', 'on']),
       );
       final off = InferenceService.buildArgs(
-        ServerConfig(modelPath: 'm.gguf', flashAttnMode: 'off', contBatchingMode: 'off'),
+        ServerConfig(
+          modelPath: 'm.gguf',
+          flashAttnMode: 'off',
+          contBatchingMode: 'off',
+        ),
       );
       expect(off, containsAllInOrder(['-fa', 'off']));
       expect(off, contains('--no-cont-batching'));
@@ -217,22 +224,142 @@ void main() {
 
       for (final host in ['localhost', '127.0.0.2', '::1', '[::1]']) {
         expect(
-          InferenceService.buildArgs(ServerConfig(modelPath: 'm.gguf', host: host)),
+          InferenceService.buildArgs(
+            ServerConfig(modelPath: 'm.gguf', host: host),
+          ),
           containsAll(['--host', host]),
-          reason: '$host is a loopback listener and does not need a network key',
+          reason:
+              '$host is a loopback listener and does not need a network key',
         );
       }
 
       final protected = InferenceService.buildArgs(
-        ServerConfig(modelPath: 'm.gguf', host: '0.0.0.0', apiKey: ' node-secret '),
+        ServerConfig(
+          modelPath: 'm.gguf',
+          host: '0.0.0.0',
+          apiKey: ' node-secret ',
+        ),
       );
-      expect(protected, containsAll(['--host', '0.0.0.0', '--api-key', 'node-secret']));
+      expect(
+        protected,
+        containsAll(['--host', '0.0.0.0', '--api-key', 'node-secret']),
+      );
       final protectedByFile = InferenceService.buildArgs(
-        ServerConfig(modelPath: 'm.gguf', host: '0.0.0.0', apiKey: 'node-secret'),
+        ServerConfig(
+          modelPath: 'm.gguf',
+          host: '0.0.0.0',
+          apiKey: 'node-secret',
+        ),
         apiKeyFile: r'C:\private\api-key',
       );
-      expect(protectedByFile, containsAll(['--api-key-file', r'C:\private\api-key']));
+      expect(
+        protectedByFile,
+        containsAll(['--api-key-file', r'C:\private\api-key']),
+      );
       expect(protectedByFile, isNot(contains('node-secret')));
+    });
+  });
+
+  group('buildVllmArgs (Linux NVIDIA Docker)', () {
+    test('uses protected loopback port, model alias and validated limits', () {
+      final args = InferenceService.buildVllmArgs(
+        ServerConfig(
+          modelPath: 'Qwen/Qwen3-8B',
+          servedModelName: 'chat-balanced',
+          apiKey: 'sk-omm-node-0123456789abcdef',
+          port: 8090,
+          contextSize: 32768,
+          slots: 4,
+        ),
+        envFile: '/tmp/private-env',
+        containerName: 'openmymodel-vllm-test',
+      );
+      expect(
+        args,
+        containsAllInOrder([
+          'run',
+          '--rm',
+          '--init',
+          '--name',
+          'openmymodel-vllm-test',
+          '--gpus',
+          'all',
+          '--ipc=host',
+          '--publish',
+          '127.0.0.1:8090:8000',
+          '--env-file',
+          '/tmp/private-env',
+          'vllm/vllm-openai:v0.30.0',
+          '--model',
+          'Qwen/Qwen3-8B',
+          '--served-model-name',
+          'chat-balanced',
+          '--host',
+          '0.0.0.0',
+          '--port',
+          '8000',
+          '--max-model-len',
+          '32768',
+          '--max-num-seqs',
+          '4',
+        ]),
+      );
+      expect(args.join(' '), isNot(contains('sk-omm-node-0123456789abcdef')));
+    });
+
+    test('mounts an existing local model directory read-only', () async {
+      final model = await Directory.systemTemp.createTemp('omm-local-model-');
+      addTearDown(() => model.delete(recursive: true));
+      final args = InferenceService.buildVllmArgs(
+        ServerConfig(
+          modelPath: model.path,
+          apiKey: 'sk-omm-node-0123456789abcdef',
+        ),
+        envFile: '/tmp/private-env',
+        containerName: 'openmymodel-vllm-local-test',
+      );
+      expect(
+        args,
+        containsAll([
+          '--volume',
+          '${model.absolute.path}:/openmymodel-model:ro',
+          '--model',
+          '/openmymodel-model',
+        ]),
+      );
+    });
+
+    test('rejects missing or unsafe node credentials, images and ports', () {
+      ServerConfig valid() => ServerConfig(
+        modelPath: 'Qwen/Qwen3-8B',
+        apiKey: 'sk-omm-node-0123456789abcdef',
+      );
+      List<String> build(ServerConfig config) => InferenceService.buildVllmArgs(
+        config,
+        envFile: '/tmp/private-env',
+        containerName: 'openmymodel-vllm-invalid-test',
+      );
+
+      expect(
+        () => build(valid()..apiKey = ''),
+        throwsA(isA<EngineException>()),
+      );
+      expect(
+        () => build(valid()..apiKey = 'short'),
+        throwsA(isA<EngineException>()),
+      );
+      expect(
+        () => build(valid()..hfToken = 'hf_token\nINJECTED=x'),
+        throwsA(isA<EngineException>()),
+      );
+      expect(
+        () => build(valid()..vllmImage = 'attacker/image:latest'),
+        throwsA(isA<EngineException>()),
+      );
+      expect(
+        () => build(valid()..port = 70000),
+        throwsA(isA<EngineException>()),
+      );
     });
   });
 
@@ -273,17 +400,25 @@ void main() {
     String? keyFilePath;
     String? keyFileContents;
     List<String>? startedArgs;
-    final service = _serviceWith(process, base, onStart: (args) async {
-      startedArgs = List<String>.from(args);
-      final fileFlag = args.indexOf('--api-key-file');
-      expect(fileFlag, greaterThanOrEqualTo(0));
-      keyFilePath = args[fileFlag + 1];
-      keyFileContents = await File(keyFilePath!).readAsString();
-    });
+    final service = _serviceWith(
+      process,
+      base,
+      onStart: (args) async {
+        startedArgs = List<String>.from(args);
+        final fileFlag = args.indexOf('--api-key-file');
+        expect(fileFlag, greaterThanOrEqualTo(0));
+        keyFilePath = args[fileFlag + 1];
+        keyFileContents = await File(keyFilePath!).readAsString();
+      },
+    );
     addTearDown(service.dispose);
 
     await service.start(
-      ServerConfig(modelPath: 'm.gguf', port: base.port, apiKey: 'sk-node-secret'),
+      ServerConfig(
+        modelPath: 'm.gguf',
+        port: base.port,
+        apiKey: 'sk-node-secret',
+      ),
     );
     expect(startedArgs, isNotNull);
     expect(startedArgs, isNot(contains('sk-node-secret')));
@@ -291,8 +426,12 @@ void main() {
     expect(keyFileContents, 'sk-node-secret\n');
     expect(health.loadingHits, 1);
     expect(health.lastHealthAuthorization, 'Bearer sk-node-secret');
-    expect(await File(keyFilePath!).exists(), isFalse,
-        reason: 'the secret file is removed as soon as llama-server accepts HTTP requests');
+    expect(
+      await File(keyFilePath!).exists(),
+      isFalse,
+      reason:
+          'the secret file is removed as soon as llama-server accepts HTTP requests',
+    );
   });
 
   test('日志脱敏 API Key，模型别名随启动写入命令行', () async {
@@ -340,6 +479,38 @@ void main() {
     expect(service.runningConfig, isNull);
   });
 
+  test(
+    'stop interrupts an engine start waiting for its process to launch',
+    () async {
+      final process = _ScriptedProcess();
+      final enteredFactory = Completer<void>();
+      final allowFactoryToReturn = Completer<void>();
+      final service =
+          InferenceService(
+              processFactory: (exe, args, {workingDirectory}) async {
+                enteredFactory.complete();
+                await allowFactoryToReturn.future;
+                return process;
+              },
+              engineDirOverride: () => '',
+              healthInterval: const Duration(milliseconds: 5),
+            )
+            ..engines.add(_engineOf)
+            ..selectEngine(_engineOf);
+      addTearDown(service.dispose);
+
+      final start = service.start(ServerConfig(modelPath: 'm.gguf'));
+      await enteredFactory.future;
+      final stopping = service.stop();
+      allowFactoryToReturn.complete();
+      await expectLater(start, throwsA(isA<EngineException>()));
+      await stopping;
+      expect(process.kills, 1);
+      expect(service.runtime.state, EngineState.idle);
+      expect(service.runningConfig, isNull);
+    },
+  );
+
   test('聊天直连 /v1/chat/completions：SSE 解析、鉴权与取消', () async {
     final process = _ScriptedProcess();
     final health = _HealthServer();
@@ -350,11 +521,9 @@ void main() {
     await service.start(
       ServerConfig(modelPath: 'm.gguf', port: base.port, apiKey: 'sk-chat'),
     );
-    final chunks = await service
-        .chatStream([
-          {'role': 'user', 'content': '你好'},
-        ], temperature: 0.5)
-        .toList();
+    final chunks = await service.chatStream([
+      {'role': 'user', 'content': '你好'},
+    ], temperature: 0.5).toList();
     expect(chunks.length, 2);
     expect(chunks[0]['choices'][0]['delta']['content'], '你好');
     expect(chunks[1]['choices'][0]['delta']['reasoning_content'], '想一想');
@@ -376,12 +545,13 @@ void main() {
     final health = _HealthServer();
     await health.start();
     addTearDown(health.close);
-    final service = InferenceService(
-      engineDirOverride: () => '',
-      healthInterval: const Duration(milliseconds: 5),
-    )
-      ..engines.add(_engineOf)
-      ..selectEngine(_engineOf);
+    final service =
+        InferenceService(
+            engineDirOverride: () => '',
+            healthInterval: const Duration(milliseconds: 5),
+          )
+          ..engines.add(_engineOf)
+          ..selectEngine(_engineOf);
     addTearDown(service.dispose);
     await expectLater(
       service.chatStream([]).toList(),
@@ -401,87 +571,93 @@ void main() {
     expect(service.isReady, true);
   });
 
-  group('引擎自动选择（真实设备探测）', () {
-    late Directory engineRoot;
+  group(
+    '引擎自动选择（真实设备探测）',
+    () {
+      late Directory engineRoot;
 
-    setUp(() async {
-      engineRoot = await Directory.systemTemp.createTemp('omm-engines-test');
-      for (final backend in ['cuda', 'vulkan', 'cpu']) {
-        final dir = Directory(
-          '${engineRoot.path}${Platform.pathSeparator}llama-b10909-$backend-x64',
-        )..createSync();
-        File('${dir.path}${Platform.pathSeparator}llama-server.exe')
-            .writeAsStringSync('');
-        File('${dir.path}${Platform.pathSeparator}engine.json')
-            .writeAsStringSync('{"tag":"b10909","backend":"$backend"}');
+      setUp(() async {
+        engineRoot = await Directory.systemTemp.createTemp('omm-engines-test');
+        for (final backend in ['cuda', 'vulkan', 'cpu']) {
+          final dir = Directory(
+            '${engineRoot.path}${Platform.pathSeparator}llama-b10909-$backend-x64',
+          )..createSync();
+          File(
+            '${dir.path}${Platform.pathSeparator}llama-server.exe',
+          ).writeAsStringSync('');
+          File(
+            '${dir.path}${Platform.pathSeparator}engine.json',
+          ).writeAsStringSync('{"tag":"b10909","backend":"$backend"}');
+        }
+      });
+
+      tearDown(() async {
+        await engineRoot.delete(recursive: true);
+      });
+
+      String exeOf(String backend) =>
+          '${engineRoot.path}${Platform.pathSeparator}'
+          'llama-b10909-$backend-x64${Platform.pathSeparator}llama-server.exe';
+
+      Future<InferenceService> discoveredWith(
+        Future<String> Function(String exe) prober,
+      ) async {
+        final service = InferenceService(
+          engineDirOverride: () => engineRoot.path,
+          deviceProber: prober,
+        );
+        addTearDown(service.dispose);
+        await service.discoverEngines();
+        // 探测在后台异步完成；假探针无真实延迟，短等待即可稳定。
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        return service;
       }
-    });
 
-    tearDown(() async {
-      await engineRoot.delete(recursive: true);
-    });
+      test('N 卡：CUDA 报告设备时优先于 Vulkan', () async {
+        final service = await discoveredWith(
+          (exe) async =>
+              exe == exeOf('cuda') ? '  CUDA0: NVIDIA RTX (16GB)' : '',
+        );
+        expect(service.selectedEngine!.backend, 'cuda');
+      });
 
-    String exeOf(String backend) =>
-        '${engineRoot.path}${Platform.pathSeparator}'
-        'llama-b10909-$backend-x64${Platform.pathSeparator}llama-server.exe';
+      test('A 卡/无 N 卡：CUDA 无设备时选 Vulkan', () async {
+        final service = await discoveredWith(
+          (exe) async => exe == exeOf('vulkan')
+              ? 'Available devices:\n  Vulkan0: AMD Radeon (16GB)'
+              : 'Available devices:\n',
+        );
+        expect(service.selectedEngine!.backend, 'vulkan');
+      });
 
-    Future<InferenceService> discoveredWith(
-      Future<String> Function(String exe) prober,
-    ) async {
-      final service = InferenceService(
-        engineDirOverride: () => engineRoot.path,
-        deviceProber: prober,
-      );
-      addTearDown(service.dispose);
-      await service.discoverEngines();
-      // 探测在后台异步完成；假探针无真实延迟，短等待即可稳定。
-      await Future<void>.delayed(const Duration(milliseconds: 80));
-      return service;
-    }
+      test('无任何 GPU：保持 CPU 基准', () async {
+        final service = await discoveredWith((exe) async => '');
+        expect(service.selectedEngine!.backend, 'cpu');
+      });
 
-    test('N 卡：CUDA 报告设备时优先于 Vulkan', () async {
-      final service = await discoveredWith(
-        (exe) async => exe == exeOf('cuda') ? '  CUDA0: NVIDIA RTX (16GB)' : '',
-      );
-      expect(service.selectedEngine!.backend, 'cuda');
-    });
+      test('探测异常按无设备处理，不阻塞其他引擎', () async {
+        final service = await discoveredWith(
+          (exe) async => exe == exeOf('vulkan')
+              ? throw StateError('driver load failed')
+              : '',
+        );
+        expect(service.selectedEngine!.backend, 'cpu');
+      });
 
-    test('A 卡/无 N 卡：CUDA 无设备时选 Vulkan', () async {
-      final service = await discoveredWith(
-        (exe) async => exe == exeOf('vulkan')
-            ? 'Available devices:\n  Vulkan0: AMD Radeon (16GB)'
-            : 'Available devices:\n',
-      );
-      expect(service.selectedEngine!.backend, 'vulkan');
-    });
-
-    test('无任何 GPU：保持 CPU 基准', () async {
-      final service = await discoveredWith((exe) async => '');
-      expect(service.selectedEngine!.backend, 'cpu');
-    });
-
-    test('探测异常按无设备处理，不阻塞其他引擎', () async {
-      final service = await discoveredWith(
-        (exe) async => exe == exeOf('vulkan')
-            ? throw StateError('driver load failed')
-            : '',
-      );
-      expect(service.selectedEngine!.backend, 'cpu');
-    });
-
-    test('用户手动选择后探测不再覆盖', () async {
-      final service = InferenceService(
-        engineDirOverride: () => engineRoot.path,
-        deviceProber: (exe) async => exe == exeOf('cuda') ? '  CUDA0: X' : '',
-      );
-      addTearDown(service.dispose);
-      await service.discoverEngines();
-      // 在异步探测完成前手动选择 Vulkan。
-      final vulkan = service.engines
-          .firstWhere((e) => e.backend == 'vulkan');
-      service.selectEngine(vulkan);
-      await Future<void>.delayed(const Duration(milliseconds: 80));
-      expect(service.selectedEngine!.backend, 'vulkan');
-    });
-  });
+      test('用户手动选择后探测不再覆盖', () async {
+        final service = InferenceService(
+          engineDirOverride: () => engineRoot.path,
+          deviceProber: (exe) async => exe == exeOf('cuda') ? '  CUDA0: X' : '',
+        );
+        addTearDown(service.dispose);
+        await service.discoverEngines();
+        // 在异步探测完成前手动选择 Vulkan。
+        final vulkan = service.engines.firstWhere((e) => e.backend == 'vulkan');
+        service.selectEngine(vulkan);
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        expect(service.selectedEngine!.backend, 'vulkan');
+      });
+    },
+    skip: Platform.isLinux ? 'Windows llama-server engine discovery' : null,
+  );
 }
