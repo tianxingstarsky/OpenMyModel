@@ -27,6 +27,84 @@ OpenMyModel connects desktop <code>llama-server</code> instances to your cloud s
 <p align="center"><img src="docs/assets/admin-console-overview.png" alt="OpenMyModel admin console" width="100%"></p>
 <p align="center"><sub>Captured with a temporary local database. Usage and online nodes are sample data; no real user records or credentials are included.</sub></p>
 
+## Illustrated setup guide
+
+Follow these steps in order: start a node, connect it to the server, configure model routes, create a gateway key, then connect a client and review usage. Node names, model names, prices and usage shown below are demonstration data; replace them with your own values.
+
+### 1. Start a local model
+
+Open the Windows desktop app, choose an inference engine, model directory and GGUF file, then click **Start Model**. Expand the inference settings to tune context length, GPU layers and other options if needed. Wait until the model reports that it is ready before connecting it to the cloud.
+
+<p align="center"><img src="首页.png" alt="Choose a GGUF model and start local inference" width="960"></p>
+
+To let the server access this node securely, set a node API key in the inference settings and restart the model. You will enter the same key in the server console in the next step. This key protects the node's llama-server HTTP API; it is not the unified gateway key given to OpenAI clients.
+
+### 2. Connect the desktop node to your server
+
+Open **Cloud Connection** in the desktop app, enter your deployed server address and administrator password, then click **Connect**. Use an HTTPS URL for a public service. After the tunnel connects, the desktop node appears under **Nodes** in the admin console. Never give the administrator password to API clients.
+
+<p align="center"><img src="云端连接.png" alt="Desktop cloud connection and local key management" width="960"></p>
+<p align="center"><sub>This image shows where to find the connection settings; the model and cloud were disconnected when it was captured. Start the model, enter your own server address and click **Connect** when following the steps.</sub></p>
+
+The local API key manager on this desktop page is for direct access to the node. Those keys stay on the desktop and do not provide server-side token metering. Use a gateway key when you need unified routing, caller limits and server usage statistics.
+
+### 3. Set the node key in the admin console
+
+Open `https://your-domain/admin` in a browser and sign in with the administrator password. Go to **Nodes**, find the connected desktop node and click **Set** or **Replace**. Enter the exact same value configured for the desktop node API key. The page shows whether a key is configured, but never displays the full value again. Configure it once per node; all model routes for that node use this key.
+
+<p align="center"><img src="docs/assets/guide-node-management.png" alt="Admin node management and node key status" width="100%"></p>
+
+The `smoke-node` name and node ID in this image are isolated demo data. In a real deployment, the desktop connection supplies the node name. A node must be online with its engine ready before it can serve traffic.
+
+### 4. Configure a public model name and node routes
+
+Open **Model Scheduling** and first create a public model name for callers, such as `chat-balanced`. Add a model remark and input/output prices in currency units per million tokens. You can leave prices at zero in personal mode. Set your billing rates before enabling sales in provider mode.
+
+Next, add a node route: choose the public model and compute node, enter the model's actual name on that node, and set its weight. One public model can have several routes. Nodes can use different upstream model names and different node API keys while callers continue to use one public model name. The gateway schedules across available routes by weight and switches to another available node if one becomes unavailable.
+
+<p align="center"><img src="docs/assets/guide-model-routing.png" alt="Map one public model name to a node's model name" width="100%"></p>
+
+### 5. Create a gateway API key
+
+In personal mode, open **API Keys**. Enter a key name and optionally set a requests-per-minute limit, total token limit and allowed models, then click **Create Key**. The complete key is shown only once; copy it immediately to a secure password manager. The page later shows total requests, tokens and recent request frequency. You can edit limits or revoke a key.
+
+<p align="center"><img src="docs/assets/guide-api-keys.png" alt="Create a gateway key and review limits and usage" width="100%"></p>
+
+This gateway key is the client credential and is separate from the desktop node key: callers receive the gateway key, while the server uses its stored node key when it calls llama-server.
+
+### 6. Connect a client and send a request
+
+In Open WebUI or another OpenAI-compatible client, enter:
+
+- **API URL:** `https://your-domain/v1`
+- **API key:** the `sk-` gateway key you just created
+- **Model:** the public model name from step 4, such as `chat-balanced`
+
+You can also verify with `curl`. Replace the domain, key and model with your own values:
+
+```bash
+curl https://api.example.com/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-your-gateway-key" \
+  -d '{"model":"chat-balanced","messages":[{"role":"user","content":"Hello. Please introduce yourself briefly."}]}'
+```
+
+Streaming clients use the same URL and key. After a successful request, review request frequency and input/output tokens under **Usage** in the admin console. In personal mode, `/dashboard` shows public aggregates and `/` shows public node status.
+
+### Provider mode: enable accounts, billing and user consoles
+
+In **System Settings**, an administrator must configure an HTTPS public base URL, SMTP host/port/username/sender/password, Alipay app ID and seller ID, the RSA2 app private key, and the Alipay public key. Save all required settings before selecting **Provider mode**. Provider mode cannot be activated while any required field is missing. The server encrypts stored secrets and does not return the saved private key or SMTP password to the browser.
+
+<p align="center"><img src="docs/assets/guide-provider-settings.png" alt="Configure email, Alipay and public URL for provider mode" width="100%"></p>
+
+After activation:
+
+1. Set input and output prices for each model in **Model Scheduling**, in currency units per million tokens. Cached tokens do not have separate pricing yet.
+2. Users open `https://your-domain/console`, register or sign in with an email verification code, and manage their own usage, orders, top-ups and API keys.
+3. Users call `/v1` with their own API keys. Admins can review users and orders under **Users & Orders**, and inspect platform request and token activity under **Usage**.
+
+Provider-mode prebilling currently supports text chat messages. Model nodes must expose llama-server's `/apply-template` and `/tokenize` endpoints. Before opening registration and payments, test SMTP delivery and Alipay asynchronous notifications on the HTTPS domain.
+
 ## Architecture
 
 ```mermaid
