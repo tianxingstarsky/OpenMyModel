@@ -585,18 +585,18 @@ test("Alipay settings validate RSA keys and official signed callback fields cred
       alipayPrivateKey: appPrivateKey, alipayPublicKey,
     }), /HTTPS 公网地址/);
     assert.equal(platform.getPublicConfig().mode, "personal", "an insecure or incomplete provider setup must not appear enabled");
-    database.sqlite.prepare("DELETE FROM platform_settings WHERE key='alipay_seller_id'").run();
     assert.throws(() => platform.saveAdminSettings({
       mode: "provider", publicUrl: "https://api.example.test", mailHost: "smtp.example.test", mailPort: 465, mailUser: "mail-user",
       mailFrom: "billing@example.test", mailPassword: "mail-pass", alipayAppId: "2026000000000001",
-      alipayPrivateKey: appPrivateKey, alipayPublicKey,
+      alipayPrivateKey: appPrivateKey,
     }), /支付宝/);
     const settings = platform.saveAdminSettings({
       mode: "provider", publicUrl: "https://api.example.test", mailHost: "smtp.example.test", mailPort: 465, mailUser: "mail-user",
       mailFrom: "billing@example.test", mailPassword: "mail-pass", alipayAppId: "2026000000000001",
-      alipaySellerId: "2088000000000000", alipayPrivateKey: appPrivateKey, alipayPublicKey,
+      alipayPrivateKey: appPrivateKey, alipayPublicKey,
     });
     assert.equal(settings.providerReady, true);
+    assert.equal(settings.alipaySellerId, "", "merchant PID is optional");
 
     const userId = "payer-1";
     database.sqlite.prepare("INSERT INTO platform_users(id, email, created_at) VALUES(?, ?, ?)")
@@ -612,6 +612,8 @@ test("Alipay settings validate RSA keys and official signed callback fields cred
     delete paymentFields.sign;
     const paymentCanonical = Object.keys(paymentFields).sort().map(key => `${key}=${paymentFields[key]}`).join("&");
     assert.equal(createVerify("RSA-SHA256").update(paymentCanonical).verify(appKeys.publicKey, paymentSignature, "base64"), true);
+
+    platform.saveAdminSettings({ alipaySellerId: "2088000000000000" });
 
     const signNotification = (fields: Record<string, string>) => ({ ...fields,
       sign: createSign("RSA-SHA256").update(Object.keys(fields).filter(key => key !== "sign_type").sort()

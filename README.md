@@ -121,7 +121,7 @@ curl https://api.example.com/v1/chat/completions \
 
 ### 服务商模式：启用注册、计费和用户控制台
 
-管理员在“系统设置”中先填写 HTTPS 公网基础地址、SMTP 主机/端口/用户名/发件人/密码，以及支付宝应用 ID、商户 ID、RSA2 应用私钥和支付宝公钥，保存全部设置后再选择“服务商模式”。这些项目不齐全时不能启用服务商模式。服务器只加密保存密钥，不会回传已保存的私钥或 SMTP 密码。
+管理员在“系统设置”中先填写 HTTPS 公网基础地址、SMTP 主机/端口/用户名/发件人/密码，以及支付宝应用 ID、RSA2 应用私钥和支付宝公钥，保存全部设置后再选择“服务商模式”。支付宝商户 PID 和网关地址位于“高级设置”，通常无需填写；填写 PID 后，服务端会额外核对支付通知中的 `seller_id`。必填项目不齐全时不能启用服务商模式。服务器只加密保存密钥，不会回传已保存的私钥或 SMTP 密码。
 
 <p align="center"><img src="docs/assets/guide-provider-settings.png" alt="服务商模式所需的邮件、支付宝和公网地址设置" width="100%"></p>
 
@@ -207,7 +207,7 @@ npm run dev
 | 服务商模式 | 管理员配置 HTTPS 公网地址、SMTP 和支付宝参数后才能启用。用户通过邮箱验证码注册/登录，在 <code>/console</code> 管理账户、申请 API Key、查看用量和订单并充值。 |
 | 代转发模式 | 用户通过邮箱验证码注册/登录，在 <code>/console</code> 创建并管理自己的节点、模型别名、路由和网关 Key；平台仅转发到该用户的在线节点，不对 Token 计价，可选择免费或按时间计算的月度订阅。 |
 
-服务商模式要求 SMTP 主机、发信账户与密码，以及支付宝应用 ID、商户 ID、RSA2 应用私钥和支付宝公钥全部配置完成。管理端设置输入和输出 Token 单价（每百万 Token）；缓存 Token 暂无单独价格。当前预扣费支持文本聊天消息；llama.cpp 节点使用 <code>/apply-template</code> 与 <code>/tokenize</code>，vLLM 节点使用其聊天 <code>/tokenize</code> 接口。
+服务商模式要求 SMTP 主机、发信账户与密码，以及支付宝应用 ID、RSA2 应用私钥和支付宝公钥全部配置完成。商户 PID 和网关地址是高级可选项。管理端设置输入和输出 Token 单价（每百万 Token）；缓存 Token 暂无单独价格。当前预扣费支持文本聊天消息；llama.cpp 节点使用 <code>/apply-template</code> 与 <code>/tokenize</code>，vLLM 节点使用其聊天 <code>/tokenize</code> 接口。
 
 ## 接入客户端
 

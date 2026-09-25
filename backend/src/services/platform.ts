@@ -225,7 +225,7 @@ export class PlatformService {
       }
       this.setSetting("mode", requestedMode);
       if (requestedMode === "provider" && !this.providerReady()) {
-        throw new Error("启用服务商模式前，请配置 HTTPS 公网地址、邮箱 SMTP、支付宝应用 ID/商户 ID 和 RSA2 密钥");
+        throw new Error("启用服务商模式前，请配置 HTTPS 公网地址、邮箱 SMTP、支付宝应用 ID、应用私钥和支付宝公钥");
       }
       if (requestedMode === "relay" && !this.relayReady()) {
         const needsAlipay = this.getRelayBillingMode() === "monthly";
@@ -250,7 +250,7 @@ export class PlatformService {
   }
 
   private alipayReady(): boolean {
-    return !!(this.setting("alipay_app_id") && this.setting("alipay_seller_id") && this.setting("alipay_private_key") && this.setting("alipay_public_key"));
+    return !!(this.setting("alipay_app_id") && this.setting("alipay_private_key") && this.setting("alipay_public_key"));
   }
 
   private providerReady(): boolean { return this.mailReady() && this.alipayReady(); }
@@ -1468,7 +1468,8 @@ export class PlatformService {
     if (typeof signature !== "string" || fields.sign_type !== "RSA2"
       || fields.app_id !== this.setting("alipay_app_id")
       || fields.auth_app_id !== undefined && fields.auth_app_id !== this.setting("alipay_app_id")
-      || fields.seller_id !== this.setting("alipay_seller_id") || fields.notify_type !== "trade_status_sync") return false;
+      || (this.setting("alipay_seller_id") && fields.seller_id !== this.setting("alipay_seller_id"))
+      || fields.notify_type !== "trade_status_sync") return false;
     const canonicalFields = { ...fields };
     delete canonicalFields.sign;
     delete canonicalFields.sign_type;
