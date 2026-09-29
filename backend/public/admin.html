@@ -10,6 +10,8 @@
 .node-toolbar{display:grid;grid-template-columns:minmax(220px,1fr) 190px auto;gap:9px;margin-bottom:14px}.node-toolbar input,.node-toolbar select{min-width:0;border:1px solid #dfe7e3;border-radius:9px;padding:8px 11px;color:#34443f;background:#fff;outline:0;font:inherit;font-size:12px}.node-toolbar input:focus,.node-toolbar select:focus{border-color:#78b7a5;box-shadow:0 0 0 3px #dff1eb}.node-table-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.node-table-title h2{font-size:14px;margin:0}.node-table-title .tiny{white-space:nowrap}
 @media(max-width:680px){.node-toolbar{grid-template-columns:1fr 1fr}.node-toolbar input{grid-column:1/-1}.node-toolbar .btn{grid-column:1/-1}}
 [hidden]{display:none!important}
+[hidden]{display:none!important}
+.field textarea{font:inherit;resize:vertical;padding:10px 11px;border:1px solid #dfe7e3;border-radius:9px;outline:0}.field textarea:focus{border-color:#71b4a2;box-shadow:0 0 0 3px #e3f3ed}
 </style>
 </head>
 <body>
@@ -114,6 +116,13 @@ loadUsage=async function(){
 showUsers=async function(){
  try{const users=await api('/api/admin/users');const headers=currentMode==='relay'?['邮箱','节点（在线/总数）','API Key','累计 Token','订阅到期','状态','操作']:['邮箱','账户余额','API Key','累计 Token','注册时间','状态','操作'];
   $('#usersContent').innerHTML=table(headers,users.map(user=>currentMode==='relay'?`<tr><td><b>${esc(user.email)}</b></td><td>${fmt(user.onlineRelayNodes)} / ${fmt(user.relayNodeCount)}</td><td>${fmt(user.keyCount)}</td><td>${fmt(user.tokens)}</td><td>${date(user.relayExpiresAt)}</td><td><span class="pill ${user.active?'':'off'}">${user.active?'正常':'已停用'}</span></td><td><button class="btn small" onclick="usageForUser('${esc(user.id)}')">查看用量</button> <button class="btn small" onclick="toggleUser('${esc(user.id)}',${user.active})">${user.active?'停用账户':'恢复账户'}</button></td></tr>`:`<tr><td><b>${esc(user.email)}</b></td><td>¥${Number(user.balance).toFixed(4)}</td><td>${user.keyCount}</td><td>${fmt(user.tokens)}</td><td>${date(user.createdAt)}</td><td><span class="pill ${user.active?'':'off'}">${user.active?'正常':'已停用'}</span></td><td><button class="btn small" onclick="editBalance('${esc(user.id)}',${Number(user.balance)})">调余额</button> <button class="btn small" onclick="showBalanceEntries('${esc(user.id)}')">余额流水</button> <button class="btn small" onclick="usageForUser('${esc(user.id)}')">查看用量</button> <button class="btn small" onclick="toggleUser('${esc(user.id)}',${user.active})">${user.active?'停用':'启用'}</button></td></tr>`))
+ if(currentMode==='provider'){
+ const applicants=users.filter(user=>user.computeProvider?.status!=='not_applied');
+ const host=document.createElement('div');host.className='card';host.style.marginBottom='18px';
+ host.innerHTML='<h2>算力提供者申请与权限</h2><p class="tiny muted">批准后才开放节点管理、Flutter 接入 Token 与节点收入面板。暂停会立即断开该账号节点。</p>'+ (applicants.length?applicants.map(user=>{const a=user.computeProvider,labels={pending:'待审核',approved:'已开通',rejected:'已拒绝',suspended:'已暂停'};return `<div class="key-row"><div><b>${esc(user.email)}</b> <span class="pill">${labels[a.status]||esc(a.status)}</span><p>${esc(a.description)}</p><small>${date(a.appliedAt)}${a.reviewNote?' · '+esc(a.reviewNote):''}</small></div><div class="inline">${a.status!=='approved'?`<button class="btn small primary" data-compute-user="${esc(user.id)}" data-compute-status="approved">${a.status==='suspended'?'恢复权限':'批准开通'}</button>`:`<button class="btn small danger" data-compute-user="${esc(user.id)}" data-compute-status="suspended">暂停算力权限</button>`}${a.status==='pending'?`<button class="btn small" data-compute-user="${esc(user.id)}" data-compute-status="rejected">拒绝申请</button>`:''}</div></div>`}).join(''):'<div class="empty">暂无算力提供者申请</div>');
+ $('#usersContent').prepend(host);
+ host.querySelectorAll('[data-compute-user]').forEach(button=>button.onclick=async()=>{const note=prompt('审核说明（申请人可见）','');if(note===null)return;button.disabled=true;try{await api('/api/admin/users/'+encodeURIComponent(button.dataset.computeUser)+'/compute-provider',{method:'PATCH',body:JSON.stringify({status:button.dataset.computeStatus,reviewNote:note})});await showUsers();toast('算力权限已更新')}catch(error){toast(error.message);button.disabled=false}});
+ }
  }catch(error){toast(error.message)}
 };
 showOrders=async function(){

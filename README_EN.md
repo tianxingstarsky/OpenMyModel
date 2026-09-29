@@ -302,3 +302,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for Windows engine builds, packag
 - [Open WebUI](https://github.com/open-webui/open-webui) is an example OpenAI-compatible client.
 
 This project is licensed under the [MIT License](LICENSE).
+
+### Compute provider approval
+
+In aggregation (provider) mode, accounts start as API consumers. Apply to become a compute provider from the console home page and describe your hardware, models and availability. Administrators review applications in User Management. Approval unlocks node management, Flutter node login tokens and node revenue statistics. Rejected applicants may revise and resubmit. Suspension immediately disconnects their nodes and blocks token issuance and authentication. Relay mode continues to allow accounts to manage their own nodes without this approval. There is no built-in administrator password; initialize it with `npm run setup` or `ADMIN_PASSWORD`.

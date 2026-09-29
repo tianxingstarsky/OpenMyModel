@@ -388,8 +388,57 @@ export class PlatformService {
     return result;
   }
 
+  computeProviderAccess(userId: string) {
+    const application = this.sqlite.prepare(`SELECT status,description,review_note AS reviewNote,
+      applied_at AS appliedAt,reviewed_at AS reviewedAt FROM compute_provider_applications WHERE user_id=?`)
+      .get(userId) as Record<string, any> | undefined;
+    return { status: application?.status || "not_applied", description: application?.description || "",
+      reviewNote: application?.reviewNote || "", appliedAt: application?.appliedAt || null,
+      reviewedAt: application?.reviewedAt || null,
+      canManageNodes: this.isRelayMode() || this.isProviderMode() && application?.status === "approved" };
+  }
+
+  private requireNodeAccess(userId: string): void {
+    if (!this.isUserActive(userId) || !this.computeProviderAccess(userId).canManageNodes)
+      throw new RelayError("请先申请成为算力提供者，管理员开通后才能接入节点", 403);
+  }
+
+  applyComputeProvider(userId: string, descriptionInput: unknown) {
+    if (!this.isProviderMode() || !this.isUserActive(userId)) throw new Error("当前模式不接受算力提供者申请");
+    const description = typeof descriptionInput === "string" ? descriptionInput.trim() : "";
+    if (description.length < 10 || description.length > 2000) throw new Error("请填写 10–2000 字的设备、模型与可用时间说明");
+    const submit = this.sqlite.transaction(() => {
+      const access = this.computeProviderAccess(userId);
+      if (["pending", "approved", "suspended"].includes(access.status)) throw new Error("当前申请正在审核、已开通或已暂停，请联系管理员");
+      this.sqlite.prepare(`INSERT INTO compute_provider_applications(user_id,status,description,applied_at)
+        VALUES(?,'pending',?,?) ON CONFLICT(user_id) DO UPDATE SET status='pending',description=excluded.description,
+        review_note='',applied_at=excluded.applied_at,reviewed_at=NULL`).run(userId, description, isoNow());
+      return this.computeProviderAccess(userId);
+    });
+    return submit.immediate();
+  }
+
+  reviewComputeProvider(userId: string, input: Record<string, unknown>) {
+    if (!this.isProviderMode()) throw new Error("仅聚合算力模式支持算力提供者审批");
+    const status = input.status;
+    if (status !== "approved" && status !== "rejected" && status !== "suspended") throw new Error("审核状态无效");
+    const current = this.computeProviderAccess(userId);
+    if (status === "suspended" && current.status !== "approved") throw new Error("仅已开通的算力提供者可以暂停");
+    if (status === "rejected" && current.status !== "pending") throw new Error("仅待审核申请可以拒绝");
+    const note = typeof input.reviewNote === "string" ? input.reviewNote.trim().slice(0, 1000) : "";
+    const result = this.sqlite.prepare(`UPDATE compute_provider_applications SET status=?,review_note=?,reviewed_at=? WHERE user_id=?`)
+      .run(status, note, isoNow(), userId);
+    if (!result.changes) throw new Error("用户尚未提交算力提供者申请");
+    if (status !== "approved") {
+      const nodes = this.sqlite.prepare("SELECT node_id FROM relay_node_credentials WHERE user_id=? AND revoked_at IS NULL").all(userId) as Array<{node_id: string}>;
+      for (const node of nodes) this.tunnel.disconnectNode(node.node_id);
+    }
+    return this.computeProviderAccess(userId);
+  }
+
   createRelayNode(userId: string, nameInput: unknown) {
     if (!this.isUserPortalEnabled()) throw new Error("当前服务未开放账户节点接入");
+    this.requireNodeAccess(userId);
     const name = typeof nameInput === "string" ? nameInput.trim().slice(0, 80) : "";
     if (!name || /[\0\r\n]/.test(name)) throw new Error("节点名称需为 1–80 个有效字符");
     const id = uuidv4();
@@ -424,7 +473,7 @@ export class PlatformService {
       FROM relay_node_credentials c JOIN platform_users u ON u.id=c.user_id
       WHERE c.token_hash=? AND c.revoked_at IS NULL AND u.is_active=1`).get(hashPlatformValue(token, this.secret)) as
       { id: string; userId: string; nodeId: string; nodeName: string } | undefined;
-    if (!row) {
+    if (!row || !this.computeProviderAccess(row.userId).canManageNodes) {
       const current = this.relayAuthFailures.get(address);
       this.relayAuthFailures.set(address, { count: (current?.count ?? 0) + 1, until: current?.until ?? now + 60_000 });
       return this.relayAuthFailures.get(address)!.count >= 30 ? "limited" : "invalid";
@@ -436,6 +485,7 @@ export class PlatformService {
   }
 
   listRelayNodes(userId: string) {
+    this.requireNodeAccess(userId);
     const online = new Map(this.tunnel.getOnlineNodes().filter(node => node.ownerUserId === userId).map(node => [node.id, node]));
     const rows = this.sqlite.prepare(`SELECT c.id,c.node_id AS nodeId,c.name,c.created_at AS createdAt,c.last_seen_at AS lastSeenAt,
       c.revoked_at AS revokedAt,n.connected_at AS connectedAt,n.last_heartbeat AS lastHeartbeat,
@@ -452,6 +502,7 @@ export class PlatformService {
   }
 
   rotateRelayNodeToken(userId: string, nodeId: string) {
+    this.requireNodeAccess(userId);
     const credential = this.sqlite.prepare(`SELECT id,name FROM relay_node_credentials
       WHERE user_id=? AND node_id=? AND revoked_at IS NULL`).get(userId, nodeId) as { id: string; name: string } | undefined;
     if (!credential) throw new Error("节点不存在或已撤销");
@@ -1246,8 +1297,9 @@ export class PlatformService {
       JOIN gateway_keys k ON k.id=l.api_key_id WHERE k.owner_user_id=? AND l.timestamp>=?`)
       .get(userId, new Date(Date.now() - 60_000).toISOString()) as { count: number };
     if (this.isRelayMode()) (stats as any).cost = 0;
-    const nodes = this.listRelayNodes(userId);
-    const nodeRevenue = this.isProviderMode() ? this.sqlite.prepare(`SELECT l.node_id AS nodeId,
+    const computeProvider = this.computeProviderAccess(userId);
+    const nodes = computeProvider.canManageNodes ? this.listRelayNodes(userId) : [];
+    const nodeRevenue = this.isProviderMode() && computeProvider.canManageNodes ? this.sqlite.prepare(`SELECT l.node_id AS nodeId,
       COUNT(*) AS requests, COALESCE(SUM(l.total_tokens),0) AS tokens, COALESCE(SUM(l.cost),0) AS revenue
       FROM usage_logs l JOIN nodes n ON n.id=l.node_id
       WHERE n.owner_user_id=? AND l.timestamp>=? GROUP BY l.node_id`)
@@ -1255,7 +1307,7 @@ export class PlatformService {
       Array<{ nodeId: string; requests: number; tokens: number; revenue: number }> : [];
     return { user: { email: user.email, balance: this.isProviderMode() ? user.balance : 0, createdAt: user.created_at }, stats,
       requestsPerMinute: frequency.count, tokensPerMinute: tokenRate.count,
-      nodes, nodeRevenue,
+      nodes, nodeRevenue, computeProvider,
       keys: this.listKeys(userId), usage: this.usageRows(userId, 30),
       models: this.isRelayMode() ? this.publicRelayModels(userId) : this.listPublicModels(),
       mode: this.isRelayMode() ? "relay" : "provider",
@@ -1321,7 +1373,7 @@ export class PlatformService {
       (SELECT COUNT(*) FROM relay_subscription_periods p WHERE p.user_id=u.id AND p.starts_at<=? AND p.expires_at>?) AS activeSubscriptions,
       (SELECT MAX(p.expires_at) FROM relay_subscription_periods p WHERE p.user_id=u.id AND p.expires_at>?) AS relayExpiresAt
       FROM platform_users u ORDER BY u.created_at DESC`).all(now, now, now) as Array<Record<string, any>>;
-    return users.map(user => ({ ...user, onlineRelayNodes: onlineByOwner.get(user.id) ?? 0 }));
+    return users.map(user => ({ ...user, computeProvider: this.computeProviderAccess(user.id), onlineRelayNodes: onlineByOwner.get(user.id) ?? 0 }));
   }
 
   updateUser(id: string, input: Record<string, unknown>) {

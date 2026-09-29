@@ -228,6 +228,15 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS compute_provider_applications (
+      user_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'pending',
+      description TEXT NOT NULL,
+      review_note TEXT NOT NULL DEFAULT '',
+      applied_at TEXT NOT NULL,
+      reviewed_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS email_codes (
       id TEXT PRIMARY KEY,
       email TEXT NOT NULL,

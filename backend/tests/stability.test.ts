@@ -464,6 +464,24 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     const checkout = new URL(injectedHostOrder.json().paymentUrl);
     assert.equal(checkout.searchParams.get("notify_url"), "https://api.example.test/api/payments/alipay/notify");
     assert.equal(checkout.searchParams.get("return_url"), "https://api.example.test/console?payment=return");
+    const deniedNode = await app.inject({ method: "POST", url: "/api/user/relay/nodes",
+      headers: { cookie: alphaCookie }, payload: { name: "Not approved" } });
+    assert.equal(deniedNode.statusCode, 403, "ordinary customers cannot issue node credentials");
+    assert.equal((await get("/api/user/dashboard")).json().computeProvider.status, "not_applied");
+    const application = await app.inject({ method: "POST", url: "/api/user/compute-provider/application",
+      headers: { cookie: alphaCookie }, payload: { description: "RTX 4090，24GB 显存，每天提供推理服务", userId: "user-beta" } });
+    assert.equal(application.statusCode, 200);
+    assert.equal(application.json().status, "pending");
+    assert.equal(sessions.computeProviderAccess("user-beta").status, "not_applied", "application uses session identity");
+    const forbiddenReview = await app.inject({ method: "PATCH", url: "/api/admin/users/user-alpha/compute-provider",
+      headers: { cookie: alphaCookie }, payload: { status: "approved" } });
+    assert.equal(forbiddenReview.statusCode, 401);
+    assert.throws(() => sessions.createRelayNode("user-alpha", "Pending GPU"), /管理员开通/);
+    sessions.reviewComputeProvider("user-alpha", { status: "rejected", reviewNote: "请补充在线时间" });
+    sessions.applyComputeProvider("user-alpha", "RTX 4090，24GB 显存，每天在线 12 小时");
+    sessions.reviewComputeProvider("user-alpha", { status: "approved" });
+    sessions.applyComputeProvider("user-beta", "RTX 3090，24GB 显存，全天在线提供服务");
+    sessions.reviewComputeProvider("user-beta", { status: "approved" });
     const alphaNodeResponse = await app.inject({ method: "POST", url: "/api/user/relay/nodes",
       headers: { cookie: alphaCookie }, payload: { name: "Alpha GPU" } });
     const betaNodeResponse = await app.inject({ method: "POST", url: "/api/user/relay/nodes",
@@ -474,6 +492,12 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     const betaNode = betaNodeResponse.json();
     const nodeAuth = sessions.authenticateRelayNodeToken(alphaNode.token, "127.0.0.1");
     assert.equal(typeof nodeAuth === "string" ? nodeAuth : nodeAuth.ownerUserId, "user-alpha");
+    sessions.reviewComputeProvider("user-alpha", { status: "suspended", reviewNote: "维护" });
+    assert.equal(sessions.authenticateRelayNodeToken(alphaNode.token, "127.0.0.1"), "invalid");
+    assert.throws(() => sessions.rotateRelayNodeToken("user-alpha", alphaNode.nodeId), /管理员开通/);
+    assert.deepEqual(sessions.userDashboard("user-alpha").nodes, []);
+    assert.equal(sessions.userDashboard("user-alpha").computeProvider.canManageNodes, false);
+    sessions.reviewComputeProvider("user-alpha", { status: "approved" });
     const providerNode = await node({ nodeId: "client-supplied", nodeName: "client-supplied" }, () => {}, true,
       alphaNode.token);
     assert.equal(providerNode.messages.some((message: Message) => message.type === "auth_ok" && message.nodeId === alphaNode.nodeId), true,

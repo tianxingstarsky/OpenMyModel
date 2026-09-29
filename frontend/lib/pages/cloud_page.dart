@@ -655,7 +655,7 @@ class CloudPageState extends State<CloudPage> {
           Padding(
             padding: const EdgeInsets.only(top: 7),
             child: Text(
-              '已识别网关模式：${_serverMode == 'relay' ? '代转发 · 节点登录 Token' : _serverMode == 'provider' ? '服务商 · 节点登录 Token' : '个人 · 管理员密码'}',
+              '已识别网关模式：${_serverMode == 'relay' ? '代转发 · 节点登录 Token' : _serverMode == 'provider' ? '聚合算力 · 审批后接入' : '个人 · 管理员密码'}',
               style: const TextStyle(color: Color(0xFF087F6E), fontSize: 12),
             ),
           ),
@@ -674,11 +674,13 @@ class CloudPageState extends State<CloudPage> {
               : '服务器管理员密码',
         ),
         if (_serverMode == 'relay' || _serverMode == 'provider')
-          const Padding(
-            padding: EdgeInsets.only(top: 6),
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
             child: Text(
-              '先在服务器 /console 登录并创建节点。Token 只显示一次，用于此设备连接；API 调用密钥在网页另行管理。',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
+              _serverMode == 'provider'
+                  ? '先在网页主页申请成为算力提供者。管理员批准后，在节点管理中创建节点并复制登录 Token。'
+                  : '先在服务器 /console 登录并创建自己的节点，再复制登录 Token。转发服务按订阅时间开通。',
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
             ),
           )
         else if (_serverMode.isEmpty && _serverConfigError.isNotEmpty)

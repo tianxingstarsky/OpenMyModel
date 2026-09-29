@@ -83,7 +83,7 @@ function requireUser(request: FastifyRequest, reply: FastifyReply, platform: Pla
 }
 
 function apiError(reply: FastifyReply, error: unknown, status = 400) {
-  return reply.status(status).send({ error: error instanceof Error ? error.message : "Request failed" });
+  return reply.status(error instanceof RelayError ? error.statusCode : status).send({ error: error instanceof Error ? error.message : "Request failed" });
 }
 
 export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformService, auth: AdminAuthenticator): void {
@@ -206,6 +206,11 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
     if (!await requireAdmin(request, reply, platform, auth)) return;
     return platform.adminUsers();
   });
+  app.patch<{ Params: { userId: string } }>("/api/admin/users/:userId/compute-provider", async (request, reply) => {
+    if (!await requireAdmin(request, reply, platform, auth)) return;
+    try { return platform.reviewComputeProvider(request.params.userId, bodyOf(request)); }
+    catch (error) { return apiError(reply, error); }
+  });
   app.patch<{ Params: { userId: string } }>("/api/admin/users/:userId", async (request, reply) => {
     if (!await requireAdmin(request, reply, platform, auth)) return;
     try {
@@ -277,6 +282,11 @@ export function registerPlatformRoutes(app: FastifyInstance, platform: PlatformS
   app.get("/api/user/dashboard", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;
     return platform.userDashboard(userId);
+  });
+  app.post("/api/user/compute-provider/application", async (request, reply) => {
+    const userId = requireUser(request, reply, platform); if (!userId) return;
+    try { return platform.applyComputeProvider(userId, bodyOf(request).description); }
+    catch (error) { return apiError(reply, error); }
   });
   app.get("/api/user/models", async (request, reply) => {
     const userId = requireUser(request, reply, platform); if (!userId) return;
