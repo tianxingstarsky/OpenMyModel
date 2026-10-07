@@ -2,6 +2,7 @@ import { FastifyInstance } from "fastify";
 import { WebSocket } from "ws";
 import { randomUUID } from "crypto";
 import { AuthResult } from "./auth";
+import { NodeHardware, parseNodeHardware } from "./hardware";
 
 export class RelayError extends Error {
   constructor(message: string, readonly statusCode = 502) { super(message); }
@@ -18,6 +19,10 @@ export interface NodeInfo {
   slots?: number | null;
   /** User owner in relay-only mode; null for legacy administrator-managed nodes. */
   ownerUserId?: string | null;
+  /** Client-reported inventory for display; null for old clients or invalid/unavailable reports. */
+  hardware?: NodeHardware | null;
+  /** Server receipt time; separate from the desktop clock in hardware.detectedAt. */
+  hardwareReportedAt?: string | null;
 }
 
 export interface TunnelStats {
@@ -201,6 +206,7 @@ export class WebSocketTunnel {
       }
       conn.authenticated = true;
       clearTimeout(conn.authTimeout);
+      const hardware = parseNodeHardware(msg.hardware);
       conn.node = {
         id: identity?.nodeId ?? (typeof msg.nodeId === "string" && msg.nodeId.length > 0 && msg.nodeId.length <= 256 ? msg.nodeId : randomUUID()),
         name: identity?.nodeName ?? (typeof msg.nodeName === "string" ? msg.nodeName : "Unnamed node"),
@@ -210,6 +216,8 @@ export class WebSocketTunnel {
         serverRunning: typeof msg.serverRunning === "boolean" ? msg.serverRunning : true,
         slots: WebSocketTunnel.parseSlots(msg.slots),
         isOnline: true,
+        hardware,
+        hardwareReportedAt: hardware ? new Date().toISOString() : null,
       };
       const previous = this.connections.get(conn.node.id);
       this.connections.set(conn.node.id, conn);
@@ -230,6 +238,10 @@ export class WebSocketTunnel {
       if (typeof msg.modelName === "string") conn.node.modelName = msg.modelName;
       if (typeof msg.serverRunning === "boolean") conn.node.serverRunning = msg.serverRunning;
       if (msg.slots !== undefined) conn.node.slots = WebSocketTunnel.parseSlots(msg.slots);
+      if (Object.prototype.hasOwnProperty.call(msg, "hardware")) {
+        conn.node.hardware = parseNodeHardware(msg.hardware);
+        conn.node.hardwareReportedAt = conn.node.hardware ? new Date().toISOString() : null;
+      }
       this.options.onNodeChange?.({ ...conn.node });
       return;
     }

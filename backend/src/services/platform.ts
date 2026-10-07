@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import nodemailer from "nodemailer";
 import { WebSocketTunnel, RelayError, NodeAuthFailure } from "./websocket";
 import { decryptSecret, encryptSecret, getPlatformSecret, hashPlatformValue } from "./secrets";
+import { readNodeHardware } from "./hardware";
 
 type Role = "admin" | "user";
 type PlatformMode = "personal" | "provider" | "relay";
@@ -406,7 +407,7 @@ export class PlatformService {
   applyComputeProvider(userId: string, descriptionInput: unknown) {
     if (!this.isProviderMode() || !this.isUserActive(userId)) throw new Error("当前模式不接受算力提供者申请");
     const description = typeof descriptionInput === "string" ? descriptionInput.trim() : "";
-    if (description.length < 10 || description.length > 2000) throw new Error("请填写 10–2000 字的设备、模型与可用时间说明");
+    if (description.length > 2000) throw new Error("申请说明最多 2000 字，可选填写服务意愿或在线时间");
     const submit = this.sqlite.transaction(() => {
       const access = this.computeProviderAccess(userId);
       if (["pending", "approved", "suspended"].includes(access.status)) throw new Error("当前申请正在审核、已开通或已暂停，请联系管理员");
@@ -501,7 +502,7 @@ export class PlatformService {
     const online = new Map(this.tunnel.getOnlineNodes().filter(node => node.ownerUserId === userId).map(node => [node.id, node]));
     const rows = this.sqlite.prepare(`SELECT c.id,c.node_id AS nodeId,c.name,c.created_at AS createdAt,c.last_seen_at AS lastSeenAt,
       c.revoked_at AS revokedAt,n.connected_at AS connectedAt,n.last_heartbeat AS lastHeartbeat,
-      n.model_name AS modelName,n.is_online AS storedOnline
+      n.model_name AS modelName,n.is_online AS storedOnline,n.hardware_json AS hardwareJson,n.hardware_reported_at AS hardwareReportedAt
       FROM relay_node_credentials c LEFT JOIN nodes n ON n.id=c.node_id WHERE c.user_id=? AND c.revoked_at IS NULL
       ORDER BY c.created_at DESC`).all(userId) as Array<Record<string, any>>;
     return rows.map(row => {
@@ -509,7 +510,8 @@ export class PlatformService {
       return { id: row.id, nodeId: row.nodeId, name: row.name, createdAt: row.createdAt, lastSeenAt: row.lastSeenAt,
         connectedAt: live ? row.connectedAt : null, lastHeartbeat: live ? row.lastHeartbeat : null,
         modelName: live?.modelName || row.modelName || "", isOnline: !!live, serverRunning: !!live?.serverRunning,
-        slots: live?.slots ?? null };
+        slots: live?.slots ?? null, hardware: live ? live.hardware ?? null : readNodeHardware(row.hardwareJson),
+        hardwareReportedAt: live ? live.hardwareReportedAt ?? null : row.hardwareReportedAt ?? null };
     });
   }
 
@@ -1603,11 +1605,12 @@ export class PlatformService {
     const nodes = new Map<string, Record<string, any>>();
     const stored = this.sqlite.prepare(`SELECT n.id, n.name, n.connected_at AS connectedAt, n.last_heartbeat AS lastHeartbeat,
       n.model_name AS modelName, n.model_config AS modelConfig, n.upstream_api_key AS upstreamApiKey,
+      n.hardware_json AS hardwareJson, n.hardware_reported_at AS hardwareReportedAt,
       n.owner_user_id AS ownerUserId, u.email AS ownerEmail FROM nodes n
       LEFT JOIN platform_users u ON u.id=n.owner_user_id`).all() as Array<Record<string, any>>;
     for (const node of stored) {
-      const { upstreamApiKey, ...safeNode } = node;
-      nodes.set(node.id, { ...safeNode, keyConfigured: !!upstreamApiKey, isOnline: false, serverRunning: false, slots: null });
+      const { upstreamApiKey, hardwareJson, ...safeNode } = node;
+      nodes.set(node.id, { ...safeNode, hardware: readNodeHardware(hardwareJson), keyConfigured: !!upstreamApiKey, isOnline: false, serverRunning: false, slots: null });
     }
     for (const node of this.tunnel.getOnlineNodes()) {
       nodes.set(node.id, { ...nodes.get(node.id), ...node, isOnline: true });

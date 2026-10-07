@@ -23,6 +23,7 @@ class WebSocketService {
   String? _activeConnectionKey;
   String? _nodeIdentity;
   List<Map<String, dynamic>> _localKeys = [];
+  Map<String, dynamic>? _hardwareInfo;
   Future<bool>? _connecting;
   Completer<bool>? _connectionResult;
   final List<StreamSubscription<dynamic>> _subscriptions = [];
@@ -41,6 +42,12 @@ class WebSocketService {
 
   void setBridgePath(String path) => _bridgePath = path;
   void setModelName(String name) => _modelName = name;
+  void setHardwareInfo(Map<String, dynamic> hardware) {
+    // Copy nested lists/maps so a caller cannot change a pending report.
+    _hardwareInfo = Map<String, dynamic>.from(jsonDecode(jsonEncode(hardware)));
+    _send({'cmd': 'hardware_update', 'hardware': _hardwareInfo});
+  }
+
   void setLlamaUrl(String url, {String apiKey = ''}) {
     if (_llamaUrl == url && _llamaApiKey == apiKey) return;
     _llamaUrl = url;
@@ -293,6 +300,7 @@ class WebSocketService {
         'llamaApiKey': _llamaApiKey,
         'modelName': _modelName,
         'serverRunning': serverRunning,
+        if (_hardwareInfo != null) 'hardware': _hardwareInfo,
         if (slots != null) 'slots': slots,
       });
       final connected = await result.future.timeout(
@@ -330,6 +338,7 @@ class WebSocketService {
       'cmd': 'status_update',
       'modelName': name,
       'serverRunning': serverRunning,
+      if (_hardwareInfo != null) 'hardware': _hardwareInfo,
       'slots': slots,
     });
   }

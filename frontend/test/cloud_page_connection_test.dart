@@ -10,6 +10,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:openmymodel/pages/cloud_page.dart';
 import 'package:openmymodel/services/websocket_service.dart';
 
+Future<Map<String, dynamic>> _unknownHardware() async => {
+  'os': 'test',
+  'arch': 'test',
+  'status': 'unknown',
+  'devices': <Map<String, dynamic>>[],
+  'source': 'unavailable',
+  'detectedAt': '2026-10-07T00:00:00.000Z',
+};
+
 class _Connection extends WebSocketService {
   final events = StreamController<Map<String, dynamic>>.broadcast();
   final List<bool> outcomes;
@@ -17,6 +26,7 @@ class _Connection extends WebSocketService {
   bool connected = false;
   bool retryable = true;
   final availability = <bool>[];
+  final hardwareReports = <Map<String, dynamic>>[];
   _Connection([this.outcomes = const [true]]);
   @override
   Stream<Map<String, dynamic>> get messages => events.stream;
@@ -50,6 +60,11 @@ class _Connection extends WebSocketService {
     availability.add(serverRunning);
   }
 
+  @override
+  void setHardwareInfo(Map<String, dynamic> info) {
+    hardwareReports.add(info);
+  }
+
   void lose({bool canRetry = true}) {
     connected = false;
     retryable = canRetry;
@@ -74,6 +89,7 @@ Future<void> _mount(
   _Connection connection,
   http.Client Function() client, {
   bool ready = true,
+  Future<Map<String, dynamic>> Function()? hardwareInfoProvider,
 }) async {
   SharedPreferences.setMockInitialValues({
     'cloud_url': 'https://gateway.test',
@@ -88,6 +104,7 @@ Future<void> _mount(
       home: CloudPage(
         connectionService: connection,
         httpClientFactory: client,
+        hardwareInfoProvider: hardwareInfoProvider ?? _unknownHardware,
         serverReady: ready,
         modelName: 'local-model',
       ),
@@ -97,6 +114,118 @@ Future<void> _mount(
 }
 
 void main() {
+  testWidgets(
+    'hardware is uploaded after connection without starting a model',
+    (tester) async {
+      final hardware = Completer<Map<String, dynamic>>();
+      final connection = _Connection();
+      var probes = 0;
+      await _mount(
+        tester,
+        connection,
+        () => MockClient(
+          (request) async => http.Response(
+            request.url.path.endsWith('/config') ? '{"mode":"personal"}' : '[]',
+            200,
+          ),
+        ),
+        ready: false,
+        hardwareInfoProvider: () {
+          probes++;
+          return hardware.future;
+        },
+      );
+      expect(probes, 0);
+      await tester.tap(find.text('连接'));
+      await tester.pumpAndSettle();
+      expect(connection.connected, isTrue);
+      expect(find.text('已连接，等待本地模型就绪'), findsOneWidget);
+      expect(probes, 1);
+      expect(connection.hardwareReports, isEmpty);
+      hardware.complete({
+        'os': 'windows',
+        'arch': 'x64',
+        'status': 'detected',
+        'devices': [
+          {
+            'name': 'GPU from desktop',
+            'backend': 'cuda',
+            'totalMemoryMiB': 16384,
+          },
+        ],
+        'source': 'nvidia-smi',
+        'detectedAt': '2026-10-07T00:00:00.000Z',
+      });
+      await tester.pumpAndSettle();
+      expect(connection.hardwareReports.single['status'], 'detected');
+      expect(find.text('GPU from desktop · 16.0 GiB'), findsOneWidget);
+      expect(connection.availability.last, false);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+    },
+  );
+
+  testWidgets('a disconnected desktop ignores a late hardware probe', (
+    tester,
+  ) async {
+    final hardware = Completer<Map<String, dynamic>>();
+    final connection = _Connection();
+    await _mount(
+      tester,
+      connection,
+      () => MockClient(
+        (request) async => http.Response(
+          request.url.path.endsWith('/config') ? '{"mode":"personal"}' : '[]',
+          200,
+        ),
+      ),
+      hardwareInfoProvider: () => hardware.future,
+    );
+    await tester.tap(find.text('连接'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('断开'));
+    hardware.complete(await _unknownHardware());
+    await tester.pumpAndSettle();
+    expect(connection.hardwareReports, isEmpty);
+    expect(find.text('已断开'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('hardware failure reports unknown and can be refreshed', (
+    tester,
+  ) async {
+    final connection = _Connection();
+    var probes = 0;
+    await _mount(
+      tester,
+      connection,
+      () => MockClient(
+        (request) async => http.Response(
+          request.url.path.endsWith('/config') ? '{"mode":"personal"}' : '[]',
+          200,
+        ),
+      ),
+      hardwareInfoProvider: () async {
+        probes++;
+        if (probes == 1) throw StateError('Driver unavailable');
+        return {...await _unknownHardware(), 'status': 'cpu_only'};
+      },
+    );
+    await tester.tap(find.text('连接'));
+    await tester.pumpAndSettle();
+    expect(connection.hardwareReports.single['status'], 'unknown');
+    expect(connection.connected, isTrue);
+    expect(find.text('未能读取显卡信息，可检查驱动后刷新'), findsOneWidget);
+    await tester.tap(find.text('刷新设备信息'));
+    await tester.pumpAndSettle();
+    expect(connection.hardwareReports.last['status'], 'cpu_only');
+    expect(find.text('当前未检测到可用 GPU · CPU 模式'), findsOneWidget);
+    expect(connection.attempts, 1);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+  });
+
   testWidgets(
     'cancelled connection-information import cannot refill credentials later',
     (tester) async {
@@ -170,6 +299,7 @@ void main() {
           home: CloudPage(
             connectionService: connection,
             httpClientFactory: client,
+            hardwareInfoProvider: _unknownHardware,
             serverReady: true,
             modelName: 'local-model',
           ),

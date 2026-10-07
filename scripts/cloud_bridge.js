@@ -48,6 +48,7 @@ class CloudBridge {
     this.modelName = "";
     this.serverRunning = true;
     this.slots = null;
+    this.hardware = null;
     this.llamaUrl = new URL("http://127.0.0.1:8080");
     this.llamaApiKey = "";
     this.localKeys = [];
@@ -80,11 +81,16 @@ class CloudBridge {
     this.modelName = command.modelName || "";
     this.serverRunning = command.serverRunning !== false;
     this.slots = Number.isInteger(command.slots) && command.slots >= 0 && command.slots <= 1024 ? command.slots : null;
+    // A new connection must never inherit inventory from the previous desktop/session.
+    this.hardware = command.hardware ?? null;
     this.nodeId = command.nodeId || this.nodeId;
     const socket = new WebSocket(address, { handshakeTimeout: 10000, maxPayload: 70 * 1024 * 1024 });
     this.ws = socket;
     let failure = null;
     let authenticationTimer;
+    let authenticatedState = "";
+    const currentState = () => ({ modelName: this.modelName, serverRunning: this.serverRunning,
+      slots: this.slots, hardware: this.hardware });
     const reason = (message, fallback) => ({
       code: typeof message.code === "string" ? message.code : fallback.code,
       message: typeof message.message === "string" && message.message ? message.message : fallback.message,
@@ -103,10 +109,12 @@ class CloudBridge {
       if (this.ws !== socket) return socket.close();
       authenticationTimer = setTimeout(() => reject({ code: "auth_timeout", message: "服务器未完成节点认证，请稍后重试", retryable: true }), this.authTimeout);
       authenticationTimer.unref();
+      authenticatedState = JSON.stringify(currentState());
       this.send(socket, {
         type: "auth", password: command.password, nodeId: this.nodeId,
         nodeName: command.nodeName || "OpenMyModel-Node", modelName: this.modelName,
         serverRunning: this.serverRunning, protocolVersion: 2,
+        hardware: this.hardware,
         ...(this.slots !== null ? { slots: this.slots } : {}),
       });
     });
@@ -118,7 +126,12 @@ class CloudBridge {
           case "auth_ok":
             clearTimeout(authenticationTimer);
             this.nodeId = message.nodeId || "";
+            const firstAuthentication = !this.connected;
             this.connected = true;
+            // Detection can finish while authentication is pending; send the latest state once admitted.
+            if (firstAuthentication && JSON.stringify(currentState()) !== authenticatedState) {
+              this.send(socket, { type: "status_update", ...currentState() });
+            }
             this.emit({ type: "connected", nodeId: this.nodeId, message: message.message });
             break;
           case "auth_error":
@@ -304,15 +317,21 @@ class CloudBridge {
         this.localKeys = Array.isArray(command.keys) ? command.keys.filter((key) => key && typeof key.key === "string") : [];
         break;
       case "set_llama_url": this.setLlama(command.llamaUrl, command.llamaApiKey); break;
+      case "hardware_update":
+        this.hardware = command.hardware ?? null;
+        if (this.connected && this.ws) this.send(this.ws, { type: "status_update", hardware: this.hardware });
+        break;
       case "status_update":
         this.modelName = command.modelName || "";
         if (typeof command.serverRunning === "boolean") this.serverRunning = command.serverRunning;
         if (command.slots !== undefined) {
           this.slots = Number.isInteger(command.slots) && command.slots >= 0 && command.slots <= 1024 ? command.slots : null;
         }
-        if (this.ws) this.send(this.ws, {
+        if (Object.prototype.hasOwnProperty.call(command, "hardware")) this.hardware = command.hardware ?? null;
+        if (this.connected && this.ws) this.send(this.ws, {
           type: "status_update", modelName: this.modelName, serverRunning: this.serverRunning,
           slots: this.slots,
+          hardware: this.hardware,
         });
         break;
       case "status":

@@ -48,6 +48,8 @@ export const nodes = sqliteTable("nodes", {
   modelConfig: text("model_config"),        // JSON 模型配置
   upstreamApiKey: text("upstream_api_key"), // AES-GCM encrypted llama-server API key
   ownerUserId: text("owner_user_id"),        // Relay-mode node owner; null for legacy admin nodes
+  hardwareJson: text("hardware_json"),      // Validated desktop-reported inventory, for display only
+  hardwareReportedAt: text("hardware_reported_at"),
 });
 
 // ==================== 数据库初始化 ====================
@@ -109,7 +111,9 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
       model_name TEXT,
       model_config TEXT,
       upstream_api_key TEXT,
-      owner_user_id TEXT
+      owner_user_id TEXT,
+      hardware_json TEXT,
+      hardware_reported_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS relay_node_credentials (
@@ -321,6 +325,11 @@ export function createDatabase(directory: string): { db: BetterSQLite3Database; 
   }
   try { sqlite.exec("ALTER TABLE nodes ADD COLUMN owner_user_id TEXT"); } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
+  }
+  for (const column of ["hardware_json", "hardware_reported_at"]) {
+    try { sqlite.exec(`ALTER TABLE nodes ADD COLUMN ${column} TEXT`); } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
+    }
   }
   try { sqlite.exec("ALTER TABLE payment_orders ADD COLUMN purpose TEXT NOT NULL DEFAULT 'topup'"); } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;

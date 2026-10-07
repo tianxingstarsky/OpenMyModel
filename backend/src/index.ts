@@ -43,7 +43,8 @@ export async function buildApp(options: AppOptions = {}) {
     onNodeChange: node => {
       const now = new Date().toISOString();
       const record = { id: node.id, name: node.name, modelName: node.modelName, modelConfig: node.modelConfig,
-        isOnline: node.isOnline, ownerUserId: node.ownerUserId ?? null, lastHeartbeat: now, connectedAt: now };
+        isOnline: node.isOnline, ownerUserId: node.ownerUserId ?? null, lastHeartbeat: now, connectedAt: now,
+        hardwareJson: node.hardware ? JSON.stringify(node.hardware) : null, hardwareReportedAt: node.hardwareReportedAt ?? null };
       const { connectedAt, ...update } = record;
       database.db.insert(nodes).values(record).onConflictDoUpdate({ target: nodes.id, set: update }).run();
     },

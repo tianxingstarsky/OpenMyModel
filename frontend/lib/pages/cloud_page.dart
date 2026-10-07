@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/cloud_url.dart';
 import '../services/cloud_connection_settings.dart';
+import '../services/hardware_info.dart';
 import '../services/inference_service.dart';
 import '../services/sse.dart';
 import '../services/websocket_service.dart';
@@ -15,6 +16,7 @@ import '../services/websocket_service.dart';
 class CloudPage extends StatefulWidget {
   final WebSocketService? connectionService;
   final http.Client Function()? httpClientFactory;
+  final Future<Map<String, dynamic>> Function()? hardwareInfoProvider;
   final String llamaUrl;
   final String llamaApiKey;
   final String modelName;
@@ -27,6 +29,7 @@ class CloudPage extends StatefulWidget {
     super.key,
     this.connectionService,
     this.httpClientFactory,
+    this.hardwareInfoProvider,
     this.llamaUrl = 'http://127.0.0.1:8080',
     this.llamaApiKey = '',
     this.modelName = '',
@@ -52,6 +55,10 @@ class CloudPageState extends State<CloudPage> {
   Timer? _poll;
   Timer? _reconnectTimer;
   Timer? _serverConfigTimer;
+  HardwareInfoService? _hardwareDetector;
+  Map<String, dynamic>? _hardwareInfo;
+  bool _detectingHardware = false;
+  int _hardwareGeneration = 0;
   int _reconnectAttempts = 0;
   bool _expectingDisconnect = false;
   bool _userDisconnected = false;
@@ -98,6 +105,7 @@ class CloudPageState extends State<CloudPage> {
         });
       } else if (message['type'] == 'disconnected' ||
           message['type'] == 'error') {
+        _cancelHardwareProbe();
         final wasConnected = _connected;
         final retryable = message['retryable'] != false;
         if (!retryable) {
@@ -215,6 +223,9 @@ class CloudPageState extends State<CloudPage> {
         slots: widget.slots,
       );
       if (_connected) setState(() => _status = _connectedStatus);
+    }
+    if (_connected && widget.serverReady != oldWidget.serverReady) {
+      unawaited(_refreshHardware());
     }
     if (_loaded &&
         _autoConnect &&
@@ -349,6 +360,71 @@ class CloudPageState extends State<CloudPage> {
       ? '已连接到你的代转发节点'
       : '已连接，模型可用';
 
+  void _cancelHardwareProbe() {
+    _hardwareGeneration++;
+    _hardwareDetector?.dispose();
+    _hardwareDetector = null;
+    _detectingHardware = false;
+  }
+
+  /// Device discovery runs after authentication and never delays node access.
+  Future<void> _refreshHardware() async {
+    if (!_connected || _closing || _detectingHardware) return;
+    final generation = ++_hardwareGeneration;
+    final detector = HardwareInfoService();
+    _hardwareDetector = detector;
+    setState(() => _detectingHardware = true);
+    try {
+      Map<String, dynamic> info;
+      try {
+        info = await (widget.hardwareInfoProvider?.call() ?? detector.detect());
+      } catch (_) {
+        info = {
+          'os': 'unknown',
+          'arch': 'unknown',
+          'status': 'unknown',
+          'devices': <Map<String, dynamic>>[],
+          'source': 'unavailable',
+          'detectedAt': DateTime.now().toUtc().toIso8601String(),
+          'error': '未能读取设备信息，请检查显卡驱动和系统访问权限。',
+        };
+      }
+      if (!mounted ||
+          _closing ||
+          !_connected ||
+          generation != _hardwareGeneration)
+        return;
+      setState(() => _hardwareInfo = info);
+      _service.setHardwareInfo(info);
+    } finally {
+      detector.dispose();
+      if (identical(_hardwareDetector, detector)) _hardwareDetector = null;
+      if (mounted && !_closing && generation == _hardwareGeneration) {
+        setState(() => _detectingHardware = false);
+      }
+    }
+  }
+
+  String get _hardwareSummary {
+    final info = _hardwareInfo;
+    if (info == null) return '连接后自动检测显卡并上报';
+    if (info['status'] == 'cpu_only') return '当前未检测到可用 GPU · CPU 模式';
+    final devices = info['devices'];
+    if (info['status'] != 'detected' || devices is! List || devices.isEmpty) {
+      return '未能读取显卡信息，可检查驱动后刷新';
+    }
+    return devices
+        .whereType<Map>()
+        .map((device) {
+          final total = device['totalMemoryMiB'];
+          final memory = total is num && total > 0
+              ? ' · ${(total / 1024).toStringAsFixed(1)} GiB'
+              : ' · 显存未知';
+          return '${device['name'] ?? 'GPU'}$memory';
+        })
+        .join('\n');
+  }
+
   Future<void> _connect({bool retrying = false}) async {
     if (_closing || !_loaded || _connecting || _connected || _pastingConnection)
       return;
@@ -413,6 +489,7 @@ class CloudPageState extends State<CloudPage> {
         _status = connected ? _connectedStatus : (_service.lastError ?? '连接失败');
       });
       if (connected) {
+        unawaited(_refreshHardware());
         // The model may have started or stopped while authentication was pending.
         _service.setLlamaUrl(widget.llamaUrl, apiKey: widget.llamaApiKey);
         _service.sendStatusUpdate(
@@ -516,6 +593,7 @@ class CloudPageState extends State<CloudPage> {
   }
 
   void disconnectForShutdown() {
+    _cancelHardwareProbe();
     _connectionGeneration++;
     _configGeneration++;
     _serverConfigTimer?.cancel();
@@ -546,6 +624,7 @@ class CloudPageState extends State<CloudPage> {
   }
 
   void _disconnect() {
+    _cancelHardwareProbe();
     _connectionGeneration++;
     _configGeneration++;
     _serverConfigTimer?.cancel();
@@ -962,6 +1041,33 @@ class CloudPageState extends State<CloudPage> {
             ),
           ],
         ),
+        if (_connected)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: ft.Card(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Expanded(child: Text('本机显卡')),
+                      ft.Button(
+                        onPressed: _detectingHardware ? null : _refreshHardware,
+                        child: Text(_detectingHardware ? '检测中…' : '刷新设备信息'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(_hardwareSummary),
+                  const SizedBox(height: 4),
+                  const Text(
+                    '设备信息自动上传到网关，可在网页节点列表查看。无需手动填写。',
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ),
         if (_connectedUrl != null && _connected)
           Padding(
             padding: const EdgeInsets.only(top: 10),

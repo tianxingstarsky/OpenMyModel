@@ -84,6 +84,7 @@ test("admin node summary and combined search/status filters use current node sta
   const html = readFileSync(join(__dirname, "../public/admin.html"), "utf8");
   const script = html.match(/<script>\s*([\s\S]*?)\s*<\/script>/)?.[1];
   assert.ok(script, "admin panel inline script exists");
+  const hardwareRenderers = script.slice(script.indexOf("function hardwareMemory("), script.indexOf("function renderNodeStats("));
   const renderers = script.match(/function renderNodeStats\(\)[^\n]*\nfunction renderNodes\(\)[^\n]*/)?.[0];
   assert.ok(renderers, "node rendering functions exist");
   const elements = new Map<string, Record<string, any>>();
@@ -103,14 +104,14 @@ test("admin node summary and combined search/status filters use current node sta
     esc: (value: unknown) => String(value ?? "").replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!),
     document: { querySelectorAll: () => [] },
   };
-  runInNewContext(`${renderers}; renderNodeStats(); renderNodes()`, context);
+  runInNewContext(`${hardwareRenderers}${renderers}; renderNodeStats(); renderNodes()`, context);
   assert.match(element("#nodeStats").innerHTML, /在线就绪节点[\s\S]*?metric-value">1</);
   assert.equal(element("#nodeResultCount").textContent, "3 个节点");
   assert.match(element("#nodesTable").innerHTML, /node-02/);
 
   element("#nodeSearch").value = "chat";
   element("#nodeStatusFilter").value = "ready";
-  runInNewContext(`${renderers}; renderNodeStats(); renderNodes()`, context);
+  runInNewContext(`${hardwareRenderers}${renderers}; renderNodeStats(); renderNodes()`, context);
   assert.equal(element("#nodeResultCount").textContent, "显示 1 / 3 个");
   assert.match(element("#nodesTable").innerHTML, /node-01/);
   assert.doesNotMatch(element("#nodesTable").innerHTML, /node-02|node-03/);
