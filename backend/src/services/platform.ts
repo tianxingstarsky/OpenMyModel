@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { createPrivateKey, createPublicKey, createSign, createVerify, randomInt, randomBytes, timingSafeEqual } from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import nodemailer from "nodemailer";
-import { WebSocketTunnel, RelayError } from "./websocket";
+import { WebSocketTunnel, RelayError, NodeAuthFailure } from "./websocket";
 import { decryptSecret, encryptSecret, getPlatformSecret, hashPlatformValue } from "./secrets";
 
 type Role = "admin" | "user";
@@ -239,7 +239,7 @@ export class PlatformService {
     if (transition) {
       // A socket authenticated in one operating mode must never remain routable
       // after the mode changes. Nodes reconnect using the new mode's credential.
-      for (const node of this.tunnel.getOnlineNodes()) this.tunnel.disconnectNode(node.id);
+      this.tunnel.disconnectAll({ code: "mode_changed", message: "服务器运营模式已切换，请重新检查连接设置", retryable: false });
     }
     return result;
   }
@@ -395,7 +395,7 @@ export class PlatformService {
     return { status: application?.status || "not_applied", description: application?.description || "",
       reviewNote: application?.reviewNote || "", appliedAt: application?.appliedAt || null,
       reviewedAt: application?.reviewedAt || null,
-      canManageNodes: this.isRelayMode() || this.isProviderMode() && application?.status === "approved" };
+      canManageNodes: this.isUserActive(userId) && (this.isRelayMode() || this.isProviderMode() && application?.status === "approved") };
   }
 
   private requireNodeAccess(userId: string): void {
@@ -431,7 +431,9 @@ export class PlatformService {
     if (!result.changes) throw new Error("用户尚未提交算力提供者申请");
     if (status !== "approved") {
       const nodes = this.sqlite.prepare("SELECT node_id FROM relay_node_credentials WHERE user_id=? AND revoked_at IS NULL").all(userId) as Array<{node_id: string}>;
-      for (const node of nodes) this.tunnel.disconnectNode(node.node_id);
+      for (const node of nodes) this.tunnel.disconnectNode(node.node_id, {
+        code: "compute_provider_suspended", message: "算力提供权限已暂停，请在网页查看管理员说明", retryable: false,
+      });
     }
     return this.computeProviderAccess(userId);
   }
@@ -461,23 +463,33 @@ export class PlatformService {
   }
 
   authenticateRelayNodeToken(tokenInput: unknown, address: string):
-    | "invalid" | "limited" | { status: "ok"; ownerUserId: string; nodeId: string; nodeName: string } {
+    | NodeAuthFailure | { status: "ok"; ownerUserId: string; nodeId: string; nodeName: string } {
     const now = Date.now();
     for (const [key, value] of this.relayAuthFailures) if (value.until <= now) this.relayAuthFailures.delete(key);
     const failure = this.relayAuthFailures.get(address);
-    if (failure && failure.count >= 30) return "limited";
-    if (!this.isUserPortalEnabled() || typeof tokenInput !== "string" || tokenInput.length > 256) return "invalid";
-    const token = tokenInput.trim();
-    if (!token.startsWith("omm-relay-node-") || token.length < 40) return "invalid";
-    const row = this.sqlite.prepare(`SELECT c.id,c.user_id AS userId,c.node_id AS nodeId,c.name AS nodeName
-      FROM relay_node_credentials c JOIN platform_users u ON u.id=c.user_id
-      WHERE c.token_hash=? AND c.revoked_at IS NULL AND u.is_active=1`).get(hashPlatformValue(token, this.secret)) as
-      { id: string; userId: string; nodeId: string; nodeName: string } | undefined;
-    if (!row || !this.computeProviderAccess(row.userId).canManageNodes) {
+    const limited: NodeAuthFailure = { status: "limited", code: "authentication_limited", message: "认证尝试过于频繁，请稍后重试", retryable: true };
+    if (failure && failure.count >= 30 || !failure && this.relayAuthFailures.size >= 10000) return limited;
+    const fail = (code = "invalid_node_token", message = "节点 Token 无效或已更换，请在网页重新复制"): NodeAuthFailure => {
       const current = this.relayAuthFailures.get(address);
       this.relayAuthFailures.set(address, { count: (current?.count ?? 0) + 1, until: current?.until ?? now + 60_000 });
-      return this.relayAuthFailures.get(address)!.count >= 30 ? "limited" : "invalid";
-    }
+      return this.relayAuthFailures.get(address)!.count >= 30 ? limited : { status: "invalid", code, message, retryable: false };
+    };
+    if (!this.isUserPortalEnabled()) return fail("mode_changed", "服务器当前模式不接受账户节点 Token，请重新检查连接设置");
+    if (typeof tokenInput !== "string" || tokenInput.length > 256) return fail();
+    const token = tokenInput.trim();
+    if (!token.startsWith("omm-relay-node-") || token.length < 40) return fail();
+    const row = this.sqlite.prepare(`SELECT c.id,c.user_id AS userId,c.node_id AS nodeId,c.name AS nodeName,
+      c.revoked_at AS revokedAt,u.is_active AS active
+      FROM relay_node_credentials c JOIN platform_users u ON u.id=c.user_id
+      WHERE c.token_hash=?`).get(hashPlatformValue(token, this.secret)) as
+      { id: string; userId: string; nodeId: string; nodeName: string; revokedAt: string | null; active: number } | undefined;
+    if (!row) return fail();
+    if (row.revokedAt) return fail("token_revoked", "此节点已撤销，请在网页创建新的节点");
+    if (row.active !== 1) return fail("account_disabled", "账号已停用，请联系管理员");
+    const access = this.computeProviderAccess(row.userId);
+    if (!access.canManageNodes) return access.status === "suspended"
+      ? fail("compute_provider_suspended", "算力提供权限已暂停，请在网页查看管理员说明")
+      : fail("compute_provider_approval_required", "请先在网页申请成为算力提供者，管理员开通后再连接");
     this.relayAuthFailures.delete(address);
     this.sqlite.prepare("UPDATE relay_node_credentials SET last_seen_at=? WHERE id=? AND revoked_at IS NULL")
       .run(isoNow(), row.id);
@@ -509,7 +521,7 @@ export class PlatformService {
     const token = `omm-relay-node-${randomBytes(32).toString("base64url")}`;
     this.sqlite.prepare("UPDATE relay_node_credentials SET token_hash=?,last_seen_at=NULL WHERE id=? AND revoked_at IS NULL")
       .run(hashPlatformValue(token, this.secret), credential.id);
-    this.tunnel.disconnectNode(nodeId);
+    this.tunnel.disconnectNode(nodeId, { code: "token_rotated", message: "节点 Token 已更换，请在网页复制新的 Token 后重新连接", retryable: false });
     return { nodeId, name: credential.name, token };
   }
 
@@ -1412,9 +1424,11 @@ export class PlatformService {
       return this.adminUsers().find((user: any) => user.id === id) ?? null;
     });
     const result = transaction.immediate();
-    for (const nodeId of disconnectNodes) this.tunnel.disconnectNode(nodeId);
+    for (const nodeId of disconnectNodes) this.tunnel.disconnectNode(nodeId,
+      { code: "account_disabled", message: "账号已停用，请联系管理员", retryable: false });
     if (input.active === false) {
-      for (const node of this.tunnel.getOnlineNodes()) if (node.ownerUserId === id) this.tunnel.disconnectNode(node.id);
+      for (const node of this.tunnel.getOnlineNodes()) if (node.ownerUserId === id) this.tunnel.disconnectNode(node.id,
+        { code: "account_disabled", message: "账号已停用，请联系管理员", retryable: false });
     }
     return result;
   }

@@ -1,7 +1,7 @@
 Uri normalizeCloudUri(String input) {
   final text = input.trim();
   if (text.isEmpty) throw const FormatException('请输入服务器地址');
-  final uri = Uri.tryParse(text.contains('://') ? text : 'http://$text');
+  var uri = Uri.tryParse(text.contains('://') ? text : 'https://$text');
   if (uri == null ||
       !['http', 'https', 'ws', 'wss'].contains(uri.scheme) ||
       uri.host.isEmpty ||
@@ -16,15 +16,27 @@ Uri normalizeCloudUri(String input) {
       host.endsWith('.localhost') ||
       host == '::1' ||
       RegExp(r'^127(?:\.\d{1,3}){3}$').hasMatch(host);
+  if (!text.contains('://') && loopback) uri = uri.replace(scheme: 'http');
   if (['http', 'ws'].contains(uri.scheme) && !loopback) {
     throw const FormatException('远程服务器必须使用 HTTPS 地址；明文连接只允许本机回环地址');
   }
-  final path = uri.path
-      .replaceFirst(RegExp(r'/ws/node/?$'), '')
-      .replaceFirst(RegExp(r'/$'), '');
+  final path = uri.path.replaceFirst(RegExp(r'/+$'), '');
   return uri.replace(
     scheme: ['https', 'wss'].contains(uri.scheme) ? 'https' : 'http',
     path: path,
+  );
+}
+
+/// Interpret a copied web/WS page once, at the user-input boundary.
+/// Stored gateway bases and endpoint builders must use normalizeCloudUri so a
+/// reverse proxy directory named "admin" is never stripped a second time.
+Uri cloudServerInput(String input) {
+  final base = normalizeCloudUri(input);
+  return base.replace(
+    path: base.path.replaceFirst(
+      RegExp(r'/(?:ws/node|console|admin|dashboard)$'),
+      '',
+    ),
   );
 }
 

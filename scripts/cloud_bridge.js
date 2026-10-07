@@ -4,8 +4,10 @@ const http = require("node:http");
 const https = require("node:https");
 const { timingSafeEqual } = require("node:crypto");
 
-function cloudUrl(value) {
-  const url = new URL(/^[a-z]+:\/\//i.test(value) ? value : `http://${value}`);
+function cloudUrl(value, { serverUrlIsCanonical = false } = {}) {
+  if (typeof value !== "string" || !value.trim()) throw new Error("请输入服务器地址");
+  const hasScheme = /^[a-z]+:\/\//i.test(value.trim());
+  const url = new URL(hasScheme ? value.trim() : `https://${value.trim()}`);
   if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol) ||
       url.username || url.password || url.search || url.hash) {
     throw new Error("请输入不含账号、查询参数的 HTTP(S) 服务器地址");
@@ -13,11 +15,17 @@ function cloudUrl(value) {
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   const loopback = host === "localhost" || host.endsWith(".localhost") || host === "::1" ||
     /^127(?:\.\d{1,3}){3}$/.test(host);
+  if (!hasScheme && loopback) url.protocol = "http:";
   if (["http:", "ws:"].includes(url.protocol) && !loopback) {
     throw new Error("远程节点必须通过 HTTPS/WSS 连接；明文连接只允许用于本机回环地址");
   }
   url.protocol = ["https:", "wss:"].includes(url.protocol) ? "wss:" : "ws:";
-  url.pathname = `${url.pathname.replace(/\/(?:ws\/node)?\/?$/, "")}/ws/node`;
+  const basePath = url.pathname.replace(/\/+$/, "");
+  // Only raw user/CLI input may contain a copied page or WebSocket endpoint.
+  // Flutter supplies a canonical base; removing "admin" again would corrupt a
+  // valid reverse-proxy prefix such as /prefix/admin.
+  const path = serverUrlIsCanonical ? basePath : basePath.replace(/\/(?:ws\/node|console|admin|dashboard)$/, "");
+  url.pathname = `${path}/ws/node`;
   return url;
 }
 
@@ -29,10 +37,11 @@ function matchesKey(candidate, key) {
 }
 
 class CloudBridge {
-  constructor(emit = () => {}, { requestTimeout = 120000, maxBufferedBytes = 8 * 1024 * 1024 } = {}) {
+  constructor(emit = () => {}, { requestTimeout = 120000, maxBufferedBytes = 8 * 1024 * 1024, authTimeout = 15000 } = {}) {
     this.emit = emit;
     this.requestTimeout = requestTimeout;
     this.maxBufferedBytes = maxBufferedBytes;
+    this.authTimeout = authTimeout;
     this.ws = null;
     this.connected = false;
     this.nodeId = "";
@@ -47,10 +56,12 @@ class CloudBridge {
 
   send(socket, data) {
     if (socket.readyState !== WebSocket.OPEN) return false;
-    socket.send(JSON.stringify(data), (error) => {
-      if (error) socket.terminate();
-    });
-    return true;
+    try {
+      socket.send(JSON.stringify(data), (error) => {
+        if (error) socket.terminate();
+      });
+      return true;
+    } catch { socket.terminate(); return false; }
   }
 
   setLlama(url, apiKey = "") {
@@ -63,7 +74,7 @@ class CloudBridge {
   }
 
   connect(command) {
-    const address = cloudUrl(command.url);
+    const address = cloudUrl(command.url, { serverUrlIsCanonical: command.serverUrlIsCanonical === true });
     this.setLlama(command.llamaUrl, command.llamaApiKey);
     this.disconnect();
     this.modelName = command.modelName || "";
@@ -72,8 +83,26 @@ class CloudBridge {
     this.nodeId = command.nodeId || this.nodeId;
     const socket = new WebSocket(address, { handshakeTimeout: 10000, maxPayload: 70 * 1024 * 1024 });
     this.ws = socket;
+    let failure = null;
+    let authenticationTimer;
+    const reason = (message, fallback) => ({
+      code: typeof message.code === "string" ? message.code : fallback.code,
+      message: typeof message.message === "string" && message.message ? message.message : fallback.message,
+      retryable: typeof message.retryable === "boolean" ? message.retryable : fallback.retryable,
+    });
+    const reject = (detail) => {
+      if (this.ws !== socket || failure) return;
+      failure = detail;
+      this.connected = false;
+      this.cancelAll();
+      clearTimeout(authenticationTimer);
+      this.emit({ type: "error", ...failure });
+      socket.terminate();
+    };
     socket.on("open", () => {
       if (this.ws !== socket) return socket.close();
+      authenticationTimer = setTimeout(() => reject({ code: "auth_timeout", message: "服务器未完成节点认证，请稍后重试", retryable: true }), this.authTimeout);
+      authenticationTimer.unref();
       this.send(socket, {
         type: "auth", password: command.password, nodeId: this.nodeId,
         nodeName: command.nodeName || "OpenMyModel-Node", modelName: this.modelName,
@@ -82,18 +111,29 @@ class CloudBridge {
       });
     });
     socket.on("message", (raw) => {
-      if (this.ws !== socket) return;
+      if (this.ws !== socket || failure) return;
       try {
         const message = JSON.parse(raw.toString());
         switch (message.type) {
           case "auth_ok":
+            clearTimeout(authenticationTimer);
             this.nodeId = message.nodeId || "";
             this.connected = true;
             this.emit({ type: "connected", nodeId: this.nodeId, message: message.message });
             break;
           case "auth_error":
+            clearTimeout(authenticationTimer);
+            failure = reason(message, { code: "invalid_credentials", message: "认证失败，请检查连接凭据", retryable: false });
             this.connected = false;
-            this.emit({ type: "error", message: message.message || "认证失败" });
+            this.cancelAll();
+            this.emit({ type: "error", ...failure });
+            socket.close();
+            break;
+          case "connection_closed":
+            clearTimeout(authenticationTimer);
+            failure = reason(message, { code: "connection_lost", message: "服务器断开了节点连接", retryable: true });
+            this.connected = false;
+            this.cancelAll();
             socket.close();
             break;
           case "ping":
@@ -121,21 +161,38 @@ class CloudBridge {
             break;
         }
       } catch (error) {
-        this.emit({ type: "error", message: `桥接协议错误: ${error.message}` });
+        reject({ code: "protocol_error", message: `桥接协议错误: ${error.message}`, retryable: false });
       }
     });
-    socket.on("close", () => {
+    socket.on("close", (closeCode, closeReason) => {
+      clearTimeout(authenticationTimer);
       if (this.ws !== socket) return;
       this.ws = null;
       this.connected = false;
       this.cancelAll();
-      this.emit({ type: "disconnected" });
+      const serverCode = closeReason.toString();
+      const terminalCodes = new Set(["invalid_credentials", "invalid_node_token", "account_disabled", "compute_provider_approval_required",
+        "compute_provider_suspended", "token_rotated", "token_revoked", "connection_replaced", "mode_changed", "protocol_error"]);
+      failure ||= { code: terminalCodes.has(serverCode) ? serverCode : closeCode === 1008 ? "invalid_credentials" : "connection_lost",
+        message: closeCode === 1008 ? "服务器拒绝了连接，请检查连接凭据" : "与服务器的连接已断开",
+        retryable: closeCode !== 1008 && !terminalCodes.has(serverCode) };
+      this.emit({ type: "disconnected", ...failure });
+    });
+    socket.on("unexpected-response", (request, response) => {
+      const status = response.statusCode || 502;
+      reject({ code: status === 401 || status === 403 ? "invalid_credentials" : status >= 500 || status === 429 ? "server_unavailable" : "invalid_endpoint",
+        message: `服务器拒绝节点连接（HTTP ${status}），请检查网关地址与反向代理设置`, retryable: status >= 500 || status === 429 });
+      response.resume();
+      request.destroy();
     });
     socket.on("error", (error) => {
       if (this.ws !== socket) return;
       this.connected = false;
       this.cancelAll();
-      this.emit({ type: "error", message: error.message });
+      if (failure) return;
+      const certificateError = /CERT|SELF_SIGNED|UNABLE_TO_VERIFY|TLS/.test(error.code || "");
+      failure = { code: certificateError ? "tls_error" : "connection_lost", message: error.message, retryable: !certificateError };
+      this.emit({ type: "error", ...failure });
     });
   }
 
@@ -242,7 +299,7 @@ class CloudBridge {
   command(command) {
     switch (command.cmd) {
       case "connect": this.connect(command); break;
-      case "disconnect": this.disconnect(); this.emit({ type: "disconnected" }); break;
+      case "disconnect": this.disconnect(); this.emit({ type: "disconnected", code: "manual_disconnect", message: "已断开连接", retryable: false }); break;
       case "set_keys":
         this.localKeys = Array.isArray(command.keys) ? command.keys.filter((key) => key && typeof key.key === "string") : [];
         break;
@@ -255,7 +312,7 @@ class CloudBridge {
         }
         if (this.ws) this.send(this.ws, {
           type: "status_update", modelName: this.modelName, serverRunning: this.serverRunning,
-          ...(this.slots !== null ? { slots: this.slots } : {}),
+          slots: this.slots,
         });
         break;
       case "status":
@@ -276,7 +333,7 @@ if (require.main === module) {
       if (command.cmd === "exit") return close();
       bridge.command(command);
     } catch (error) {
-      bridge.emit({ type: "error", message: error.message });
+      bridge.emit({ type: "error", code: "invalid_configuration", message: error.message, retryable: false });
     }
   });
   input.on("close", close);

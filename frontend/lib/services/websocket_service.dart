@@ -4,6 +4,10 @@ import 'dart:io';
 import 'cloud_url.dart';
 
 class WebSocketService {
+  WebSocketService({Duration connectionTimeout = const Duration(seconds: 12)})
+    : _connectionTimeout = connectionTimeout;
+
+  final Duration _connectionTimeout;
   Process? _process;
   bool _connected = false;
   bool _disposed = false;
@@ -14,6 +18,10 @@ class WebSocketService {
   String _modelName = '';
   String _bridgePath = '';
   String? _lastError;
+  String? _lastErrorCode;
+  bool? _lastFailureRetryable;
+  String? _activeConnectionKey;
+  String? _nodeIdentity;
   List<Map<String, dynamic>> _localKeys = [];
   Future<bool>? _connecting;
   Completer<bool>? _connectionResult;
@@ -24,6 +32,8 @@ class WebSocketService {
   bool get isConnected => _connected;
   String get nodeId => _nodeId;
   String? get lastError => _lastError;
+  String? get lastErrorCode => _lastErrorCode;
+  bool? get lastFailureRetryable => _lastFailureRetryable;
 
   void _emit(Map<String, dynamic> message) {
     if (!_disposed && !_messages.isClosed) _messages.add(message);
@@ -86,28 +96,78 @@ class WebSocketService {
     try {
       process.stdin.writeln(jsonEncode(command));
     } catch (error) {
-      _lastError = '桥接进程已断开: $error';
-      _cleanup();
-      _emit({'type': 'error', 'message': _lastError});
+      _fail(
+        '桥接进程已断开: $error',
+        code: 'bridge_input_closed',
+        retryable: true,
+        generation: _generation,
+      );
     }
+  }
+
+  void _fail(
+    String message, {
+    required String code,
+    required bool retryable,
+    required int generation,
+    String type = 'error',
+  }) {
+    if (_disposed || generation != _generation) return;
+    _lastError = message;
+    _lastErrorCode = code;
+    _lastFailureRetryable = retryable;
+    // A failed bridge must stop forwarding requests before another attempt starts.
+    _cleanup();
+    _emit({
+      'type': type,
+      'message': message,
+      'code': code,
+      'reason': code,
+      'retryable': retryable,
+    });
   }
 
   Future<bool> connect(
     String serverUrl,
     String password, {
+    String? nodeId,
     String nodeName = 'local-node',
     bool serverRunning = true,
     int? slots,
   }) {
     if (_disposed) return Future.value(false);
-    if (_connecting != null) return _connecting!;
-    final attempt = _connect(
-      serverUrl,
+    final String url;
+    try {
+      url = normalizeCloudUri(serverUrl).toString();
+    } on FormatException catch (error) {
+      _fail(
+        error.message,
+        code: 'invalid_server_url',
+        retryable: false,
+        generation: _generation,
+      );
+      return Future.value(false);
+    }
+    final key = jsonEncode([
+      url,
       password,
+      nodeId,
       nodeName,
       serverRunning,
       slots,
-    );
+    ]);
+    if (_activeConnectionKey == key) {
+      if (_connecting != null) return _connecting!;
+      if (_connected) return Future.value(true);
+    }
+    _cleanup();
+    final identity = jsonEncode([url, password]);
+    // Node IDs belong to a server and an account. Never reuse one after either changes.
+    if (_nodeIdentity != identity) _nodeId = '';
+    _nodeIdentity = identity;
+    if (nodeId != null) _nodeId = nodeId.trim();
+    _activeConnectionKey = key;
+    final attempt = _connect(url, password, nodeName, serverRunning, slots);
     _connecting = attempt;
     unawaited(
       attempt.whenComplete(() {
@@ -124,25 +184,33 @@ class WebSocketService {
     bool serverRunning,
     int? slots,
   ) async {
-    _cleanup();
     final generation = _generation;
     _lastError = null;
+    _lastErrorCode = null;
+    _lastFailureRetryable = null;
     final result = Completer<bool>();
     _connectionResult = result;
     try {
-      final url = normalizeCloudUri(serverUrl).toString();
       final script = _script();
       final process = await Process.start(_node(script), [
         script,
       ], workingDirectory: File(script).parent.path);
       if (_disposed || generation != _generation) {
         process.kill();
+        unawaited(process.stdout.drain<void>());
+        unawaited(process.stderr.drain<void>());
+        unawaited(process.stdin.close().catchError((Object _) {}));
         return false;
       }
       _process = process;
       unawaited(
         process.stdin.done.catchError((Object error) {
-          if (!_disposed && generation == _generation) _lastError = '桥接输入已关闭';
+          _fail(
+            '桥接输入已关闭',
+            code: 'bridge_input_closed',
+            retryable: true,
+            generation: generation,
+          );
         }),
       );
       _subscriptions.add(
@@ -158,17 +226,26 @@ class WebSocketService {
                     case 'connected':
                       _nodeId = message['nodeId']?.toString() ?? '';
                       _connected = true;
+                      _lastError = null;
+                      _lastErrorCode = null;
+                      _lastFailureRetryable = null;
                       if (!result.isCompleted) result.complete(true);
                       break;
                     case 'error':
-                      _lastError = message['message']?.toString() ?? '云端连接失败';
-                      _connected = false;
-                      if (!result.isCompleted) result.complete(false);
-                      break;
                     case 'disconnected':
-                      _connected = false;
-                      if (!result.isCompleted) result.complete(false);
-                      break;
+                      _fail(
+                        message['message']?.toString() ?? '云端连接已断开',
+                        code:
+                            message['code']?.toString() ??
+                            message['reason']?.toString() ??
+                            'connection_lost',
+                        retryable: message['retryable'] is bool
+                            ? message['retryable'] as bool
+                            : true,
+                        generation: generation,
+                        type: message['type'] as String,
+                      );
+                      return;
                   }
                   _emit(message);
                 } catch (_) {
@@ -176,27 +253,39 @@ class WebSocketService {
                 }
               },
               onError: (Object error) {
-                if (generation != _generation) return;
-                _lastError = '桥接输出错误: $error';
-                if (!result.isCompleted) result.complete(false);
+                _fail(
+                  '桥接输出错误: $error',
+                  code: 'bridge_output_error',
+                  retryable: true,
+                  generation: generation,
+                );
               },
+              onDone: () => _fail(
+                '桥接输出已关闭，请重新连接',
+                code: 'bridge_output_closed',
+                retryable: true,
+                generation: generation,
+                type: 'disconnected',
+              ),
             ),
       );
-      _subscriptions.add(process.stderr.transform(utf8.decoder).listen((_) {}));
+      _subscriptions.add(process.stderr.listen((_) {}, onError: (Object _) {}));
       unawaited(
         process.exitCode.then((code) {
-          if (_disposed || generation != _generation) return;
-          _process = null;
-          _connected = false;
-          _lastError ??= '桥接进程退出 ($code)';
-          if (!result.isCompleted) result.complete(false);
-          _emit({'type': 'disconnected', 'message': _lastError});
+          _fail(
+            '桥接进程退出 ($code)',
+            code: 'bridge_exited',
+            retryable: true,
+            generation: generation,
+            type: 'disconnected',
+          );
         }),
       );
       _send({'cmd': 'set_keys', 'keys': _localKeys});
       _send({
         'cmd': 'connect',
-        'url': url,
+        'url': serverUrl,
+        'serverUrlIsCanonical': true,
         'password': password,
         'nodeId': _nodeId,
         'nodeName': nodeName,
@@ -207,18 +296,28 @@ class WebSocketService {
         if (slots != null) 'slots': slots,
       });
       final connected = await result.future.timeout(
-        const Duration(seconds: 12),
+        _connectionTimeout,
         onTimeout: () {
-          _lastError = '连接超时，请检查服务器地址、网络和密码';
+          _fail(
+            '连接超时，请检查服务器地址和网络',
+            code: 'connection_timeout',
+            retryable: true,
+            generation: generation,
+          );
           return false;
         },
       );
       if (!connected && generation == _generation) _cleanup();
       return connected && generation == _generation && !_disposed;
     } catch (error) {
-      _lastError = error.toString();
-      if (generation == _generation) _cleanup();
-      _emit({'type': 'error', 'message': _lastError});
+      _fail(
+        error.toString(),
+        code: error is ProcessException
+            ? 'bridge_unavailable'
+            : 'bridge_setup_failed',
+        retryable: false,
+        generation: generation,
+      );
       return false;
     } finally {
       if (identical(_connectionResult, result)) _connectionResult = null;
@@ -231,13 +330,15 @@ class WebSocketService {
       'cmd': 'status_update',
       'modelName': name,
       'serverRunning': serverRunning,
-      if (slots != null) 'slots': slots,
+      'slots': slots,
     });
   }
 
   void _cleanup() {
     _generation++;
     _connected = false;
+    _connecting = null;
+    _activeConnectionKey = null;
     if (_connectionResult != null && !_connectionResult!.isCompleted)
       _connectionResult!.complete(false);
     for (final subscription in _subscriptions) {
@@ -263,9 +364,16 @@ class WebSocketService {
   }
 
   void disconnect() {
-    _connecting = null;
     _cleanup();
-    _emit({'type': 'disconnected'});
+    _lastError = null;
+    _lastErrorCode = 'user_disconnected';
+    _lastFailureRetryable = false;
+    _emit({
+      'type': 'disconnected',
+      'code': 'user_disconnected',
+      'reason': 'user_disconnected',
+      'retryable': false,
+    });
   }
 
   void dispose() {

@@ -34,15 +34,32 @@ void main() {
       'http://localhost:3000',
     );
     expect(
+      normalizeCloudUri('host.test:3000').toString(),
+      'https://host.test:3000',
+    );
+    expect(
+      cloudServerInput('https://host.test/prefix/console').toString(),
+      'https://host.test/prefix',
+    );
+    expect(
       cloudEndpoint(
-        'wss://host.test/prefix/ws/node',
+        cloudServerInput('wss://host.test/prefix/ws/node').toString(),
         '/admin/nodes',
       ).toString(),
       'https://host.test/prefix/admin/nodes',
     );
+    final server = cloudServerInput('https://host.test/prefix/admin/console');
+    expect(server.toString(), 'https://host.test/prefix/admin');
+    expect(
+      normalizeCloudUri(normalizeCloudUri(server.toString()).toString()),
+      server,
+    );
+    expect(
+      cloudEndpoint(server.toString(), '/api/public/config').path,
+      '/prefix/admin/api/public/config',
+    );
     for (final url in [
       'ftp://host.test',
-      'host.test:3000',
       'http://host.test:3000',
       'http://user:pass@host.test',
       'http://host.test?secret=yes',

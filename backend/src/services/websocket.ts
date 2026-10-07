@@ -57,7 +57,7 @@ export interface StatusSnapshot {
 }
 
 export interface TunnelOptions {
-  authenticate: (credential: unknown, address: string) => Promise<AuthResult | {
+  authenticate: (credential: unknown, address: string) => Promise<AuthResult | NodeAuthFailure | {
     status: "ok"; ownerUserId: string; nodeId: string; nodeName: string;
   }>;
   onNodeChange?: (node: NodeInfo) => void;
@@ -66,6 +66,16 @@ export interface TunnelOptions {
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
   authTimeoutMs?: number;
+}
+
+export interface NodeDisconnectReason {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+export interface NodeAuthFailure extends NodeDisconnectReason {
+  status: "invalid" | "limited";
 }
 
 export interface RelayTarget {
@@ -138,7 +148,8 @@ export class WebSocketTunnel {
         authenticated: false, authenticating: false, retired: false, pending: new Map(), stats: freshStats(),
       };
       this.sockets.add(conn);
-      conn.authTimeout = setTimeout(() => this.retire(conn, new RelayError("Node authentication timed out")), this.options.authTimeoutMs ?? 10000);
+      conn.authTimeout = setTimeout(() => this.retire(conn, new RelayError("Node authentication timed out"),
+        { code: "auth_timeout", message: "服务器认证超时，请重试", retryable: true }), this.options.authTimeoutMs ?? 10000);
       socket.on("message", (raw) => {
         if (conn.retired) return;
         let msg: Record<string, unknown>;
@@ -148,7 +159,8 @@ export class WebSocketTunnel {
           msg = JSON.parse(text);
           if (!msg || typeof msg !== "object" || Array.isArray(msg)) throw new Error("Invalid message");
         } catch {
-          this.retire(conn, new RelayError("Invalid node message"));
+          this.retire(conn, new RelayError("Invalid node message"),
+            { code: "protocol_error", message: "节点协议无效，请更新桌面端", retryable: false });
           return;
         }
         if (!conn.authenticated) {
@@ -179,8 +191,12 @@ export class WebSocketTunnel {
       if (conn.retired || conn.ws.readyState !== WebSocket.OPEN) return;
       const identity = typeof result === "object" && result.status === "ok" ? result : null;
       if (result !== "ok" && !identity) {
-        this.send(conn, { type: "auth_error", message: result === "limited" ? "Too many authentication attempts" : "Invalid credentials" });
-        conn.ws.close(1008, "Authentication failed");
+        const reason = typeof result === "object" && result.status !== "ok" ? result
+          : result === "limited"
+            ? { code: "authentication_limited", message: "认证尝试过于频繁，请稍后重试", retryable: true }
+            : { code: "invalid_credentials", message: "连接凭据无效，请检查管理员密码或重新复制节点 Token", retryable: false };
+        this.send(conn, { type: "auth_error", code: reason.code, message: reason.message, retryable: reason.retryable });
+        this.retire(conn, new RelayError(reason.message, 403), reason);
         return;
       }
       conn.authenticated = true;
@@ -197,7 +213,8 @@ export class WebSocketTunnel {
       };
       const previous = this.connections.get(conn.node.id);
       this.connections.set(conn.node.id, conn);
-      if (previous) this.retire(previous, new RelayError("Compute node connection replaced"));
+      if (previous) this.retire(previous, new RelayError("Compute node connection replaced"),
+        { code: "connection_replaced", message: "此节点已在另一处连接，请确保同一节点只由一个桌面端接入", retryable: false });
       this.options.onNodeChange?.({ ...conn.node });
       this.send(conn, { type: "auth_ok", nodeId: conn.node.id, message: "Connected" });
     } catch {
@@ -429,11 +446,19 @@ export class WebSocketTunnel {
     if (conn) this.fail(conn, requestId, new RelayError("HTTP client disconnected", 499), true);
   }
 
-  disconnectNode(nodeId: string): boolean {
+  disconnectNode(nodeId: string, reason: NodeDisconnectReason = {
+    code: "token_revoked", message: "节点访问权限已撤销，请在网页重新获取连接凭据", retryable: false,
+  }): boolean {
     const conn = this.connections.get(nodeId);
     if (!conn) return false;
-    this.retire(conn, new RelayError("Node access was revoked", 403));
+    this.retire(conn, new RelayError(reason.message, 403), reason);
     return true;
+  }
+
+  /** Include sockets still awaiting asynchronous authentication, so an old
+   * operating mode cannot admit a connection after its permissions change. */
+  disconnectAll(reason: NodeDisconnectReason): void {
+    for (const conn of this.sockets) this.retire(conn, new RelayError(reason.message, 403), reason);
   }
 
   getOnlineNodes(): NodeInfo[] {
@@ -497,7 +522,7 @@ export class WebSocketTunnel {
     this.options.onNodeChange?.({ ...conn.node });
   }
 
-  private retire(conn: TunnelConnection, error: Error): void {
+  private retire(conn: TunnelConnection, error: Error, reason?: NodeDisconnectReason): void {
     if (conn.retired) return;
     conn.retired = true;
     clearTimeout(conn.authTimeout);
@@ -507,7 +532,17 @@ export class WebSocketTunnel {
       this.connections.delete(conn.node.id);
       this.options.onNodeChange?.({ ...conn.node, isOnline: false });
     }
-    if (conn.ws.readyState !== WebSocket.CLOSED) conn.ws.terminate();
+    if (reason && conn.ws.readyState === WebSocket.OPEN) {
+      // Close gracefully long enough to deliver the reason. Immediate terminate
+      // discards it and makes permission changes look like network failures.
+      try {
+        conn.ws.send(JSON.stringify({ type: "connection_closed", ...reason }));
+        conn.ws.close(reason.retryable ? 1012 : 4003, reason.code);
+        const timeout = setTimeout(() => conn.ws.terminate(), 1000);
+        timeout.unref();
+        conn.ws.once("close", () => clearTimeout(timeout));
+      } catch { conn.ws.terminate(); }
+    } else if (conn.ws.readyState !== WebSocket.CLOSED) conn.ws.terminate();
   }
 
   startHeartbeat(): void {
@@ -533,6 +568,7 @@ export class WebSocketTunnel {
   close(): void {
     clearInterval(this.heartbeat);
     this.heartbeat = undefined;
-    for (const conn of this.sockets) this.retire(conn, new RelayError("Backend shutting down"));
+    for (const conn of this.sockets) this.retire(conn, new RelayError("Backend shutting down"),
+      { code: "server_shutdown", message: "服务器正在重启，连接将自动恢复", retryable: true });
   }
 }

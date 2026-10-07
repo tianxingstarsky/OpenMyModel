@@ -68,10 +68,19 @@ To let the server access this node securely, set a node API key in the inference
 
 ### 2. Connect the desktop node to your server
 
-Open **Cloud Connection** in the desktop app, enter your deployed server address and administrator password, then click **Connect**. Use an HTTPS URL for a public service. After the tunnel connects, the desktop node appears under **Nodes** in the admin console. Never give the administrator password to API clients.
+Open **Cloud Connection** in the desktop app. Personal mode uses the administrator password after automatic mode detection. In aggregation mode, apply to become a compute provider from `/console` and wait for administrator approval before creating a node. Relay-mode users can create their own nodes directly; forwarding access follows their time subscription.
+
+For either account mode, create a node and click **Copy connection information**, then **Paste web connection information** on the desktop. The app fills the address and node token together, verifies the server's current mode, and connects when you click **Connect**. Separate address and token copying remains available.
+
+<p align="center"><img src="docs/assets/guide-desktop-connection.png" alt="Copy node connection information from the web console into the desktop app" width="560"></p>
+<p align="center"><sub>Actual interface with demonstration data and an invalid sample token.</sub></p>
+
+You can connect before starting the model. Until the model is ready, the node displays a waiting state and receives no inference requests. Model startup, shutdown and capacity changes update the server automatically. Public addresses use HTTPS by default; only loopback addresses allow HTTP.
 
 <p align="center"><img src="云端连接.png" alt="Desktop cloud connection and local key management" width="960"></p>
-<p align="center"><sub>This image shows where to find the connection settings; the model and cloud were disconnected when it was captured. Start the model, enter your own server address and click **Connect** when following the steps.</sub></p>
+<p align="center"><sub>This earlier desktop screenshot identifies the connection settings. The current version adds complete connection information import and mode-specific credential fields.</sub></p>
+
+Credentials and personal-node identities are saved per server. Switching addresses clears the previous server's credentials. Transient network failures retry after 2, 4, 8, 16 and 32 seconds; Cancel Connection stops recovery. Token replacement, node revocation, permission suspension, disabled accounts, mode changes and another device taking over the same node show a specific reason and stop automatic retries.
 
 The local API key manager on this desktop page is for direct access to the node. Those keys stay on the desktop and do not provide server-side token metering. Use a gateway key when you need unified routing, caller limits and server usage statistics.
 
@@ -129,6 +138,10 @@ After activation:
 1. Set input and output prices for each model in **Model Scheduling**, in currency units per million tokens. Cached tokens do not have separate pricing yet.
 2. Users open `https://your-domain/console`, register or sign in with an email verification code, and manage their own usage, orders, top-ups and API keys.
 3. Users call `/v1` with their own API keys. Admins can review users and orders under **Users & Orders**, and inspect platform request and token activity under **Usage**.
+
+<p align="center"><img src="docs/assets/guide-compute-application.png" alt="Apply for compute-provider access before node connection controls become available" width="100%"></p>
+
+The console refreshes approval and node states automatically while preserving application drafts. Expired sessions or removed permissions clear any open node-token dialog.
 
 Provider-mode prebilling currently supports text chat messages. llama.cpp nodes use `/apply-template` and `/tokenize`; vLLM nodes use its chat `/tokenize` endpoint. Before opening registration and payments, test SMTP delivery and Alipay asynchronous notifications on the HTTPS domain.
 

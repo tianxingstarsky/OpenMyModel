@@ -493,7 +493,9 @@ test("provider dashboards, keys, usage and orders remain isolated between accoun
     const nodeAuth = sessions.authenticateRelayNodeToken(alphaNode.token, "127.0.0.1");
     assert.equal(typeof nodeAuth === "string" ? nodeAuth : nodeAuth.ownerUserId, "user-alpha");
     sessions.reviewComputeProvider("user-alpha", { status: "suspended", reviewNote: "维护" });
-    assert.equal(sessions.authenticateRelayNodeToken(alphaNode.token, "127.0.0.1"), "invalid");
+    assert.deepEqual(sessions.authenticateRelayNodeToken(alphaNode.token, "127.0.0.1"), {
+      status: "invalid", code: "compute_provider_suspended", message: "算力提供权限已暂停，请在网页查看管理员说明", retryable: false,
+    });
     assert.throws(() => sessions.rotateRelayNodeToken("user-alpha", alphaNode.nodeId), /管理员开通/);
     assert.deepEqual(sessions.userDashboard("user-alpha").nodes, []);
     assert.equal(sessions.userDashboard("user-alpha").computeProvider.canManageNodes, false);
